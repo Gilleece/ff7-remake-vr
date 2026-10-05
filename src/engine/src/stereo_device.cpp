@@ -47,6 +47,27 @@ std::uint64_t pack(std::uint32_t w, std::uint32_t h) { return w | (static_cast<s
 std::uint32_t unpack_w(std::uint64_t v) { return static_cast<std::uint32_t>(v); }
 std::uint32_t unpack_h(std::uint64_t v) { return static_cast<std::uint32_t>(v >> 32); }
 
+// A view from the host that can be rendered: finite values, a unit orientation, a position
+// within 100 m of the origin and a field of view that opens in both directions, less than
+// 86 degrees from the axis on each side. A runtime that loses tracking may hand out
+// undefined poses (OpenXR leaves them undefined without the valid bits); one of those
+// would put NaNs into the view matrices.
+bool usable(const HostPose& p) {
+    const float v[] = {p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w, p.position.x, p.position.y, p.position.z};
+    for (float x : v)
+        if (!std::isfinite(x)) return false;
+    const float n = p.orientation.x * p.orientation.x + p.orientation.y * p.orientation.y + p.orientation.z * p.orientation.z +
+                    p.orientation.w * p.orientation.w;
+    return n > 0.8f && n < 1.2f && std::fabs(p.position.x) < 100.0f && std::fabs(p.position.y) < 100.0f && std::fabs(p.position.z) < 100.0f;
+}
+bool usable(const HostView& v) {
+    const HostFov& f = v.fov;
+    const float a[] = {f.angleLeft, f.angleRight, f.angleUp, f.angleDown};
+    for (float x : a)
+        if (!std::isfinite(x) || std::fabs(x) > 1.5f) return false;
+    return usable(v.pose) && f.angleLeft < f.angleRight - 0.01f && f.angleDown < f.angleUp - 0.01f;
+}
+
 // Game thread only.
 struct GameState {
     std::uint32_t eye_w = 0, eye_h = 0;    // committed: what the eye target has or is about to get
@@ -62,6 +83,7 @@ struct GameState {
     bool frame_has_views = false;  // this Tick got fresh views from the host
     int host_gap = 0;          // consecutive stereo frames without a host frame
     std::uint64_t held_frames = 0;
+    std::uint64_t unusable_views = 0;  // frames whose views from the host were not usable (kept the last good ones)
     int logged_order = 0;
     // last eye cameras, for diagnostics
     FRotator cam_rot{};
@@ -564,6 +586,16 @@ void tick_begin() {
         GameFrame f;
         h->begin_game_frame(wanted, f);
         ++g_count.host_frames;
+        if (f.views_valid && !(usable(f.views[0]) && usable(f.views[1]) && usable(f.head))) {
+            // Keep the last good views and head; the image is still handed over with the
+            // views it was rendered with, so the runtime re-projects it correctly.
+            if (g.unusable_views++ < 5 || (g.unusable_views & 1023) == 0)
+                log::warn("stereo: unusable views from the host (frame {}, {} so far): the last good views are kept", f.frame_id,
+                          g.unusable_views);
+            f.views[0] = g.views[0];
+            f.views[1] = g.views[1];
+            f.head = g.frame.head;
+        }
         g.frame = f;
         if (f.views_valid) {
             g.views[0] = f.views[0];
@@ -630,7 +662,7 @@ std::string status() {
     return std::format(
         "wanted={} active={} eye={}x{} want={}x{} rt_texture={}x{} fmt={} mirror={} scale={:.2f} decouple_pitch={} positional={} "
         "ticks={} stereo_draws={} transitions={} view_offset_calls={} proj_calls={} rect_calls={} render_texture_calls={} "
-        "rt_size_calls={} reallocs={} frame_end_queued={} frame_end_run={} frame_end_failed={} fifo_dropped={} held_frames={} "
+        "rt_size_calls={} reallocs={} frame_end_queued={} frame_end_run={} frame_end_failed={} fifo_dropped={} held_frames={} unusable_views={} "
         "sysres={} latest_frame={} frame_ms_avg={:.2f} p50={:.2f} p95={:.2f} max={:.2f} (n={}, {}) | {}",
         g_wanted.load() ? 1 : 0, g_active.load() ? 1 : 0, unpack_w(v), unpack_h(v), g.want_w, g.want_h, g_count.rt_tex_w.load(),
         g_count.rt_tex_h.load(),
@@ -638,7 +670,7 @@ std::string status() {
         g_settings.world_scale.load(), g_settings.decouple_pitch.load() ? 1 : 0, g_settings.positional.load() ? 1 : 0, g.ticks,
         g.stereo_draws, g.transitions, g_count.view_offset.load(), g_count.projection.load(), g_count.adjust_rect.load(),
         g_count.render_texture.load(), g_count.calc_rt_size.load(), g_count.realloc_yes.load(), g_count.frame_end_queued.load(),
-        g_count.frame_end_run.load(), g_count.frame_end_failed.load(), g_fifo_dropped.load(), g.held_frames,
+        g_count.frame_end_run.load(), g_count.frame_end_failed.load(), g_fifo_dropped.load(), g.held_frames, g.unusable_views,
         fixes::system_resolution_overridden() ? 1 : 0, g_latest_frame_id.load(), g_timer.last_avg, g_timer.last_p50, g_timer.last_p95,
         g_timer.last_max, g_timer.last_n, g_timer.last_window_stereo ? "stereo" : "mixed/mono", host_desc);
 }
