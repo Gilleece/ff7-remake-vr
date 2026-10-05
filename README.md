@@ -26,7 +26,7 @@ the left eye's data (the fix is `[stereo] ao_fix`, on by default).
 Much of the rest was built and tested on a PC without a headset, with a simulated
 headset (an internal test mode and SteamVR's "null" driver, a virtual headset that
 shows the images in a window) and with screenshots of each eye. Some faults are known
-in the headset and not solved yet (the picture looks washed out, skin indoors), and
+in the headset and not solved yet (the picture looks washed out), and
 battles, conversations, cutscenes and movies have not been tried in a headset at all.
 Expect rough edges, and read
 [Known problems and what has not been tested](#known-problems-and-what-has-not-been-tested)
@@ -316,9 +316,12 @@ Known problems:
   `[stereo_cvars]` at the end, remove the `;` at the start of the line
   `; r.BloomQuality = 0` (console variables in that section apply only while 3D
   runs).
-- **Indoors, exposed skin on characters shows a white pixelated pattern.** Outdoors
-  it looks fine. Seen in the first interior of the save used in testing; cause not
-  known yet.
+- **Indoors, exposed skin on characters showed white square blocks** (fixed, not yet
+  confirmed in the headset). Reproduced with the simulated headset in the first
+  interior of the save used in testing, in both eyes; the game's tiled lighting pass
+  mishandles the eye views. The fix (`[stereo] light_fix = 1`, on by default) removed
+  the blocks in every capture. If they are still there in the headset, say so;
+  `light_fix = 0` brings back the old behaviour.
 - **Posters on a sandwich board** in the Sector 7 slums street sat on the board only
   when looked at directly and drifted off it otherwise. This was seen before the
   right-eye ghost fix and has not been checked since.

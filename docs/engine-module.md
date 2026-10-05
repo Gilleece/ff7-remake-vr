@@ -21,7 +21,7 @@ global are written, and two single bytes of code can be changed:
 | `GSystemResolution` | engine global | only while stereo renders: set to the eye target size, because this build sizes its scene buffers from it (`docs/re/engine.md` section 8); the game's value is put back when stereo stops |
 | windowed-fullscreen view rect | the `jne` at RVA `0x3018fb8` in `ULocalPlayer::CalcSceneView` | only while stereo renders: made unconditional so that, in windowed fullscreen, the game does not replace the eye rects with the full screen |
 | the game window's mode | `r.SetRes` | the first time stereo becomes active in exclusive or windowed fullscreen: switched to a normal window (`[stereo] vr_window`), back when stereo is switched off (see "Window modes") |
-| light sort-key immediate | one byte in `FDeferredShadingSceneRenderer::RenderLights` | only when `[stereo] light_fix = 1` or the `stereo lightfix 1` command |
+| light sort-key immediate | one byte in `FDeferredShadingSceneRenderer::RenderLights` | only while stereo renders, with `[stereo] light_fix = 1` (default): the skin lighting fix (below); the game's byte is put back in mono |
 | Square Enix's bloom reduce pass (`Process`) | inline hook, render thread | `[stereo] bloom_fix` (default on): for the first level of a view that does not start at the origin, an RHI command arms the right-eye bloom fix (below) |
 | D3D11 immediate context draw/dispatch/clear/copy functions | inline hooks, RHI thread | installed at the first stereo frame when the bloom fix or the ambient occlusion fix is on (they act on single DrawIndexed calls), or by the first GPU trace; otherwise not installed |
 | `FRenderTargetPool::FindFreeElement` | inline hook, render thread | only after `gpu names on` (GPU trace labels) |
@@ -389,7 +389,7 @@ hidden buttons, is inferred from the filter's output.
 | `decoupled_pitch` | `1` | drop the game camera's pitch and roll |
 | `positional` | `1` | apply head position |
 | `mirror` | `crop` | desktop window in stereo: `crop` (left eye, centre crop at the window's aspect), `left`, `right`, `both` (side by side, letterboxed), `off` |
-| `light_fix` | `0` | light sort-key patch (see `docs/re/engine.md` section 6) |
+| `light_fix` | `1` | light sort-key patch while stereo renders: white blocks on skin indoors (see "Skin lighting fix"; `docs/re/engine.md` section 6) |
 | `bloom_fix` | `1` | right-eye bloom fix (below) |
 | `ao_fix` | `1` | right-eye ambient occlusion fix (below) |
 | `vr_window` | `1280x720` | window size the game is switched to while VR renders in a fullscreen mode; `0` keeps the mode (see "Window modes") |
@@ -447,7 +447,7 @@ Through the dev pipe (`[dev] pipe = 1`, `tools\dev\send-input.ps1 -Pipe "<comman
 | `stereo eye <w> <h>`, `stereo fov <l> <r> <u> <d>`, `stereo ipd <mm>`, `stereo motion <...>` | fixed host values |
 | `stereo head <yaw> [pitch]` | fixed host: a fixed head rotation in degrees (left and up positive), added to the motion script |
 | `stereo scale <f>`, `stereo pitch <0\|1>`, `stereo positional <0\|1>` | camera settings |
-| `stereo lightfix <0\|1>` | light sort-key patch |
+| `stereo lightfix <0\|1>` | skin lighting fix on/off (the light sort-key patch, in place while stereo renders); replies whether the patch is in place now |
 | `stereo log <n>` | log the eye cameras of the next n stereo frames |
 | `stereo bloomfix [0\|1]` | right-eye bloom fix on/off, with its counters (reduce passes seen, commands queued, draws fixed, misses) |
 | `stereo aofix [0\|1]` | right-eye ambient occlusion fix on/off, with its counters (draws fixed, failures); one per stereo frame |
@@ -698,6 +698,57 @@ animation between two captures; the ghost in the headset session was seen in sha
 eye is the same with the fix on and off (differences at the level of two captures without
 any change).
 
+## Skin lighting fix
+
+Indoors, exposed skin on characters (faces, arms, legs: the subsurface materials) was covered
+in white, square blocks in the eye images. Outdoors it was not seen. With the light sort-key
+patch (`docs/re/engine.md` section 6) the blocks are gone in both eyes.
+
+What happens (one-frame GPU traces of the first room, `gpu trace`): the lights that get
+Square Enix's sort-key bit `0x40` are rendered by a tiled lighting compute pass, one
+`Dispatch 192 204 1` per view into `SceneColorTiled` (16x16 pixel groups covering a
+3072x3264 eye), each after a one-group dispatch that writes a 60-byte buffer, with two
+unordered-access buffers of fixed size (691200 and 2764800 bytes) bound. With the patch
+those lights also get bit `0x20`, so they leave that group: the tiled dispatches are gone
+from the frame and the same lights are drawn one at a time as light volumes per eye
+(`DrawIndexed 2376` at each eye's viewport, 7 for the left eye and 8 for the right in the
+traced frame). The edges of the white
+blocks lie on a 16-pixel grid in eye coordinates (edge positions modulo 16 cluster at 0,
+15 and 1 in both eyes), the tile size of that pass. Which part of the tiled pass goes wrong
+for the eye views (the shader or its fixed-size buffers) was not established; the same
+patch is the community fix for screens that are not 16:9, which fits a 16:9 assumption in
+that pass. Why only indoors is inferred: the street outside had no fault in any capture,
+presumably because no light there takes the tiled path.
+
+`src/engine/src/fixes.cpp` (`set_light_fix`, `light_fix_stereo`): with `[stereo] light_fix =
+1` (default) the byte is patched when the engine starts rendering in stereo and put back
+when it renders mono again (the virtual screen, menus, loading screens, stereo switched
+off), so the flat game runs the game's own code. `stereo lightfix 0|1` switches the
+setting; the log shows `fixes: light sort-key patch on` / `off (game default)` at every
+change.
+
+Cost: not measured; the per-light path draws one light volume per light and eye instead of
+one dispatch per eye.
+
+Evidence (Null backend, eyes 3072x3264 with the Quest 3 class asymmetric FOV, foveation
+`quality`, `r.BloomQuality 0`, the player's ini; first room of the latest save, Cloud and
+Tifa in view; `captures/skin/`):
+
+| Captures | Light fix | Result |
+|---|---|---|
+| `r1/a01_third`, `b01_fovoff`, `b02_aofix0`, `b04_bloomfix0`, `b05_base_again` | off | right eye: white blocks on Cloud's arm and on Tifa's face, arms, belly and legs; left eye clean (third person). Foveation off, the occlusion fix off or the bloom fix off do not change it (`r1/sheet_bisect.png`) |
+| `r1/b03_lightfix1` | on | both eyes clean |
+| `r1/b06_swap` (`stereo swap 1`) | off | the blocks move to the eye rendered into the right half of the target |
+| `r2/c01`-`c04` (third person), `c05`-`c07` (first person) | off, on, off, on / off, on, off | blocks with the fix off every time, none with it on; in first person both eyes have blocks with it off (`r2/sheet_third_lf.png`, `sheet_first_lf.png`) |
+| `r3/d01`-`d06` (the default build) | on by default, off, on; first person on, off, on after `stereo off` and `stereo on` | blocks only with `stereo lightfix 0` (`r3/sheet_third_fix_nofix_fix.png`, `sheet_first_fix_nofix_fix.png`); near-white pixels in Tifa's region: 83815 with the fix off, 3404 with it on (her white top) |
+| traces `r2/tr_lf0`, `r2/tr_lf1` | off / on | the tiled dispatches (events 2708, 2710) only with the fix off; per-light volumes (2702-2716 and later) only with it on |
+
+The occlusion fix kept working with the light fix on (`stereo aofix` in run `r3`: `applied`
+2670, then 3219 after a `stereo off` / `stereo on`, `failed 0`; whether it is still exactly
+once per frame was not counted in that run). The bloom fix was idle in these runs
+(`r.BloomQuality 0`), so switching it off in `b04` changed nothing either. The flat game (`stereo off`) with
+the patch removed looks as before (`r3/flat_after_off.png`). Not confirmed in a headset yet.
+
 ## Movies
 
 The game plays its pre-rendered movies (`.emov` files under
@@ -792,7 +843,7 @@ movie (no `MediaPlayer` object existed on the title screen or in these areas).
 |---|---|
 | Right-eye ghost | fixed, see "Right-eye bloom fix" |
 | Eye differences while walking and turning (shadows, lights, reflections, particles, fog, sky, culling) | none found apart from the ghost. An NPC visible at the edge of one eye only (`runM/m04_turned_*`) is outside the other eye's field of view (asymmetric FOV), not culled |
-| Light sort-key patch outdoors | no visible difference (`runM/g_lightfix.png`; the differences are idle animation) |
+| Light sort-key patch outdoors | no visible difference (`runM/g_lightfix.png`; the differences are idle animation). Indoors it removes white blocks on skin, see "Skin lighting fix" |
 | Camera yaw (mouse, stick) | turns the player smoothly, as in the game; artificial smooth rotation can be uncomfortable for some players (no snap turn yet) |
 | Camera pitch with decoupled pitch | with `[camera] boom = game` the game moves the camera along its boom with pitch: at -34 degrees (looking down from above) the eyes are 2.4 m higher than at 0 (camera Z 99.7 -> 342.9, `stereo views`), at +10 degrees they sit at counter height (`runM/m05_pitch_down_L.png`, `m06_pitch_up_L.png`). Fixed by the level boom (default), see "Camera modes: evidence" |
 | Commands menu | shown on the UI layer, the scene keeps rendering in stereo |
