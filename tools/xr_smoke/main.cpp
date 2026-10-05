@@ -91,6 +91,7 @@ struct Options {
     int64_t recenterAt = -1;       // frame index at which Recenter() is called
     bool quad = false;             // submit the left eye image as a quad layer only (no projection layer)
     bool quadOver = false;         // projection layer plus the quad layer on top
+    bool alphaQuad = false;        // projection layer, an opaque grey panel and an alpha-blended UI-style quad on it
 };
 
 // Quad used by --quad / --quad-over: the left eye image on a 1.6 m wide panel 2 m ahead.
@@ -128,6 +129,9 @@ void PrintUsage() {
         "  --quad                      quad layer only: the left eye image on a 1.6 m panel 2 m ahead;\n"
         "                              captures are checked for the panel's position and orientation per eye\n"
         "  --quad-over                 projection layer plus that quad on top\n"
+        "  --alpha-quad                projection layer, an opaque grey panel and a quad with Unreal-style\n"
+        "                              inverted premultiplied alpha on top (empty | 50%% red | opaque white);\n"
+        "                              captures are checked for the blended colours\n"
         "  --verbose                   debug log output\n");
 }
 
@@ -219,6 +223,8 @@ bool ParseArgs(int argc, char** argv, Options& o) {
             o.quad = true;
         } else if (a == "--quad-over") {
             o.quadOver = true;
+        } else if (a == "--alpha-quad") {
+            o.alphaQuad = true;
         } else if (a == "--verbose" || a == "-v") {
             o.verbose = true;
         } else {
@@ -544,6 +550,43 @@ bool VerifyQuadMarker(const std::string& path, const xr::View& view, const xr::P
     return ok;
 }
 
+// --alpha-quad: the UI-style quad (thirds: empty, 50% red, opaque white) over the
+// opaque sRGB 128 grey panel must blend like an OpenXR runtime blends a
+// premultiplied layer: grey, (205, 92, 92), white.
+bool VerifyAlphaQuad(const std::string& path, const xr::View& view, const xr::Pose& quadPose, float qw) {
+    int w = 0, h = 0, n = 0;
+    unsigned char* px = stbi_load(path.c_str(), &w, &h, &n, 3);
+    if (!px) {
+        Fail("cannot read {}", path);
+        return false;
+    }
+    const Rgb expected[3] = {{128, 128, 128}, {205, 92, 92}, {255, 255, 255}};
+    const char* names[3] = {"empty third (grey panel shows through)", "50% red third", "opaque white third"};
+    bool ok = true;
+    for (int i = 0; i < 3; ++i) {
+        const float lx = (float(i) - 1.0f) * qw / 3.0f;
+        const xr::Vec3 r = xr::QuatRotate(quadPose.orientation, xr::Vec3{lx, 0, 0});
+        double x = 0, y = 0;
+        if (!ProjectToEye(view, xr::Vec3{r.x + quadPose.position.x, r.y + quadPose.position.y, r.z + quadPose.position.z}, w, h, &x, &y)) {
+            Fail("{}: test point behind the eye", path);
+            ok = false;
+            continue;
+        }
+        const int xi = std::clamp(static_cast<int>(x), 0, w - 1), yi = std::clamp(static_cast<int>(y), 0, h - 1);
+        const unsigned char* p = px + (size_t(yi) * w + xi) * 3;
+        const Rgb c{p[0], p[1], p[2]};
+        if (!Near(c, expected[i], 8)) {
+            Fail("{}: {} is {},{},{} at {},{}; expected {},{},{}", path, names[i], c.r, c.g, c.b, xi, yi, expected[i].r, expected[i].g,
+                 expected[i].b);
+            ok = false;
+        } else {
+            Info("{}: {} = {},{},{} (expected {},{},{})", path, names[i], c.r, c.g, c.b, expected[i].r, expected[i].g, expected[i].b);
+        }
+    }
+    stbi_image_free(px);
+    return ok;
+}
+
 // ---------------------------------------------------------------------------
 // Statistics
 // ---------------------------------------------------------------------------
@@ -613,6 +656,9 @@ struct Run {
     uint32_t eyeW = 0, eyeH = 0;
     std::vector<std::pair<uint32_t, std::string>> capturePrefixes;
     xr::LayerHandle quadLayer = 0;
+    xr::LayerHandle greyLayer = 0, uiLayer = 0;  // --alpha-quad
+    ComPtr<ID3D11Texture2D> greyTex, uiTex;
+    static constexpr uint32_t kUiW = 192, kUiH = 108;
     std::vector<std::pair<uint64_t, xr::FrameInfo>> capturedFrames;  // frameId -> views, for quad checks
     std::mutex capturedMutex;
 
@@ -680,6 +726,26 @@ struct Run {
         sd.viewFormat = opt.source->view;
         sd.encoding = opt.source->linear ? xr::ColorEncoding::Linear : xr::ColorEncoding::Srgb;
         xr::QuadLayer q;
+        xr::QuadLayer layers[2];
+        if (uiLayer) {
+            // Opaque grey panel, then the UI-style quad on it (back to front).
+            layers[0].layer = greyLayer;
+            layers[0].texture = greyTex.Get();
+            layers[0].viewFormat = DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+            layers[0].encoding = xr::ColorEncoding::Linear;
+            layers[1] = layers[0];
+            layers[1].layer = uiLayer;
+            layers[1].texture = uiTex.Get();
+            layers[1].alphaBlend = true;
+            layers[1].sourceAlpha = xr::SourceAlpha::PremultipliedInverted;
+            for (auto& l : layers) {
+                l.pose = QuadPose();
+                l.width = kQuadWidth;
+                l.height = kQuadWidth * 9.0f / 16.0f;
+            }
+            sd.quads = layers;
+            sd.quadCount = 2;
+        }
         if (quadLayer) {
             q.layer = quadLayer;
             q.texture = pattern->Texture();
@@ -913,6 +979,47 @@ int main(int argc, char** argv) {
         Info("quad layer: {}x{} {} ({} images), {:.2f} x {:.2f} m at {:.1f} m", si.width, si.height, xr::DxgiFormatName(si.format),
              si.imageCount, kQuadWidth, run.QuadHeight(), kQuadDistance);
     }
+    if (opt.alphaQuad) {
+        // BGRA8 typeless read through the sRGB view, like the game's UI target.
+        auto make = [&](bool ui, ComPtr<ID3D11Texture2D>* out) {
+            std::vector<uint8_t> px(size_t(Run::kUiW) * Run::kUiH * 4);
+            for (uint32_t y = 0; y < Run::kUiH; ++y)
+                for (uint32_t x = 0; x < Run::kUiW; ++x) {
+                    uint8_t* p = &px[(size_t(y) * Run::kUiW + x) * 4];  // B G R A
+                    if (!ui) {
+                        p[0] = p[1] = p[2] = 128;
+                        p[3] = 255;
+                    } else if (x < Run::kUiW / 3) {
+                        p[0] = p[1] = p[2] = 0;  // empty: alpha = 1 - coverage = 1
+                        p[3] = 255;
+                    } else if (x < 2 * Run::kUiW / 3) {
+                        p[0] = p[1] = 0;
+                        p[2] = 188;  // linear 0.5 (premultiplied red at 50% coverage), sRGB encoded
+                        p[3] = 128;  // 1 - coverage
+                    } else {
+                        p[0] = p[1] = p[2] = 255;
+                        p[3] = 0;  // opaque
+                    }
+                }
+            D3D11_TEXTURE2D_DESC d{};
+            d.Width = Run::kUiW;
+            d.Height = Run::kUiH;
+            d.MipLevels = d.ArraySize = 1;
+            d.Format = DXGI_FORMAT_B8G8R8A8_TYPELESS;
+            d.SampleDesc.Count = 1;
+            d.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+            D3D11_SUBRESOURCE_DATA init{px.data(), Run::kUiW * 4, 0};
+            return SUCCEEDED(dev->CreateTexture2D(&d, &init, out->GetAddressOf()));
+        };
+        const xr::QuadLayerCreateDesc qd{Run::kUiW, Run::kUiH, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB};
+        if (!make(false, &run.greyTex) || !make(true, &run.uiTex) || be->CreateQuadLayer(qd, &run.greyLayer) != xr::Result::Ok ||
+            be->CreateQuadLayer(qd, &run.uiLayer) != xr::Result::Ok) {
+            Fail("alpha quad setup failed");
+            return 1;
+        }
+        Info("alpha quad: {}x{} UI-style image over a grey panel, {:.2f} m wide at {:.1f} m", Run::kUiW, Run::kUiH, kQuadWidth,
+             kQuadDistance);
+    }
     Info("source texture: {}x{} {}", run.eyeW * 2, run.eyeH, xr::DxgiFormatName(opt.source->texture));
 
     if (!opt.capturePrefix.empty()) {
@@ -940,6 +1047,18 @@ int main(int argc, char** argv) {
             if (!r.ok) {
                 Fail("capture of frame {} failed: {}", r.frameId, r.error);
                 ok = false;
+                continue;
+            }
+            if (opt.alphaQuad) {
+                const xr::FrameInfo* fi = nullptr;
+                for (const auto& [id, info] : run.capturedFrames)
+                    if (id == r.frameId) fi = &info;
+                if (!fi) {
+                    Fail("no views recorded for captured frame {}", r.frameId);
+                    ok = false;
+                    continue;
+                }
+                for (int e = 0; e < 2; ++e) ok = VerifyAlphaQuad(r.files[e], fi->views[e], run.QuadPose(), kQuadWidth) && ok;
                 continue;
             }
             if (opt.quad) {

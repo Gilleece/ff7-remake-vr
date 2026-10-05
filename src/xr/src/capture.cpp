@@ -224,4 +224,80 @@ bool CaptureManager::WritePng(const std::string& pathUtf8, const Image& img, std
     }
 }
 
+bool WriteTexturePng(ID3D11DeviceContext* ctx, ID3D11Texture2D* texture, const std::string& pathUtf8, std::string* error) {
+    std::string dummy;
+    std::string& err = error ? *error : dummy;
+    if (!ctx || !texture) {
+        err = "no context or texture";
+        return false;
+    }
+    D3D11_TEXTURE2D_DESC d{};
+    texture->GetDesc(&d);
+    const DXGI_FORMAT fam = TypelessFamily(d.Format);
+    const bool bgra = fam == DXGI_FORMAT_B8G8R8A8_TYPELESS;
+    if (!bgra && fam != DXGI_FORMAT_R8G8B8A8_TYPELESS) {
+        err = std::string("unsupported format ") + DxgiFormatName(d.Format);
+        return false;
+    }
+    if (d.SampleDesc.Count != 1) {
+        err = "multisampled texture";
+        return false;
+    }
+    ComPtr<ID3D11Device> dev;
+    texture->GetDevice(&dev);
+    D3D11_TEXTURE2D_DESC sd = d;
+    sd.MipLevels = 1;
+    sd.ArraySize = 1;
+    sd.Usage = D3D11_USAGE_STAGING;
+    sd.BindFlags = 0;
+    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    sd.MiscFlags = 0;
+    ComPtr<ID3D11Texture2D> staging;
+    HRESULT hr = dev->CreateTexture2D(&sd, nullptr, &staging);
+    if (FAILED(hr)) {
+        err = "staging texture: " + HResultString(hr);
+        return false;
+    }
+    ctx->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, texture, D3D11CalcSubresource(0, 0, d.MipLevels), nullptr);
+    D3D11_MAPPED_SUBRESOURCE m{};
+    hr = ctx->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &m);
+    if (FAILED(hr)) {
+        err = "map: " + HResultString(hr);
+        return false;
+    }
+    std::vector<uint8_t> rgba(size_t(d.Width) * d.Height * 4);
+    for (uint32_t y = 0; y < d.Height; ++y) {
+        const uint8_t* s = static_cast<const uint8_t*>(m.pData) + size_t(y) * m.RowPitch;
+        uint8_t* o = rgba.data() + size_t(y) * d.Width * 4;
+        for (uint32_t x = 0; x < d.Width; ++x, s += 4, o += 4) {
+            o[0] = bgra ? s[2] : s[0];
+            o[1] = s[1];
+            o[2] = bgra ? s[0] : s[2];
+            o[3] = s[3];
+        }
+    }
+    ctx->Unmap(staging.Get(), 0);
+    try {
+        const std::filesystem::path p(Utf8ToWide(pathUtf8));
+        if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path());
+        FILE* f = nullptr;
+        if (_wfopen_s(&f, p.c_str(), L"wb") != 0 || !f) {
+            err = "cannot open " + pathUtf8;
+            return false;
+        }
+        auto write = [](void* c, void* data, int size) { fwrite(data, 1, static_cast<size_t>(size), static_cast<FILE*>(c)); };
+        const int ok = stbi_write_png_to_func(write, f, static_cast<int>(d.Width), static_cast<int>(d.Height), 4, rgba.data(),
+                                              static_cast<int>(d.Width * 4));
+        const bool closed = fclose(f) == 0;
+        if (!ok || !closed) {
+            err = "png encode/write failed for " + pathUtf8;
+            return false;
+        }
+    } catch (const std::exception& ex) {
+        err = ex.what();
+        return false;
+    }
+    return true;
+}
+
 }  // namespace ff7vr::xr

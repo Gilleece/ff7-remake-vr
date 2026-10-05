@@ -173,7 +173,7 @@ struct BlitConstants {
     float uvOffset[2];
     float uvScale[2];
     uint32_t decodeSrgb;
-    uint32_t forceOpaque;
+    uint32_t alphaMode;  // BlitAlpha
     uint32_t pad[2];
 };
 
@@ -356,7 +356,9 @@ bool Blitter::Transfer(ID3D11DeviceContext* ctx, const BlitSource& src, const Re
     const uint32_t dstH = dst.height ? std::min(dst.height, dd.Height) : dd.Height;
     const bool fits = rect.width <= dstW && rect.height <= dstH;
 
-    const bool canCopy = fits && sd.SampleDesc.Count == 1 && dd.SampleDesc.Count == 1 &&
+    // A copy keeps the source's alpha bits: right for opaque and premultiplied sources only.
+    const bool alphaAsIs = src.alpha == BlitAlpha::Opaque || src.alpha == BlitAlpha::Premultiplied;
+    const bool canCopy = fits && alphaAsIs && sd.SampleDesc.Count == 1 && dd.SampleDesc.Count == 1 &&
                          TypelessFamily(sd.Format) == TypelessFamily(dd.Format) && srcBitsSrgb == dstBitsSrgb &&
                          TypelessFamily(srcFmt) == TypelessFamily(dstFmt);
     if (canCopy) {
@@ -429,7 +431,7 @@ bool Blitter::Transfer(ID3D11DeviceContext* ctx, const BlitSource& src, const Re
     c.uvScale[0] = float(readRect.width) / readW;
     c.uvScale[1] = float(readRect.height) / readH;
     c.decodeSrgb = (src.encoding == ColorEncoding::Srgb && !IsSrgbFormat(readFmt)) ? 1u : 0u;
-    c.forceOpaque = 1;
+    c.alphaMode = static_cast<uint32_t>(src.alpha);
     memcpy(m.pData, &c, sizeof(c));
     ctx->Unmap(cb_.Get(), 0);
 

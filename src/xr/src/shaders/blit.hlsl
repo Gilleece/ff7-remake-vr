@@ -8,7 +8,8 @@ cbuffer BlitConstants : register(b0)
     float2 uvOffset;   // source UV of the destination's top-left corner
     float2 uvScale;    // source UV extent of the destination
     uint   decodeSrgb; // 1: source values are sRGB-encoded in a UNORM view -> decode
-    uint   forceOpaque;// 1: write alpha = 1
+    uint   alphaMode;  // 0: write alpha = 1; 1: keep (premultiplied); 2: straight -> premultiplied;
+                       // 3: inverted premultiplied (alpha = 1 - coverage) -> premultiplied
     uint2  pad;
 };
 
@@ -45,7 +46,11 @@ float4 PSMain(VSOut i) : SV_Target
     float4 c = src.SampleLevel(samp, float3(uv, 0.0), 0.0);
     if (decodeSrgb != 0)
         c.rgb = SrgbToLinear(c.rgb);
-    if (forceOpaque != 0)
+    if (alphaMode == 0)
         c.a = 1.0;
+    else if (alphaMode == 2)
+        c.rgb *= c.a;
+    else if (alphaMode == 3)
+        c.a = 1.0 - c.a;
     return c;
 }

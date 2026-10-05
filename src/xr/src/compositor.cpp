@@ -65,7 +65,9 @@ bool Compositor::Init(ID3D11Device* device, const Logger* log) {
     bld.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
     if (SUCCEEDED(hr)) hr = device->CreateBlendState(&bld, &opaque_);
     bld.RenderTarget[0].BlendEnable = TRUE;
-    bld.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
+    // Layer images hold premultiplied alpha, which is what OpenXR runtimes blend
+    // (XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT is never set).
+    bld.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
     bld.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
     bld.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
     bld.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;

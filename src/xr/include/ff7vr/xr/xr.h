@@ -90,6 +90,7 @@
 #include <vector>
 
 struct ID3D11Device;
+struct ID3D11DeviceContext;
 struct ID3D11Texture2D;
 
 namespace ff7vr::xr {
@@ -288,6 +289,18 @@ enum class LayerSpace {
     Head,   // relative to the head (OpenXR VIEW space): the quad follows the head
 };
 
+// How a blended quad's source texture stores transparency. A quad layer's
+// image always holds premultiplied alpha (what OpenXR assumes when
+// XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT is not set, and what the Null
+// compositor blends with); other conventions are converted when the content is
+// copied in (shader blit instead of a plain copy).
+enum class SourceAlpha {
+    Premultiplied,          // rgb already multiplied by alpha, alpha = coverage
+    Straight,               // rgb not multiplied, alpha = coverage
+    PremultipliedInverted,  // rgb premultiplied, alpha = 1 - coverage (Unreal's convention for
+                            // translucency and UI targets: composite = background * a + rgb)
+};
+
 struct QuadLayer {
     LayerHandle layer = 0;
     // New content: this region is copied into the layer's swapchain (scaled
@@ -302,7 +315,8 @@ struct QuadLayer {
     LayerSpace space = LayerSpace::World;
     Pose pose{};                        // centre of the quad; the image faces +Z of this pose
     float width = 1.0f, height = 1.0f;  // metres
-    bool alphaBlend = false;            // false: opaque; true: blend with the texture's alpha
+    bool alphaBlend = false;            // false: opaque; true: blend over the layers below with the image's alpha
+    SourceAlpha sourceAlpha = SourceAlpha::Premultiplied;  // with alphaBlend: how `texture` stores alpha
 };
 
 struct SubmitDesc {
@@ -436,5 +450,13 @@ int DisableImplicitApiLayers(std::vector<std::string>* disabled = nullptr);
 int DisableImplicitApiLayersMatching(const std::vector<std::string>& patterns, std::vector<std::string>* disabled = nullptr);
 
 const char* DxgiFormatName(DXGI_FORMAT f);
+
+// Development aid: reads back `texture` (array slice 0, mip 0) and writes it to
+// a PNG with its alpha channel. 8-bit RGBA/BGRA families only (UNORM, _SRGB or
+// TYPELESS); the stored bytes are written as they are (an _SRGB texture's bytes
+// are sRGB encoded, so the PNG looks like what the texture shows). Blocks the
+// calling thread until the GPU copy is done. The caller must own the immediate
+// context. Returns false with a message in *error.
+bool WriteTexturePng(ID3D11DeviceContext* ctx, ID3D11Texture2D* texture, const std::string& pathUtf8, std::string* error);
 
 }  // namespace ff7vr::xr

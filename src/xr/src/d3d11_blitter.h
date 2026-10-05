@@ -59,12 +59,21 @@ private:
     void ReleaseAll();
 };
 
+// What happens to the alpha channel on the way into the destination.
+enum class BlitAlpha {
+    Opaque,                 // alpha = 1 (a plain copy may keep the source's alpha bits; opaque layers ignore them)
+    Premultiplied,          // kept as is (source is premultiplied)
+    Straight,               // rgb *= alpha (straight -> premultiplied)
+    PremultipliedInverted,  // alpha = 1 - alpha (Unreal's inverted coverage -> premultiplied)
+};
+
 struct BlitSource {
     ID3D11Texture2D* texture = nullptr;
     DXGI_FORMAT viewFormat = DXGI_FORMAT_UNKNOWN;  // UNKNOWN = texture format
     ColorEncoding encoding = ColorEncoding::Srgb;
     uint32_t arraySlice = 0;
     uint32_t mipLevel = 0;
+    BlitAlpha alpha = BlitAlpha::Opaque;
 };
 
 struct BlitDest {

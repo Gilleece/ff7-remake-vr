@@ -280,6 +280,11 @@ bool BackendBase::TransferQuad(const QuadLayer& q, const EyeTarget& t, uint32_t*
     src.encoding = q.encoding;
     src.arraySlice = q.arraySlice;
     src.mipLevel = q.mipLevel;
+    // The layer image holds premultiplied alpha (see SourceAlpha).
+    src.alpha = !q.alphaBlend                                         ? BlitAlpha::Opaque
+                : q.sourceAlpha == SourceAlpha::Straight              ? BlitAlpha::Straight
+                : q.sourceAlpha == SourceAlpha::PremultipliedInverted ? BlitAlpha::PremultipliedInverted
+                                                                      : BlitAlpha::Premultiplied;
     BlitDest dst{t.texture, t.viewFormat, t.width, t.height, t.arraySlice};
     Blitter::Path path{};
     if (gpuTiming_) gpuCopy_.Before(context_.Get());
