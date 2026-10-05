@@ -149,6 +149,10 @@ std::atomic<uint32_t> g_settingsVersion{1};
 std::atomic<bool> g_enabled{false};        // settings say on
 std::atomic<bool> g_unsupported{false};    // NVAPI or the GPU cannot do it: off for the session
 std::atomic<ID3D11DeviceContext*> g_ctx{nullptr};
+// The main swap chain's device and immediate context, from the Present hook (not referenced:
+// the game's device lives as long as the process).
+std::atomic<ID3D11Device*> g_seenDevice{nullptr};
+std::atomic<ID3D11DeviceContext*> g_seenCtx{nullptr};
 std::atomic<bool> g_traceRequested{false};
 // The scene markers keep running (GPU timing of the scene only, no mask) after `fov off` in a
 // session that had it on, so on and off can be compared in one run.
@@ -708,10 +712,10 @@ void Configure(const Config& c) {
     Settings s;
     // Default on with the quality preset: in captures at headset resolution it was not
     // distinguishable from full-rate shading outside the outermost ring (docs/render.md).
-    s.enabled = c.get_bool("foveation", "enabled", true);
     const std::string preset = Lower(c.get_string("foveation", "preset", "quality"));
     if (!ApplyPreset(s, preset)) log::warn("foveation: [foveation] preset = '{}' is unknown; using quality", preset);
-    if (preset == "off") s.enabled = false;
+    // After the preset (which switches it on): enabled = 0 always wins.
+    s.enabled = c.get_bool("foveation", "enabled", true) && preset != "off";
     // Explicit values override the preset's.
     const std::string radii = c.get_string("foveation", "radii", "");
     if (!radii.empty()) {
@@ -764,11 +768,15 @@ bool Wanted() {
 }
 
 void OnPresent(const PresentInfo& p) {
-    if (g.init == State::Init::NotYet && !Wanted()) return;  // never touched NVAPI: nothing to undo
+    if (g.init == State::Init::NotYet) {
+        // NVAPI and the context hooks wait for the first stereo scene: screen mode and
+        // the game without stereo never load or hook anything for this feature.
+        g_seenDevice = p.device;
+        g_seenCtx = p.context;
+        return;
+    }
     ID3D11DeviceContext* ctx = p.context;
-    if (g.init == State::Init::Ok && ctx != g_ctx.load()) return;  // another device: leave it alone
-    if (g.init == State::Init::NotYet && !EnsureInit(p.device, ctx)) return;
-    if (g.init != State::Init::Ok) return;
+    if (g.init != State::Init::Ok || ctx != g_ctx.load()) return;  // off, or another device: leave it alone
     // Nothing after the scene of a stereo frame, and nothing of this module, is shaded coarsely.
     g.open = false;
     if (g.timing) {
@@ -798,6 +806,7 @@ void OnPresent(const PresentInfo& p) {
 }
 
 void SceneBegin(const FoveationEye eyes[2]) {
+    if (g.init == State::Init::NotYet && Wanted() && g_seenCtx.load()) EnsureInit(g_seenDevice.load(), g_seenCtx.load());
     if (g.init != State::Init::Ok || g_unsupported.load()) return;
     ID3D11DeviceContext* ctx = g_ctx.load();
     TakeSettings();

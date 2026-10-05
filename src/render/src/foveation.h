@@ -32,8 +32,9 @@ namespace ff7vr::render::foveation {
 void Configure(const Config& config);
 
 // Presenting thread, at the start of the Present hook (before this module's own
-// D3D11 work): initialises NVAPI and the context hooks on first use, switches
-// variable rate shading off, reads back GPU timings.
+// D3D11 work): notes the game's device (NVAPI and the context hooks are set up
+// at the first stereo scene), switches variable rate shading off, reads back GPU
+// timings.
 void OnPresent(const PresentInfo& p);
 
 // Any thread.
