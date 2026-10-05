@@ -181,7 +181,7 @@ void RegisterCommands() {
                       [](std::string_view args) { return XrController::Get().StereoTestCommand(Lower(std::string(args))); });
     dev_commands::add("fov",
                       "fov status | on | off | preset quality|balanced|performance|off | radii <r1> <r2> <r3> | rates <a> <b> <c> | hidden "
-                      "off|coarse|cull | passes scene|all | skip [dxgi formats] | trace | timing: fixed foveated rendering in stereo",
+                      "off|coarse|cull | passes scene|no-gbuffer|all | skip [dxgi formats] | trace | timing: fixed foveated rendering in stereo",
                       [](std::string_view args) { return foveation::Command(std::string(args)); });
     dev_commands::add("ui",
                       "ui status | on | off | dump <png path> | distance <m> | size <m> | offset <x m> <y m> | follow <0|1> | mirror <0|1>: the in-game "

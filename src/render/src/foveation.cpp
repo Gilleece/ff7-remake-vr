@@ -32,7 +32,7 @@ using Microsoft::WRL::ComPtr;
 // ---------------------------------------------------------------- settings
 
 enum class Corners { Off, Coarse, Cull };
-enum class Passes { Scene, All };
+enum class Passes { Scene, NoGBuffer, All };
 
 struct Settings {
     bool enabled = true;
@@ -45,7 +45,7 @@ struct Settings {
     NV_PIXEL_SHADING_RATE rate[3] = {NV_PIXEL_X1_PER_2X2_RASTER_PIXELS, NV_PIXEL_X1_PER_2X2_RASTER_PIXELS, NV_PIXEL_X1_PER_4X4_RASTER_PIXELS};
     Corners corners = Corners::Coarse;
     Passes passes = Passes::Scene;
-    std::vector<int> skipFormats;  // DXGI formats of render target 0 that never get the mask
+    std::vector<int> skipFormats{35};  // DXGI formats of render target 0 that never get the mask (35: velocity)
 };
 
 struct Preset {
@@ -137,7 +137,7 @@ std::string Describe(const Settings& s) {
     if (!s.enabled) return "off";
     return std::format("preset {}: 1x1 inside {:.2f}, {} to {:.2f}, {} to {:.2f}, {} beyond; hidden area {}; passes {}{}", s.preset, s.radius[0],
                        RateText(s.rate[0]), s.radius[1], RateText(s.rate[1]), s.radius[2], RateText(s.rate[2]), CornersText(s.corners),
-                       s.passes == Passes::All ? "all (size rule only)" : "scene",
+                       s.passes == Passes::All ? "all (size rule only)" : s.passes == Passes::NoGBuffer ? "scene without the G-buffer pass" : "scene",
                        s.skipFormats.empty() ? std::string() : std::format(", skipping {} render target format(s)", s.skipFormats.size()));
 }
 
@@ -150,6 +150,9 @@ std::atomic<bool> g_enabled{false};        // settings say on
 std::atomic<bool> g_unsupported{false};    // NVAPI or the GPU cannot do it: off for the session
 std::atomic<ID3D11DeviceContext*> g_ctx{nullptr};
 std::atomic<bool> g_traceRequested{false};
+// The scene markers keep running (GPU timing of the scene only, no mask) after `fov off` in a
+// session that had it on, so on and off can be compared in one run.
+std::atomic<bool> g_measure{false};
 
 // Indices in the shading-rate surface.
 constexpr uint8_t kIndexFull = 0, kIndexHidden = 4;
@@ -168,11 +171,18 @@ struct State {
     bool hiddenPresent = false;
     ComPtr<ID3D11Texture2D> surface;
     ComPtr<ID3D11NvShadingRateResourceView> surfaceView;
+    struct Retired {
+        ComPtr<ID3D11Texture2D> surface;
+        ComPtr<ID3D11NvShadingRateResourceView> view;
+        int presents = 0;
+    };
+    std::vector<Retired> retired;  // replaced surfaces, released after a few Presents
     uint32_t tilesX = 0, tilesY = 0;
     double workFraction = 1.0;  // pixel shader invocations relative to full rate, inside the eye rects
     std::string surfaceText;
     // Per frame.
-    bool open = false;      // inside the scene window
+    bool open = false;      // inside the scene window, mask allowed
+    bool timing = false;    // inside the scene window, scene timer running
     bool vrsOn = false;     // variable rate shading currently enabled on the context
     bool viewBound = false; // our surface is bound on the context
     uint64_t frames = 0, bindings = 0, matched = 0;
@@ -320,6 +330,13 @@ void OnTargets(ID3D11DeviceContext* ctx, UINT n, ID3D11RenderTargetView* const* 
         if (g.open) {
             ++g.bindingsThisFrame;
             want = SizeMatches(f);
+            uint32_t colour = 0;
+            for (UINT i = 0; i < n; ++i)
+                if (rtvs[i]) ++colour;
+            if (want && g.settings.passes == Passes::NoGBuffer && colour >= 3) {
+                want = false;
+                note = "G-buffer pass skipped";
+            }
             if (want && std::find(g.settings.skipFormats.begin(), g.settings.skipFormats.end(), f.fmt) != g.settings.skipFormats.end()) {
                 want = false;
                 note = "format skipped";
@@ -436,6 +453,18 @@ void MarkHidden(std::vector<uint8_t>& tiles, uint32_t tilesX, uint32_t tilesY, c
         if (hits[i] == kAll) tiles[i] = kIndexHidden;
 }
 
+// Unbinds the current surface and keeps it alive for a few frames: the driver may still
+// use it for commands it has not processed yet (NVAPI does not hold a reference).
+void RetireSurface(ID3D11DeviceContext* ctx) {
+    if (g.viewBound) {
+        NvAPI_D3D11_RSSetShadingRateResourceView(ctx, nullptr);
+        g.viewBound = false;
+    }
+    if (g.surfaceView) g.retired.push_back(State::Retired{g.surface, g.surfaceView, 0});
+    g.surface.Reset();
+    g.surfaceView.Reset();
+}
+
 bool BuildSurface(ID3D11DeviceContext* ctx) {
     const uint32_t right = std::max(g.eyes[0].rect.x + g.eyes[0].rect.width, g.eyes[1].rect.x + g.eyes[1].rect.width);
     const uint32_t bottom = std::max(g.eyes[0].rect.y + g.eyes[0].rect.height, g.eyes[1].rect.y + g.eyes[1].rect.height);
@@ -448,39 +477,43 @@ bool BuildSurface(ID3D11DeviceContext* ctx) {
     // Per eye: pixel count at each index, for the work estimate.
     double count[2][5]{};
     bool hiddenUsed = false;
+    // Per eye: tiles entirely inside its hidden area mesh.
+    std::vector<uint8_t> hidden[2];
     for (int e = 0; e < 2; ++e) {
-        const EyeMap m = MapOf(g.eyes[e]);
-        const auto& r = g.eyes[e].rect;
-        if (s.corners != Corners::Off) {
-            xr::HiddenAreaMesh mesh;
-            uint32_t ver = 0;
-            if (XrController::Get().GetHiddenArea(e, &mesh, &ver)) {
-                // Mark into a scratch copy limited to this eye's rect.
-                std::vector<uint8_t> scratch(tiles.size(), kIndexFull);
-                MarkHidden(scratch, tilesX, tilesY, m, mesh);
-                for (uint32_t ty = 0; ty < tilesY; ++ty)
-                    for (uint32_t tx = 0; tx < tilesX; ++tx) {
-                        const float cx = float(tx) * 16.0f + 8.0f, cy = float(ty) * 16.0f + 8.0f;
-                        if (cx >= float(r.x) && cx < float(r.x + r.width) && cy >= float(r.y) && cy < float(r.y + r.height) &&
-                            scratch[size_t(ty) * tilesX + tx] == kIndexHidden) {
-                            tiles[size_t(ty) * tilesX + tx] = kIndexHidden;
-                            hiddenUsed = true;
-                        }
-                    }
-            }
+        xr::HiddenAreaMesh mesh;
+        uint32_t ver = 0;
+        if (s.corners != Corners::Off && XrController::Get().GetHiddenArea(e, &mesh, &ver)) {
+            hidden[e].assign(tiles.size(), kIndexFull);
+            MarkHidden(hidden[e], tilesX, tilesY, MapOf(g.eyes[e]), mesh);
         }
-        for (uint32_t ty = 0; ty < tilesY; ++ty)
-            for (uint32_t tx = 0; tx < tilesX; ++tx) {
-                const float cx = float(tx) * 16.0f + 8.0f, cy = float(ty) * 16.0f + 8.0f;
-                if (cx < float(r.x) || cx >= float(r.x + r.width) || cy < float(r.y) || cy >= float(r.y + r.height)) continue;
-                uint8_t& t = tiles[size_t(ty) * tilesX + tx];
-                if (t != kIndexHidden) {
-                    const float d = m.Distance(cx, cy);
+    }
+    const EyeMap maps[2] = {MapOf(g.eyes[0]), MapOf(g.eyes[1])};
+    for (uint32_t ty = 0; ty < tilesY; ++ty)
+        for (uint32_t tx = 0; tx < tilesX; ++tx) {
+            // A tile can overlap both eyes when the eye width is not a multiple of 16: it then
+            // takes the finer rate of the two and is hidden only if both eyes hide it.
+            const float x0 = float(tx) * 16.0f, y0 = float(ty) * 16.0f;
+            uint8_t index = 0xFF;
+            int owner = -1;
+            for (int e = 0; e < 2; ++e) {
+                const auto& r = g.eyes[e].rect;
+                const float rx0 = float(r.x), ry0 = float(r.y), rx1 = float(r.x + r.width), ry1 = float(r.y + r.height);
+                if (x0 + 16.0f <= rx0 || x0 >= rx1 || y0 + 16.0f <= ry0 || y0 >= ry1) continue;
+                uint8_t t = kIndexHidden;
+                if (hidden[e].empty() || hidden[e][size_t(ty) * tilesX + tx] != kIndexHidden) {
+                    // Ring from the tile centre, clamped into this eye's rect.
+                    const float cx = std::clamp(x0 + 8.0f, rx0, rx1 - 1.0f), cy = std::clamp(y0 + 8.0f, ry0, ry1 - 1.0f);
+                    const float d = maps[e].Distance(cx, cy);
                     t = d < s.radius[0] ? 0 : d < s.radius[1] ? 1 : d < s.radius[2] ? 2 : 3;
                 }
-                count[e][t] += 256.0;
+                if (index == 0xFF || (t != kIndexHidden && (index == kIndexHidden || t < index))) index = t;
+                if (x0 + 8.0f >= rx0 && x0 + 8.0f < rx1 && y0 + 8.0f >= ry0 && y0 + 8.0f < ry1) owner = e;
             }
-    }
+            if (index == 0xFF) continue;  // outside both eyes: never drawn
+            tiles[size_t(ty) * tilesX + tx] = index;
+            if (index == kIndexHidden) hiddenUsed = true;
+            if (owner >= 0) count[owner][index] += 256.0;
+        }
     D3D11_TEXTURE2D_DESC td{};
     td.Width = tilesX;
     td.Height = tilesY;
@@ -509,9 +542,9 @@ bool BuildSurface(ID3D11DeviceContext* ctx) {
         return false;
     }
     SwitchOff(ctx);
+    RetireSurface(ctx);
     g.surface = tex;
     g.surfaceView = view;
-    g.viewBound = false;
     g.tilesX = tilesX;
     g.tilesY = tilesY;
     // Relative pixel shader work inside the eye rects, and the share of each region.
@@ -582,9 +615,7 @@ void TakeSettings() {
         g.settings = g_settings;
     }
     g.settingsVersion = v;
-    g.haveLayout = false;  // rebuild the surface at the next scene
-    g.surface.Reset();
-    g.surfaceView.Reset();
+    g.haveLayout = false;  // the next scene builds a new surface (the old one is retired then)
 }
 
 void StartTrace(ID3D11DeviceContext* ctx) {
@@ -652,8 +683,8 @@ void ReadTrace(ID3D11DeviceContext* ctx) {
             if (e.inWindow) inWindow += ms;
             if (e.applied) applied += ms;
         }
-        log::info("foveation:   #{:<4} x{:<3} {:>5}x{:<5} {:<24} rt {} {} {} {}{}  gpu {:.3f} ms", i, j - i, e.w, e.h,
-                  e.fmt ? xr::DxgiFormatName(static_cast<DXGI_FORMAT>(e.fmt)) : "-", e.rtvs, e.dsv ? "+depth" : "      ",
+        log::info("foveation:   #{:<4} x{:<3} {:>5}x{:<5} {:<30} rt {} {} {} {}{}  gpu {:.3f} ms", i, j - i, e.w, e.h,
+                  e.fmt ? std::format("{} ({})", xr::DxgiFormatName(static_cast<DXGI_FORMAT>(e.fmt)), e.fmt) : std::string("-"), e.rtvs, e.dsv ? "+depth" : "      ",
                   e.inWindow ? "scene" : "after", e.applied ? "VRS" : "full", *e.note ? std::string("  (") + e.note + ")" : "", ms);
         i = j;
     }
@@ -702,8 +733,11 @@ void Configure(const Config& c) {
     }
     const std::string corners = Lower(c.get_string("foveation", "hidden_area", "coarse"));
     s.corners = corners == "off" ? Corners::Off : corners == "cull" ? Corners::Cull : Corners::Coarse;
-    s.passes = Lower(c.get_string("foveation", "passes", "scene")) == "all" ? Passes::All : Passes::Scene;
-    for (const auto& f : Split(c.get_string("foveation", "skip_formats", ""))) {
+    const std::string passes = Lower(c.get_string("foveation", "passes", "scene"));
+    s.passes = passes == "all" ? Passes::All : passes == "no-gbuffer" ? Passes::NoGBuffer : Passes::Scene;
+    // Default: the velocity buffer (R16G16_UNORM, 35): temporal data read per pixel by
+    // temporal AA and motion blur, and almost free to shade at full rate.
+    for (const auto& f : Split(c.get_string("foveation", "skip_formats", "35"))) {
         int v = 0;
         auto [p, ec] = std::from_chars(f.data(), f.data() + f.size(), v);
         if (ec == std::errc() && p == f.data() + f.size()) s.skipFormats.push_back(v);
@@ -714,10 +748,13 @@ void Configure(const Config& c) {
     }
     g_settingsVersion.fetch_add(1);
     g_enabled = s.enabled;
+    g_measure = s.enabled;
     log::info("foveation: {}", Describe(s));
 }
 
-bool Wanted() { return g_enabled.load(std::memory_order_relaxed) && !g_unsupported.load(std::memory_order_relaxed); }
+bool Wanted() {
+    return (g_enabled.load(std::memory_order_relaxed) || g_measure.load(std::memory_order_relaxed)) && !g_unsupported.load(std::memory_order_relaxed);
+}
 
 void OnPresent(const PresentInfo& p) {
     if (g.init == State::Init::NotYet && !Wanted()) return;  // never touched NVAPI: nothing to undo
@@ -727,6 +764,10 @@ void OnPresent(const PresentInfo& p) {
     if (g.init != State::Init::Ok) return;
     // Nothing after the scene of a stereo frame, and nothing of this module, is shaded coarsely.
     g.open = false;
+    if (g.timing) {
+        g.sceneTimer.End(ctx);
+        g.timing = false;
+    }
     SwitchOff(ctx);
     if (g.afterRunning) {
         g.afterTimer.End(ctx);
@@ -734,6 +775,8 @@ void OnPresent(const PresentInfo& p) {
     }
     if (g.tracing) FinishTrace(ctx);
     if (g.traceReadPending) ReadTrace(ctx);
+    for (auto& r : g.retired) ++r.presents;
+    std::erase_if(g.retired, [](const State::Retired& r) { return r.presents > 8; });
     g.sceneTimer.Collect(ctx, g_sceneSeries);
     g.afterTimer.Collect(ctx, g_afterSeries);
     if (g.cpuTicksThisFrame || g.bindingsThisFrame) {
@@ -751,6 +794,12 @@ void SceneBegin(const FoveationEye eyes[2]) {
     if (g.init != State::Init::Ok || g_unsupported.load()) return;
     ID3D11DeviceContext* ctx = g_ctx.load();
     TakeSettings();
+    if (g.afterRunning) {
+        g.afterTimer.End(ctx);
+        g.afterRunning = false;
+    }
+    g.timing = true;
+    g.sceneTimer.Begin(g.device, ctx);
     if (!g.settings.enabled) {
         SwitchOff(ctx);
         return;
@@ -765,11 +814,6 @@ void SceneBegin(const FoveationEye eyes[2]) {
     }
     ++g.frames;
     g.open = true;
-    if (g.afterRunning) {
-        g.afterTimer.End(ctx);
-        g.afterRunning = false;
-    }
-    g.sceneTimer.Begin(g.device, ctx);
     if (g_traceRequested.exchange(false)) StartTrace(ctx);
     // The render target bound right now may already be a scene target.
     ID3D11RenderTargetView* rtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
@@ -782,8 +826,9 @@ void SceneBegin(const FoveationEye eyes[2]) {
 }
 
 void SceneEnd() {
-    if (g.init != State::Init::Ok || !g.open) return;
+    if (g.init != State::Init::Ok || !g.timing) return;
     ID3D11DeviceContext* ctx = g_ctx.load();
+    g.timing = false;
     g.sceneTimer.End(ctx);
     g.afterTimer.Begin(g.device, ctx);
     g.afterRunning = true;
@@ -823,6 +868,7 @@ std::string Command(const std::string& argsIn) {
             if (err.empty()) {
                 g_settings = s;
                 g_enabled = s.enabled;
+                g_measure = true;
             }
         }
         if (!err.empty()) return "err " + err;
@@ -865,8 +911,8 @@ std::string Command(const std::string& argsIn) {
         });
     if (a[0] == "passes" && a.size() == 2)
         return update([&](Settings& s) {
-            if (a[1] != "scene" && a[1] != "all") return std::string("passes scene|all");
-            s.passes = a[1] == "all" ? Passes::All : Passes::Scene;
+            if (a[1] != "scene" && a[1] != "all" && a[1] != "no-gbuffer") return std::string("passes scene|no-gbuffer|all");
+            s.passes = a[1] == "all" ? Passes::All : a[1] == "no-gbuffer" ? Passes::NoGBuffer : Passes::Scene;
             return std::string();
         });
     if (a[0] == "skip")
@@ -896,7 +942,7 @@ std::string Command(const std::string& argsIn) {
         return out;
     }
     return "err usage: fov status | on | off | preset quality|balanced|performance|off | radii <r1> <r2> <r3> | rates <a> <b> <c> | "
-           "hidden off|coarse|cull | passes scene|all | skip [dxgi formats] | trace | timing";
+           "hidden off|coarse|cull | passes scene|no-gbuffer|all | skip [dxgi formats] | trace | timing";
 }
 
 std::vector<std::string> TakeTimingLines() {
