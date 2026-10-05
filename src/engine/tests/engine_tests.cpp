@@ -41,6 +41,21 @@ int main() {
     for (const auto& r : rots) rt_ok = rt_ok && near_rot(rotator_from_quat(quat_from_rotator(r)), r);
     check(rt_ok, "rotator -> quat -> rotator round trip");
 
+    // Looking straight up or down (the poles): the rotator from a quaternion may split yaw
+    // and roll differently, but it must describe the same orientation.
+    bool pole_ok = true;
+    const float pitches[] = {90.0f, -90.0f, 89.99f, -89.99f};
+    const Vec axes[] = {Vec{1, 0, 0}, Vec{0, 1, 0}, Vec{0, 0, 1}};
+    for (float pitch : pitches) {
+        const Quat q = mul(quat_from_rotator({0, 30, 0}), quat_from_rotator({pitch, 0, 0}));
+        const Quat back = quat_from_rotator(rotator_from_quat(q));
+        for (const Vec& axis : axes) {
+            const Vec a = rotate(q, axis), b = rotate(back, axis);
+            pole_ok = pole_ok && near(a.x, b.x, 1e-3) && near(a.y, b.y, 1e-3) && near(a.z, b.z, 1e-3);
+        }
+    }
+    check(pole_ok, "orientation looking straight up or down survives the rotator conversion");
+
     // Yaw +90 turns +X (forward) into +Y (right), as in UE.
     Vec v = rotate(quat_from_rotator({0, 90, 0}), Vec{1, 0, 0});
     check(near(v.x, 0) && near(v.y, 1) && near(v.z, 0), "yaw +90 maps forward to right");
