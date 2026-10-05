@@ -802,8 +802,8 @@ Private bytes in the samples taken while stereo rendered rose by about 28 MB per
 over that run (10.4-10.8 GB in the first third, 10.6-11.1 GB in the last) while the
 character went from the rooms to the slums outdoors. A second run of 7 minutes standing
 still (`captures/soak/runS`, 20 loops of Insert twice, End, Home twice, the command menu;
-samples every 20 s) shows no such rise: private bytes 10406 to 11023 MB with the last
-sample (10580) below the third (10508 at 1 minute was the lowest after start-up), handles
+samples every 20 s) shows no such rise: private bytes 10406 to 11023 MB, the last sample
+(10580 MB, minute 7) within 75 MB of the one at minute 1 (10508 MB), handles
 2660 to 2673, GPU memory 7.5 to 7.6 GB, no warning or error. So the switches and keys do
 not leak; the rise while walking is most likely the game streaming the areas it reached,
 not proven either way.
