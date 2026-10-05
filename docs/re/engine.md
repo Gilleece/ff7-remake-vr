@@ -820,6 +820,30 @@ the pawn's location (at Z 156.5 here), looking at the pivot. This is what the le
 (`[camera] pivot_height = 55`) undoes. The game's camera collision shortens the boom near
 walls (not measured).
 
+### Battle state (LIVE in exploration, not seen in a battle)
+
+Found by listing reflected functions and properties by name (`fp funcs`, `fp props`) and by a
+scan of the exe's identifier strings for `Battle` / `Combat` (165 names):
+
+| Function (class) | Parameters (from its property children) | Value in exploration | Notes |
+|---|---|---|---|
+| `EndBattleAPI.GetBattleSceneID` (static, `/Script/EndGame.Default__EndBattleAPI`) | `ReturnValue` NameProperty only | `None` (index 0) | used as the battle signal: the current battle scene, by name and by the game's data model (`BattleSceneID`, `BattleScenePhase`) |
+| `EndBattleAPI.GetBattleSceneCount` | `InName` (Name), `ReturnValue` (Int) | not called with a valid name | count per scene name |
+| `EndBattleAPI.GetBattleSceneSituationType` / `SituationID` | `BattleSceneID` (Name), `ReturnValue` (Enum / Name) | not called with a valid ID | |
+| `EndBattleAIController.GetBattleInSituation` | `ReturnValue` (Enum) | 0, on `PC0000_00_Cloud_Standard_AI_C` | the party member's AI controller; a second candidate |
+| `EndBattleAIController.IsInDummyBattle` | `ReturnValue` (Bool) | false | |
+| `EndBattleAIController.GetBattleScenePhase` / `IsBattleScenePhase` | Int / Bool | not called | |
+| `EndMenuAPI.SetFieldMenuInBattle(bInInBattle)`, `SetNavimapInBattle(bInInBattle)` | Bool in | - | the game tells its menus a battle started; a setter |
+
+No battle-related reflected function exists on `EndPlayerController`, the game mode or the
+game instance; `EndPlayerController` has `BattleTalkOnEndBattle` (object) and its class.
+Static functions are called on the class default object; `fp call auto <Function>` does that.
+
+Cloud's sword is a separate actor `WE0000_01_Cloud_IronBlade_C` whose
+`SkeletalMeshComponent0` is attached to the body mesh `CharacterMesh0`;
+`SceneComponent.GetChildrenComponents(bool bIncludeAllDescendants, TArray& Children)`
+(bool at +0, TArray at +8) on the body mesh returns it (LIVE).
+
 ### Battle and conversation objects (LIVE, exploration only)
 
 Out of combat the object array already holds the battle data tables

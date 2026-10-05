@@ -27,7 +27,8 @@ global are written, and two single bytes of code can be changed:
 | `FRenderTargetPool::FindFreeElement` | inline hook, render thread | only after `gpu names on` (GPU trace labels) |
 | the object array and name pool | read on the game thread | only with `[stereo] movie_screen = 1`: movie detection (below) |
 | the controlled pawn, its location and the view target | reflected functions called through `ProcessEvent`, game thread, every frame | camera modes: level boom and first person (see "Camera modes") |
-| the pawn's skeletal mesh components | `SetVisibility` through `ProcessEvent` | only while first person applies; put back afterwards |
+| the pawn's skeletal mesh components and the mesh components attached to them | `SetVisibility` through `ProcessEvent` | only while first person applies; put back afterwards |
+| the battle signal | a reflected function called through `ProcessEvent` every frame (`[first_person] battle_signal`) | automatic third person in battles |
 | XInput state | a filter in the loader's XInput proxy | only with stereo enabled: View/Back + right stick click toggles first person and is removed from the state |
 
 Everything else goes through the device's own function tables, which the engine calls:
@@ -206,7 +207,17 @@ has not been seen; the game's collision only shortens the boom along the pitched
 First person (`e10_first_stand`, `e11_first_turned`, `e12_first_walking`): the eyes at Cloud's
 eye bones, 74.8 cm above the pawn's location (175.9 standing in the first room), facing the
 game camera's yaw; turning with the mouse turns the view, walking moves it with the
-character. `e13_first_nohide` shows the view with nothing hidden.
+character. `e13_first_nohide` shows the view with nothing hidden. In `e10` (body hidden,
+sword not yet) the Buster Sword's grip filled a third of the view: the sword is a separate
+actor (`WE0000_01_Cloud_IronBlade_C`) attached to the body mesh, so it is now hidden with it
+(`captures/camera/runH`: `h01_first_default` shows a clear view, the log line
+`player: first person: hid 2 of 2 mesh(es) ...` names `CharacterMesh0` and the sword's
+`SkeletalMeshComponent0`). Toggled eight times with Home, then a simulated battle and its
+end: each exit logged `2 mesh(es) of the character shown again`, and the third-person
+captures after the toggles (`h05_third_toggled`, `h08_third_after_toggles`,
+`h09_battle_sim_third`) show Cloud with his sword; after `stereo off` nothing is hidden
+(`fp status`: `hidden 0`). The same on SteamVR's null driver: `captures/camera/runF`,
+`runK`.
 
 ### First person
 
@@ -272,6 +283,16 @@ toggle is requested once, and both bits are removed from the state from that mom
 both buttons are released, so the game never sees either of them as part of the
 combination. The game polls XInput only while a pad is connected; `fp pad <hex buttons>`
 feeds a button state through the same filter for a test without a pad.
+
+Tested without a pad (`fp pad`, `captures/camera/runE`): `0x0020` (View alone) passes
+unchanged; `0x00a0` (both) toggles once and reaches the game as `0x0000`; `0x00a1` while
+still held gives `0x0001` (A passes, no second toggle); `0x0080` (View released, stick still
+clicked) gives `0x0000` until both are released; `0x0001` afterwards passes. The toggle
+counter rose by exactly one. **Not tested**: a real pad (none is connected to the test
+machine, and without one the game never calls XInput), so that the game's own use of View
+and the stick click is fully suppressed while the combination is held is inferred from the
+filter's output, not seen in the game. The keyboard toggle (Home) was tested in the game:
+every press toggles once.
 
 ## ini keys (`[stereo]` in `ff7vr.ini`)
 
@@ -358,6 +379,7 @@ Through the dev pipe (`[dev] pipe = 1`, `tools\dev\send-input.ps1 -Pipe "<comman
 | `fp funcs <text> [class text]`, `fp props <text> [class text]` | reverse engineering: reflected functions or properties whose name contains the text, with their class |
 | `fp call <object address \| class name> <Class.Function> [hex parameters]` | reverse engineering: calls a reflected function on the game thread and prints the first 48 bytes of its parameter block afterwards (return values follow the arguments) |
 | `fp combat <1\|0\|auto>` | test: pretend a battle is or is not in progress |
+| `fp signal <Class.Function> [world] [result=<offset>:<size>] \| none` | switch the battle signal while the game runs (same form as `battle_signal`); `fp status` shows its raw value |
 | `fp pad <hex buttons>` | test: feed an XInput button state through the gamepad filter, prints what the game would get |
 | `fp boom <level\|game>`, `fp pivot <cm>` | third-person camera settings |
 | `fp find <name> [outer] [class]`, `fp classes <text>`, `fp chain <hex address \| pawn \| view \| pc>` | reverse engineering: objects by name, objects whose class name contains a text, the class chain of an object |
@@ -600,7 +622,7 @@ movie (no `MediaPlayer` object existed on the title screen or in these areas).
 | Eye differences while walking and turning (shadows, lights, reflections, particles, fog, sky, culling) | none found apart from the ghost. An NPC visible at the edge of one eye only (`runM/m04_turned_*`) is outside the other eye's field of view (asymmetric FOV), not culled |
 | Light sort-key patch outdoors | no visible difference (`runM/g_lightfix.png`; the differences are idle animation) |
 | Camera yaw (mouse, stick) | turns the player smoothly, as in the game; artificial smooth rotation can be uncomfortable for some players (no snap turn yet) |
-| Camera pitch with decoupled pitch | the view stays level, but the game moves the camera along its boom with pitch: at -34 degrees (looking down from above) the eyes are 2.4 m higher than at 0 (camera Z 99.7 -> 342.9, `stereo views`), at +10 degrees they sit at counter height and look at the counter's side (`runM/m05_pitch_down_L.png`, `m06_pitch_up_L.png`). In the headset the player is lifted and lowered while the horizon stays level |
+| Camera pitch with decoupled pitch | with `[camera] boom = game` the game moves the camera along its boom with pitch: at -34 degrees (looking down from above) the eyes are 2.4 m higher than at 0 (camera Z 99.7 -> 342.9, `stereo views`), at +10 degrees they sit at counter height (`runM/m05_pitch_down_L.png`, `m06_pitch_up_L.png`). Fixed by the level boom (default), see "Camera modes: evidence" |
 | Commands menu | shown on the UI layer, the scene keeps rendering in stereo |
 | Window modes | see "Window modes" |
 | Frame time | see "Measured" |
@@ -630,13 +652,16 @@ What to try first, in this order:
    mouse) up and down. The player's height should stay at the character's shoulder level
    while the view orbits; only the left/right part of the stick turns you. Walk with your
    back to a wall and orbit: the eyes should stay out of the wall.
-2. **First person.** Toggle with View/Back + right stick click (or Home on the keyboard).
-   The view should be at Cloud's eye height, facing where the camera faced, with no part of
-   Cloud visible. Walk, turn, toggle back and forth a few times: in third person Cloud must
-   be complete every time.
-3. **A conversation, a cutscene, a battle, a loading screen.** In each, the log should show
-   the camera mode switching to `game camera` (authored shots) or to third person (battle),
-   and back afterwards.
+2. **First person.** Stereo starts in first person outside battles. The view should be at
+   Cloud's eye height, facing where the camera faced, with no part of Cloud or his sword
+   visible. Walk, turn, toggle with View/Back + right stick click (or Home on the keyboard)
+   back and forth a few times: in third person Cloud and his sword must be complete every
+   time. A manual toggle holds until the next battle starts or ends.
+3. **A battle.** It should switch to third person when the battle starts and back to first
+   person when it ends; the log shows `player: battle signal 0 -> 1` and
+   `player: battle started: third person`. If no such line appears, the signal is wrong.
+4. **A conversation, a cutscene, a loading screen.** The log should show the camera mode
+   switching to `game camera` (authored shots) and back afterwards.
 
 If something is wrong, send `ff7vr.log` from the game's `End\Binaries\Win64` folder (it is
 rewritten at every start, so copy it before starting the game again) and say roughly when
@@ -656,23 +681,37 @@ and shown). Keys to flip in `ff7vr.ini` to narrow it down:
 
 Ordered by how much they would bother a player in the headset:
 
-1. **Not exercised with scripted input**: conversations (camera cuts and scripted camera
+1. **Battle signal unverified in a battle** (see "Combat"). If it is wrong, battles are
+   played in first person (the toggle still works, and the log shows the signal never
+   changing), or exploration in some areas is in third person (the log shows the signal at
+   1 outside a battle).
+2. **Level boom near obstacles**: the eyes are where the game camera would be at zero pitch,
+   at the boom length the game's collision allowed for the pitched camera. Something the
+   pitched camera passed over (a counter, a low wall, a person) can then be close in front
+   of the eyes or, possibly, around them (`e05_level_pdown`: an NPC's back fills the view).
+   Not seen inside a wall; not tested against one on purpose.
+3. **First person**: the whole character is hidden (its shadow too, presumably: not checked); the view does not
+   follow the character's head animation (the eye bones' offset from the pawn is smoothed
+   over 80 ms and the view stays level); interacting, climbing or squeezing animations were
+   not tried. The eyes are 2 cm in front of the eye bones, about 75 cm above the pawn's
+   location; with `hide = none` the inside of the face is visible.
+4. **Not exercised with scripted input**: conversations (camera cuts and scripted camera
    moves), real-time cutscenes, the pause menu, loading screens, combat. How decoupled
    pitch and the head pose combine with a cinematic camera is unknown, and whether every
    authored camera fails the follow-camera test (so that neither the level boom nor first
    person applies there) has not been seen.
-2. **Pre-rendered movies**: detection exists but no movie was reached; `[stereo]
+5. **Pre-rendered movies**: detection exists but no movie was reached; `[stereo]
    movie_screen` is off by default. Without it a movie would be rendered into both eyes
    wherever the game draws it (UI or scene).
-3. **Smooth camera yaw** is applied as the game does it (no snap turn option).
-4. Square Enix's custom glare (`docs/re/engine.md`, section 10) puts both views' glare at the
+6. **Smooth camera yaw** is applied as the game does it (no snap turn option).
+7. Square Enix's custom glare (`docs/re/engine.md`, section 10) puts both views' glare at the
    same place of one target; in a scene with glare primitives the left eye would get the
    right eye's glare. Not seen yet (no glare primitives in the scenes tested).
-5. Without the UI layer (`[ui] layer = 0`, or no XR session) the in-game UI is composited
+8. Without the UI layer (`[ui] layer = 0`, or no XR session) the in-game UI is composited
    into each eye as a central crop of the 16:9 UI; the size variables cannot fix that
    (`docs/re/engine.md`, "What the UI composite does with an eye view"). With it the UI is on
    its own layer (section "UI layer").
-6. With a real OpenXR runtime the render module must hand the frame its XR thread already
+9. With a real OpenXR runtime the render module must hand the frame its XR thread already
    waited to the game thread at the start of stereo instead of waiting a second one
    (`XrController::BeginGameFrame`, in place); otherwise the game thread blocks in
    `xrWaitFrame` forever when the pipeline is idle (seen with SteamVR's null driver).
