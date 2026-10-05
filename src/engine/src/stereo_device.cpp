@@ -692,7 +692,7 @@ void configure_render_scale(const Config& cfg) {
     dev_commands::add("ssr", "ssr [status] | on | off: screen-space reflections computed per eye half instead of over both eyes",
                       [](std::string_view args) {
                           if (args == "on" || args == "off") fixes::set_ssr_per_eye(args == "on");
-                          else if (args.size() == 8 && args.substr(0, 7) == "poison " && args[7] >= '0' && args[7] <= '2') fixes::set_ssr_poison(args[7] - '0');
+                          else if (args.size() == 8 && args.substr(0, 7) == "poison " && args[7] >= '0' && args[7] <= '3') fixes::set_ssr_poison(args[7] - '0');
                           else if (!args.empty() && args != "status") return std::string("err usage: ssr [status] | on | off");
                           return "ok " + fixes::ssr_status();
                       });

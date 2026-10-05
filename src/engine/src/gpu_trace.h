@@ -43,5 +43,9 @@ using DrawIndexedFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT,
 using DrawIndexedOverride = bool (*)(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, DrawIndexedFn original);
 bool install_context_hooks(ID3D11Texture2D* texture);
 void set_draw_indexed_override(DrawIndexedOverride fn);
+// The same for CopyResource: returns true if it did the copy (or its replacement) itself.
+using CopyResourceFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Resource*, ID3D11Resource*);
+using CopyResourceOverride = bool (*)(ID3D11DeviceContext* ctx, ID3D11Resource* dst, ID3D11Resource* src, CopyResourceFn original);
+void set_copy_resource_override(CopyResourceOverride fn);
 
 }  // namespace ff7vr::engine::gpu_trace

@@ -634,10 +634,14 @@ void STDMETHODCALLTYPE copy_region(ID3D11DeviceContext* c, ID3D11Resource* dst, 
     g_hooks->copy_region.original<CopyRegionFn>()(c, dst, dsub, x, y, z, src, ssub, box);
     if (s.active) stamp();
 }
+std::atomic<CopyResourceOverride> g_copy_override{nullptr};
+
 void STDMETHODCALLTYPE copy(ID3D11DeviceContext* c, ID3D11Resource* dst, ID3D11Resource* src) {
     Scope s;
     if (s.active) begin_event(std::format("CopyResource dst {} <- src {}", describe(dst), describe(src)), false, false);
-    g_hooks->copy.original<CopyFn>()(c, dst, src);
+    const auto original = g_hooks->copy.original<CopyFn>();
+    const CopyResourceOverride o = g_copy_override.load(std::memory_order_acquire);
+    if (!o || !o(c, dst, src, original)) original(c, dst, src);
     if (s.active) stamp();
 }
 void STDMETHODCALLTYPE clear_rtv(ID3D11DeviceContext* c, ID3D11RenderTargetView* v, const FLOAT col[4]) {
@@ -798,6 +802,7 @@ void frame_boundary(ID3D11Texture2D* texture) {
 bool install_context_hooks(ID3D11Texture2D* texture) { return texture && ensure_installed(texture); }
 
 void set_draw_indexed_override(DrawIndexedOverride fn) { g_draw_override.store(fn, std::memory_order_release); }
+void set_copy_resource_override(CopyResourceOverride fn) { g_copy_override.store(fn, std::memory_order_release); }
 
 std::string command(const std::string& args) {
     std::istringstream in(args);

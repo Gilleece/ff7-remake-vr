@@ -2,6 +2,7 @@
 
 #include "engine_internal.h"
 
+#include "gpu_trace.h"
 #include "stereo_device.h"
 
 #include <d3d11_1.h>
@@ -222,9 +223,90 @@ ID3D11RasterizerState* scissor_state(ID3D11DeviceContext* ctx, ID3D11RasterizerS
     slot = RsPair{engine, s};
     return s;
 }
+
+// The scene-colour-sized inputs each reflection run of this frame read (compared only).
+// Square Enix copies the whole scene colour once per view into the texture that view's next
+// reflection run reads as the previous frame's colour.
+ID3D11Resource* g_ssr_inputs[2][4]{};
+std::atomic<std::uint64_t> g_ssr_copies_halved{0};
+
+void note_ssr_inputs(int index, ID3D11ShaderResourceView* const* srvs, const D3D11_TEXTURE2D_DESC& target) {
+    int n = 0;
+    for (int i = 0; i < 16 && n < 4; ++i) {
+        if (!srvs[i]) continue;
+        ID3D11Resource* r = nullptr;
+        srvs[i]->GetResource(&r);
+        if (!r) continue;
+        D3D11_RESOURCE_DIMENSION dim{};
+        r->GetType(&dim);
+        if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+            D3D11_TEXTURE2D_DESC d{};
+            static_cast<ID3D11Texture2D*>(r)->GetDesc(&d);
+            if (d.Width == target.Width && d.Height == target.Height && d.MipLevels == 1 && d.SampleDesc.Count == 1 &&
+                (d.Format == DXGI_FORMAT_R16G16B16A16_FLOAT || d.Format == DXGI_FORMAT_R16G16B16A16_TYPELESS))
+                g_ssr_inputs[index][n++] = r;
+        }
+        r->Release();
+    }
+}
+
+void poison_half(ID3D11DeviceContext* ctx, ID3D11Resource* dst, const D3D11_TEXTURE2D_DESC& d, bool left) {
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    ID3D11RenderTargetView* rtv = nullptr;
+    if (dev && (d.BindFlags & D3D11_BIND_RENDER_TARGET)) {
+        D3D11_RENDER_TARGET_VIEW_DESC v{};
+        v.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        v.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+        dev->CreateRenderTargetView(dst, &v, &rtv);
+    }
+    ID3D11DeviceContext1* ctx1 = nullptr;
+    if (rtv && SUCCEEDED(ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&ctx1))) && ctx1) {
+        const LONG half = static_cast<LONG>(d.Width / 2);
+        const D3D11_RECT r{left ? 0 : half, 0, left ? half : static_cast<LONG>(d.Width), static_cast<LONG>(d.Height)};
+        const float magenta[4] = {50.0f, 0.0f, 50.0f, 1.0f};
+        ctx1->ClearView(rtv, magenta, &r, 1);
+        ctx1->Release();
+    }
+    if (rtv) rtv->Release();
+    if (dev) dev->Release();
+}
+
+// The per-view copy of the scene colour: only the half the view's reflections read.
+bool ssr_copy(ID3D11DeviceContext* ctx, ID3D11Resource* dst, ID3D11Resource* src, gpu_trace::CopyResourceFn original) {
+    if (!g_ssr_on.load(std::memory_order_relaxed) || g_ssr_index == 0 || !dst || !src || !device::active()) return false;
+    int view = -1;
+    for (int k = 0; k < 2 && view < 0; ++k)
+        for (ID3D11Resource* r : g_ssr_inputs[k])
+            if (r && r == dst) view = k;
+    if (view < 0) return false;
+    D3D11_RESOURCE_DIMENSION ds{}, ss{};
+    dst->GetType(&ds);
+    src->GetType(&ss);
+    if (ds != D3D11_RESOURCE_DIMENSION_TEXTURE2D || ss != D3D11_RESOURCE_DIMENSION_TEXTURE2D) return false;
+    D3D11_TEXTURE2D_DESC dd{}, sd{};
+    static_cast<ID3D11Texture2D*>(dst)->GetDesc(&dd);
+    static_cast<ID3D11Texture2D*>(src)->GetDesc(&sd);
+    if (dd.Width != sd.Width || dd.Height != sd.Height || dd.Format != sd.Format || dd.MipLevels != 1 || sd.MipLevels != 1 ||
+        dd.ArraySize != 1 || sd.ArraySize != 1 || dd.Width * 2 < dd.Height * 3)
+        return false;
+    const bool right_half = (view == 1) != device::settings().swap_rects.load();
+    const UINT half = dd.Width / 2;
+    const D3D11_BOX box{right_half ? half : 0, 0, 0, right_half ? dd.Width : half, dd.Height, 1};
+    ctx->CopySubresourceRegion(dst, 0, box.left, 0, 0, src, 0, &box);
+    if (const int p = g_ssr_poison.load(std::memory_order_relaxed); p == 1 || p == 3) poison_half(ctx, dst, dd, p == 3 ? !right_half : right_half);
+    (void)original;
+    ++g_ssr_copies_halved;
+    return true;
+}
 }  // namespace
 
 void set_ssr_per_eye(bool on) {
+    static bool registered = false;
+    if (!registered) {
+        registered = true;
+        gpu_trace::set_copy_resource_override(&ssr_copy);
+    }
     g_ssr_on = on;
     log::info("fixes: reflections per eye {}", on ? "on" : "off");
 }
@@ -262,12 +344,13 @@ bool ssr_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base,
     ID3D11ShaderResourceView* srvs[16]{};
     ctx->PSGetShaderResources(0, 16, srvs);
     bool hzb = false;
-    for (auto* s : srvs) {
+    for (auto* s : srvs)
         if (s && !hzb) hzb = is_hzb(s);
+    const int index = hzb ? g_ssr_index++ : -1;
+    if (index >= 0 && index < 2) note_ssr_inputs(index, srvs, td);
+    for (auto* s : srvs)
         if (s) s->Release();
-    }
     if (!hzb) return false;
-    const int index = g_ssr_index++;
     if (index >= 2) {
         ++g_ssr_extra;
         return false;
@@ -299,7 +382,7 @@ bool ssr_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base,
     ctx->RSSetState(rs);
     ctx->RSSetScissorRects(1, &rect);
     original(ctx, count, start, base);
-    if (g_ssr_poison.load(std::memory_order_relaxed)) {
+    if (const int pm = g_ssr_poison.load(std::memory_order_relaxed); pm == 1 || pm == 2) {
         // Test: fill the half this run skipped with a loud colour. If a later pass read the
         // reflections outside its own eye's half, it would show in the eye images.
         ID3D11RenderTargetView* rtv = nullptr;
@@ -325,11 +408,13 @@ bool ssr_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base,
 void ssr_frame() {
     if (g_ssr_index) ++g_ssr_frames;
     g_ssr_index = 0;
+    for (auto& v : g_ssr_inputs)
+        for (auto& r : v) r = nullptr;
 }
 
 std::string ssr_status() {
-    return std::format("reflections per eye {}: runs limited {} in {} frames, extra runs left alone {}", g_ssr_on.load() ? "on" : "off",
-                       g_ssr_limited.load(), g_ssr_frames.load(), g_ssr_extra.load());
+    return std::format("reflections per eye {}: runs limited {} in {} frames, extra runs left alone {}, colour copies halved {}",
+                       g_ssr_on.load() ? "on" : "off", g_ssr_limited.load(), g_ssr_frames.load(), g_ssr_extra.load(), g_ssr_copies_halved.load());
 }
 
 }  // namespace ff7vr::engine::fixes
