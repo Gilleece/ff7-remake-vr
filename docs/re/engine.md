@@ -393,6 +393,20 @@ only) and the `FF7RemakeFix` mod (source public on GitHub, MIT).
 | Movies | The movie plugin iterates `/Script/MediaAssets.MediaPlayer` objects, calls `IsPlaying` (ignoring ones whose path contains `/Menu/`) and switches UEVR to its 2D screen mode while a cinematic plays. | UObject reflection | Shows pre-rendered movies on a flat screen instead of in stereo. | strings only (INFERRED) |
 | Vignette | `FF7RemakeFix` hooks the end of `FPostProcessSettings::FPostProcessSettings` (`0x32050f0`, hook at the epilogue `0x320590f`) and overrides `VignetteIntensity`. | `0x32050f0` | Sets the default vignette intensity (0 disables it). `r.Tonemapper.Quality` below 2 also drops the vignette in stock 4.18 (INFERRED). | source of the mod |
 
+### Evaluation with the mod's two-view rendering (LIVE, per-eye captures)
+
+Scene: the first room of the latest save (Sector 7 slums, indoors, glossy metal walls, a
+lamp-lit counter with a gramophone near the camera), eyes 2064x2208 with the Null
+backend's asymmetric Quest 3 class FOV, plus the mod's fixed test host for symmetric FOV.
+
+| Item | Result |
+|---|---|
+| Light sort-key patch | No visible change in either eye with the patch on or off (pixel differences between the captures are the characters' idle animation and edge aliasing, the same amount as between two captures without any change). Left off by default. |
+| HZB occlusion | The game's own value of `r.HZBOcclusion` is **0** (set by its constructor default), so UEVR's "disable HZB" setting changes nothing here. With 1 no popping or missing geometry in either eye in a static view. Each eye has its own view state. |
+| TAA, motion blur | TAA is on (`r.PostProcessAAQuality 4`), motion blur quality 4. Neither causes a difference between the eyes; turning them off does not change the problem below. |
+| `r.SSR.Quality` | Does not exist in this build (Square Enix's own screen-space reflection setup; `ShowFlag.ScreenSpaceReflections` exists). |
+| **Right eye shows a ghost of the left eye's image** | A semi-transparent copy of the left eye's picture appears in the right eye at the left eye's image positions, mostly visible on glossy surfaces (metal walls, the counter) and around bright lamps. Strong with the asymmetric headset FOV (where the two eyes' images are offset by about 360 px), faint with a symmetric FOV (only lamp glows). The left eye is clean. It disappears with `ShowFlag.PostProcessing 0`; it does not go away with TAA off, motion blur off, or `ShowFlag.` `ScreenSpaceReflections`, `ReflectionEnvironment`, `PostProcessMaterial`, `Bloom`, `LensFlares`, `DepthOfField`, `AmbientOcclusion`, `Tonemapper` 0 one at a time. INFERRED: a pass in the post-processing chain samples scene color for the second view with the first view's viewport offset (the reflection-like look on glossy surfaces suggests Square Enix's screen-space reflection resolve, `SSRParameter` / `ScreenSpaceReflectionsTexture` in the scene texture parameters). Not yet located. |
+
 ## 7. Console variables
 
 - Singleton: `IConsoleManager*` at RVA `0x57f9ca0` (null until
