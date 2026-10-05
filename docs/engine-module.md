@@ -236,14 +236,32 @@ Gameplay, first room of the save used by the harness, 1280x720 window, no XR ses
 | stereo 2 x 2064x2208 | 7.0 ms | 7.4 ms |
 | stereo 2 x 2500x2600 | 8.6 ms | 9.0 ms |
 
+## UI layer
+
+`src/engine/src/ui_layer.cpp` (start function `start_ui_layer`, called by the loader right
+after `start`; installed only with `[stereo] enabled = 1`) keeps the game's UI out of the eye
+images while the render module shows it on a quad layer (`docs/render.md`, "UI layer"):
+
+| What | Where | Why |
+|---|---|---|
+| `FSceneRenderTargets::BeginRenderingInGameUI` | inline hook, render thread | a second eye of the same view family gets no UI pass: one UI render per frame |
+| `FSceneRenderTargets::EndRenderingInGameUI` | inline hook, render thread | clears the view family's in-game UI flag (`+0x3C`, bit `0x80`) after the pass, so post-processing binds the empty fallback texture; appends an RHI command that reports the UI texture to the render module on the RHI thread before the frame's Present |
+
+Both act only for stereo eye views while `render::UiLayerWanted()` is true; every other call
+runs the engine's code unchanged. The engine facts are in `docs/re/engine.md`, section 9.
+Signatures are resolved at start-up with the same rules as the rest of the module (unique
+match, checked against the RVA of build 1.0.0.7). `[ui] once_per_frame = 0` (or `uihook once 0`)
+lets the game draw the UI for both eyes again; `uihook status` shows the counters.
+
 ## Known problems
 
 - The right eye shows a faint ghost of the left eye's image on glossy surfaces and around
   lamps, strong with asymmetric headset FOVs; it comes from the post-processing chain
   (`docs/re/engine.md` section 6, "Evaluation").
-- The in-game UI is composited into each eye as a central crop of the 16:9 UI; the size
-  variables cannot fix that (`docs/re/engine.md`, "What the UI composite does with an eye
-  view").
+- Without the UI layer (`[ui] layer = 0`, or no XR session) the in-game UI is composited
+  into each eye as a central crop of the 16:9 UI; the size variables cannot fix that
+  (`docs/re/engine.md`, "What the UI composite does with an eye view"). With it the UI is on
+  its own layer (section "UI layer").
 - With a real OpenXR runtime the render module must hand the frame its XR thread already
   waited to the game thread at the start of stereo instead of waiting a second one
   (`XrController::BeginGameFrame`); otherwise the game thread blocks in `xrWaitFrame`

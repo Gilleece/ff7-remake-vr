@@ -16,6 +16,9 @@ What it does:
 - **stereo mode**: the engine's side-by-side image goes to the headset as a
   projection layer, with the screen as the automatic fallback whenever the
   engine is not delivering stereo frames;
+- **UI layer** in stereo: the game's UI (HUD, command menu, menus, dialogue)
+  is drawn once into its own texture and shown on a quad floating in front of
+  the user instead of inside each eye, and over the desktop window;
 - in-game captures of what each eye sees, recenter, status and test commands
   through the dev pipe;
 - frame timing of everything the module does, on the CPU and the GPU.
@@ -25,7 +28,7 @@ Contents: [Modes](#modes) · [Switching between stereo and the screen](#switchin
 [Session life cycle](#session-life-cycle) · [Dev commands](#dev-commands) ·
 [Captures](#captures) · [Timing](#timing) · [Measured overhead](#measured-overhead) ·
 [The game's D3D11 usage](#the-games-d3d11-usage) · [D3D11 hooks](#d3d11-hooks) ·
-[Stereo interface](#stereo-interface) · [First test on a Quest 3](#first-test-on-a-quest-3-through-virtual-desktop)
+[Stereo interface](#stereo-interface) · [UI layer](#ui-layer) · [First test on a Quest 3](#first-test-on-a-quest-3-through-virtual-desktop)
 
 ## Modes
 
@@ -153,6 +156,14 @@ All keys are optional. `ff7vr.ini` sits next to the DLL.
 | `[screen] offset_y` | `0` | vertical offset of the screen centre from eye height, metres |
 | `[screen] follow_head` | `0` | `1`: head-locked screen instead of world-locked |
 | `[screen] recenter_on_start` | `1` | recenter when the session starts, so the screen appears in front of the user |
+| `[ui] layer` | `1` | in stereo, show the game's UI on its own layer instead of in the eye images (see [UI layer](#ui-layer)) |
+| `[ui] distance` | `3.0` | metres from the recentered head to the UI quad |
+| `[ui] size` | `2.0` | height of the UI quad in metres; the width follows the UI's 16:9 aspect (3.56 m). Same meaning as UEVR's `UI_Size` |
+| `[ui] offset_x`, `offset_y` | `0`, `0` | offset of the quad's centre from straight ahead at eye height, metres |
+| `[ui] follow_head` | `0` | `1`: the UI follows the head (UEVR's `UI_FollowView`); `0`: it stays where recenter put it |
+| `[ui] layer_width` | `1920` | width of the quad's image in pixels; a larger game UI texture is scaled down when copied in. `0` = the game's UI texture width |
+| `[ui] mirror` | `1` | also draw the UI over the desktop window in stereo (the window shows an eye image, which no longer has the UI) |
+| `[ui] once_per_frame` | `1` | engine side: draw the UI for the first eye only (`0`: the game draws it for both eyes, as without the mod) |
 
 Screen size: 1.8 m at 2 m covers about 48 x 28 degrees for a 16:9 image, so
 the whole picture including the HUD in the corners is visible with small eye
@@ -237,6 +248,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev\send-input.ps1 -Pi
 | `mode screen` / `mode stereo` / `mode stereo-test` | switches the mode at the next frame |
 | `stereo-test pause <ms>` | in `stereo-test`: the test thread starts no frames for that long, like a game thread blocked by a load |
 | `stereo-test drop <n>` | in `stereo-test`: every n-th frame gets no stereo image (`0` = off) |
+| `ui status` | UI layer state, placement, image size, frames shown / held / dropped |
+| `ui on` / `ui off` | UI on its own layer, or back in the eye images as the game composites it (for comparison) |
+| `ui distance <m>`, `ui size <m>`, `ui offset <x> <y>`, `ui follow <0\|1>`, `ui mirror <0\|1>` | change the placement at run time |
+| `ui dump <png>` | write the game's next UI texture as it is (with its alpha channel) to a PNG; works in mono too |
+| `uihook status` | engine side: UI passes seen, redirected, skipped for the second eye, texture size and format |
+| `uihook once <0\|1>` | draw the UI for the first eye only, or for both |
+| `uihook proj` | log the projection matrices of the next two views the UI pass receives (in screen mode: the game camera's FOV) |
 
 Modules register commands with `ff7vr::dev_commands::add` (`src/core`); the
 pipe passes every line it does not handle itself to `dev_commands::dispatch`.
@@ -450,6 +468,117 @@ Rules the implementation relies on:
 thread calls `BeginGameFrame` and the Present hook submits the back buffer as
 both eyes.
 
+## UI layer
+
+The game draws its UI (HUD, command menu, main and save menus, dialogue,
+markers) inside the scene renderer into a texture of its own and composites it
+in each view's post-processing (`docs/re/engine.md`, section 9). In stereo
+that puts it into each eye at zero parallax, as a central crop at twice the
+size: the area banner, the command menu and the party panel in the corners are
+cut off, and the UI sits at infinite depth while it covers near objects.
+
+With `[ui] layer = 1` (default), whenever the engine renders a stereo frame
+and a session runs:
+
+1. The engine module (`src/engine/src/ui_layer.cpp`) lets the game draw the UI
+   for the first eye only, keeps it out of both eye images, and reports the UI
+   texture to this module before the frame's Present (`SubmitUiLayer`,
+   render.h "UI LAYER").
+2. At Present the texture is copied into the UI quad layer's swapchain: scaled
+   to `[ui] layer_width` and converted from Unreal's inverted alpha (empty =
+   alpha 1) to premultiplied alpha. The quad is submitted after the
+   projection layer, alpha-blended (`XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT`),
+   in the same frame as the eye images. The Null backend composites it the same
+   way, so captures show it.
+3. The UI is also drawn over the desktop window (`[ui] mirror`), whose image
+   is a crop of an eye in stereo. Without this the title screen would be black
+   on the desktop and menus invisible there.
+
+Frames that re-show the last stereo image keep the quad's last image; frames
+shown on the virtual screen (loading, mono fallback) carry no UI quad, their
+UI is in the game's image as usual. Screen mode, mono frames and the game
+without the stereo device are unchanged.
+
+### Placement
+
+Defaults follow the community UEVR profile for this game (`UI_Distance=3.0`,
+`UI_Size=2.0`, `UI_FollowView=false`): a 3.56 x 2.0 m quad 3 m in front of
+the recentered head, at eye height, staying in place when the head turns.
+That covers **61.3 x 36.9 degrees**: the corners are within an eye movement of
+about 30 degrees sideways and 18 degrees up or down. A 1920 px wide layer image
+gives about 28 px per degree at its centre, more than the eye images carry
+(the Null backend's Quest 3 class eye: about 17 px per degree at the centre),
+so text stays sharp; the game's 3840x2160 UI texture is box-filtered 2:1 into
+it. The angle for other values: `2 * atan(size * 16/9 / 2 / distance)` wide,
+`2 * atan(size / 2 / distance)` high. Curvature (a cylinder layer) is not
+implemented.
+
+### World-anchored elements
+
+Target markers, names, damage numbers and the objective marker are placed by
+the game from the game camera, not from the eye views. In the gameplay scene
+tested its projection is 50.0 x 29.4 degrees (`uihook proj` in screen mode),
+while the default quad covers 61.3 x 36.9. On the quad an element therefore
+appears further from the centre than its object, for the eye midpoint and a
+level game camera:
+
+| Position on the UI (centre to edge) | 25 % | 50 % | 75 % | edge |
+|---|---|---|---|---|
+| object direction, horizontal | 6.6 deg | 13.1 deg | 19.3 deg | 25.0 deg |
+| element on the default quad | 8.4 deg | 16.5 deg | 24.0 deg | 30.7 deg |
+| offset, horizontal / vertical | 1.8 / 1.0 deg | 3.4 / 2.0 deg | 4.7 / 2.9 deg | 5.7 / 3.7 deg |
+
+The cheap correction is to give the quad the camera's angle: `[ui] size =
+1.57` at `distance = 3` (2.80 x 1.57 m, 50 x 29.4 degrees). Then an element
+lines up with its object's direction exactly, with three remaining effects:
+
+- the game camera's pitch: the eye cameras drop it (`[stereo]
+  decoupled_pitch`), the markers do not, so markers shift vertically by about
+  that pitch (not measured; a fixed correction would be to tilt the quad by
+  the camera pitch every frame, which needs the camera rotation from the
+  engine module);
+- parallax: the quad is at 3 m, so each eye sees an element shifted against
+  its object by half the IPD times `1/Z - 1/3 m`: 0.6 deg for an object at
+  1.5 m, 0.2 deg at 5 m, 0.4 deg at 10 m;
+- head position: leaning moves the eyes, not the game camera.
+
+The camera's FOV is a game setting and changes with camera modes (INFERRED,
+only one scene measured), so the matching size is not automatic yet; the
+default stays the larger, easier to read UEVR size.
+
+### Measured cost
+
+Null backend, gameplay, eyes 2064x2208, game UI texture 3840x2160, 1280x720
+window, averages over 5 s periods (`captures\ui\run2`, `MARK seg-...`):
+
+| | GPU, our work per frame | Present hook (CPU) |
+|---|---|---|
+| UI in the eyes (`ui off`) | 0.063 ms (eye copies) | 0.022 ms |
+| UI layer, no window overlay (`ui mirror 0`) | 0.077 ms | 0.026 ms |
+| UI layer and window overlay (default) | 0.086 ms | 0.035 ms |
+
+So the layer costs about 0.014 ms of GPU time for the scaled copy into the
+quad and 0.009 ms for the window overlay. In exchange the game draws the UI
+once per frame instead of twice, and the eyes' post-processing samples a 1x1
+fallback texture instead of the UI (both not timed: they are the game's own
+GPU work). No extra full-screen copy is made: the UI texture is read once into
+the quad image, and once into the window.
+
+### Checking it
+
+```powershell
+tools\dev\launch.ps1 -Until gameplay -KeepRunning -Set "xr.backend=null;stereo.start_in_stereo=0"
+tools\dev\send-input.ps1 -Pipe "stereo on"
+tools\dev\send-input.ps1 -Pipe "capture $PWD\captures\ui\shot"     # eyes with the UI quad
+tools\dev\send-input.ps1 -Pipe "ui off;capture $PWD\captures\ui\noui;ui on"   # the game's own composite
+tools\dev\send-input.ps1 -Keys space        # command menu; m = main menu, esc closes
+tools\dev\send-input.ps1 -Pipe "ui dump $PWD\captures\ui\uitex.png;uihook status;ui status"
+```
+
+Reach gameplay in mono (`stereo.start_in_stereo=0`): the harness recognises the
+title and main menu from the window, which in stereo shows an eye's crop of
+the 3D scene behind the menu.
+
 ## First test on a Quest 3 through Virtual Desktop
 
 Everything above was verified with the Null backend and SteamVR's null driver;
@@ -499,3 +628,9 @@ start the game normally. Check, in this order:
 10. **Stereo** (once the engine module's stereo device is enabled): menus and
     loading screens should switch to the screen and back without a black or
     frozen frame (see [Switching](#switching-between-stereo-and-the-screen)).
+11. **UI layer**: in stereo the HUD floats about 3 m ahead as one flat panel,
+    complete to its corners, and is not doubled into the 3D image; Space opens
+    the command menu on it. Check that it is sharp and comfortable to read; if
+    it is too large or too small adjust `[ui] size` / `distance` (or `ui size
+    <m>` live), and compare markers over enemies with `[ui] size = 1.57`
+    ([World-anchored elements](#world-anchored-elements)).

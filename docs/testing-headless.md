@@ -78,6 +78,7 @@ Useful variations (all of these pass on the reference machine):
 | `--motion static\|yaw\|sway\|yawsway` | Null head motion (deterministic, a function of the frame number) |
 | `--eye-size WxH` | per-eye size (default 2064x2208) |
 | `--no-pace` | do not emulate vsync (default paces to 90 Hz) |
+| `--alpha-quad` | an opaque grey panel and, on top, an alpha-blended quad stored like Unreal's UI target (inverted premultiplied alpha: empty, 50 % red, opaque white thirds); the captures must show grey, (205, 92, 92) and white, which checks the alpha conversion and the premultiplied blending |
 
 Every run also checks that `SubmitFrame` leaves the D3D11 pipeline state
 exactly as the caller set it.
@@ -292,6 +293,24 @@ the desktop, with no change in its frame interval:
 
 Checking the retry for stutter: compare `game frame interval` p99 and max in
 the periods with retries against the periods after `xr-stop`.
+
+### The UI layer
+
+In stereo the game's UI goes to its own quad layer (`docs/render.md`, "UI
+layer"). Reach gameplay in mono, then switch stereo on (the harness recognises
+menus from the window, which in stereo shows an eye's crop of the scene):
+
+```powershell
+tools\dev\launch.ps1 -Until gameplay -KeepRunning -Set "dev.pipe=1;xr.backend=null;stereo.start_in_stereo=0"
+tools\dev\send-input.ps1 -Pipe "stereo on"
+tools\dev\send-input.ps1 -Pipe "capture $PWD\captures\ui\eyes;ui dump $PWD\captures\ui\uitex.png;ui status;uihook status"
+```
+
+The eye PNGs show the whole HUD on a panel about 61 x 37 degrees large ahead
+of the eye and no UI in the 3D image; `ui off` puts the game's own cropped
+composite back for comparison. With SteamVR's null driver the same commands
+work (`xr.runtime=steamvr`); the runtime receives the quad as a second layer
+every frame.
 
 ## Conventions the engine side relies on
 
