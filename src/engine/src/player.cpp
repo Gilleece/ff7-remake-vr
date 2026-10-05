@@ -428,6 +428,14 @@ bool is_game_camera_actor(void* o) {
 int read_battle() {
     if (!g_battle_lookup) return -1;
     if (!g_battle_lookup->ready()) {
+        // Functions exist from start-up: after three passes over the object array it is not
+        // there (a wrong name in the ini); stop scanning.
+        if (g_battle_lookup->passes() >= 3) {
+            log::warn("player: battle signal {}.{} not found; no automatic third person in battles", g_battle_class, g_battle_function);
+            delete g_battle_lookup;
+            g_battle_lookup = nullptr;
+            return -1;
+        }
         g_battle_lookup->step();
         if (!g_battle_lookup->ready()) return -1;
         log::info("player: battle signal function {}.{} found", g_battle_class, g_battle_function);
@@ -565,8 +573,8 @@ void tick(bool stereo, float delta_seconds) {
     ++g.frame;
     g.dt = std::clamp(delta_seconds, 0.0001f, 0.25f);
     if (g_lookup->ready()) run_work();
-    if (g_child_lookup && !g_child_lookup->ready()) g_child_lookup->step();
-    if (g_opt_lookup && !g_opt_lookup->ready()) {
+    if (g_child_lookup && !g_child_lookup->ready() && g_child_lookup->passes() < 3) g_child_lookup->step();
+    if (g_opt_lookup && !g_opt_lookup->ready() && g_opt_lookup->passes() < 3) {
         g_opt_lookup->step();
         if (g_opt_lookup->passes() >= 2 && !g_opt_logged) {
             g_opt_logged = true;
@@ -608,6 +616,7 @@ void tick(bool stereo, float delta_seconds) {
         if (down && !g.key_down) ++toggles;
         g.key_down = down;
     }
+    if (!s.fp_available.load()) toggles = 0;  // [first_person] enabled = 0: no toggling either
     if (toggles % 2 == 1) {
         g.first_person = !g.first_person;
         ++g.toggles;

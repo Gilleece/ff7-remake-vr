@@ -158,7 +158,7 @@ location by the mode's eye base:
 |---|---|---|
 | third person, level boom (`[camera] boom = level`, default) | where the game camera would be at zero pitch around a pivot `pivot_height` above the pawn's location: the camera's offset from the pivot taken in the camera's frame and put back with its yaw only (`math::level_boom`) | decoupled pitch on, follow camera |
 | third person, game boom (`boom = game`) | the game camera's location (the behaviour before the level boom) | always |
-| first person | the character's head bone plus `head_offset` (forward, right, up in cm, turned by the game camera's yaw); if the head bone cannot be read, the pawn's location plus `eye_offset`. The view is level and faces the game camera's yaw | first person wanted, stereo on, follow camera, no battle |
+| first person | the point between the character's eye bones (or its head bone) plus `head_offset` (forward, right, up in cm, turned by the game camera's yaw); if they cannot be read, the pawn's location plus `eye_offset`. The view is level and faces the game camera's yaw | first person wanted, stereo on, follow camera, no battle |
 | game camera | the game camera unchanged (decoupled pitch still levels the view) | anything else |
 
 **Follow camera** means: the view target is the controlled pawn or the game's own camera
