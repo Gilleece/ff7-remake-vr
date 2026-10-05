@@ -41,9 +41,11 @@ desktop. It contains:
 |---|---|
 | `start-vr.cmd` | **double-click to play in VR** |
 | `restore.cmd` | double-click to put the game folder back to normal if anything went wrong |
+| `collect-diagnostics.cmd` | double-click after a problem: zips the last session's log, the settings and basic system facts to send back |
 | `ff7vr.ini` | the settings (open it in Notepad) |
 | `xinput1_3.dll` | the mod itself |
-| `ff7vr-launcher.ps1` | the script the two `.cmd` files run |
+| `ff7vr-launcher.ps1` | the script the `.cmd` files run |
+| `README.md`, `VERSION.txt` | this guide; which version of the mod this is |
 | `logs\` | one folder per session with the mod's log (created on the first session) |
 
 **To play:** start Virtual Desktop's Streamer and connect the headset in Virtual
@@ -146,22 +148,26 @@ the package folder. The ones you are most likely to touch on day one:
 
 ## Performance
 
-Measured on the development PC (RTX 5080, Ryzen 7 5800X3D) without a headset, in
-the first room of a save game, standing still. Frame time is how long one frame of
-both eyes takes; lower is better. A Quest 3 at 90 Hz needs a frame every 11.1 ms.
+How it performs in a headset has not been measured: no headset was used during
+development. Judge it on your own setup, against whatever you compare it with.
 
-| Configuration | Per-eye size | Frame time | Notes |
-|---|---|---|---|
-| UEVR with a community profile, SteamVR virtual headset | 3072x3213 | 12.46 ms (80 fps) | graphics card busy all the time |
-| UEVR, same | 2496x2589 | 10.07 ms | held at about 100 fps by the virtual headset |
-| ff7vr 3D, no headset pacing | 2500x2600 | 8.6 ms | internal test mode, not through a VR runtime |
+The mod logs its own frame timing. Every 10 seconds `ff7vr.log` gets a `timing:`
+block: the frame rate over those 10 seconds, the mode (`screen` = virtual screen,
+`stereo` = 3D), how many frames went to the headset, `errors`, and the GPU time of
+the 3D scene with foveated rendering. A Quest 3 at 90 Hz needs a frame every
+11.1 ms (80 Hz: 12.5 ms, 120 Hz: 8.3 ms).
 
-A head-to-head through the same benchmark for both is in progress; these first
-numbers were measured in different ways and only show the direction.
+For orientation only, two numbers from the development PC (RTX 5080, Ryzen 7
+5800X3D), first room of one save game, standing still, without a headset:
 
-What these numbers do not tell you: how it feels in a headset. A virtual headset
-does not pace frames like a real one, Virtual Desktop's video encoding is not
-included, and busy scenes (combat, open areas) cost more than a quiet room.
+- 3D at 2 x 2500x2600 pixels per eye, without a VR runtime (internal test mode, the
+  game's frame cap lifted): 8.6 ms per frame for both eyes.
+- Foveated rendering, GPU time of the 3D scene at 2 x 2496x2592 per eye with the
+  simulated headset: 7.71 ms off, 6.76 ms `quality`, 6.38 ms `balanced`, 6.12 ms
+  `performance`.
+
+Busy scenes (combat, open areas) cost more than a quiet room, and Virtual
+Desktop's video encoding comes on top.
 
 ## First-session checklist
 
@@ -258,12 +264,16 @@ Known problems:
 
 ## When something is wrong: what to send
 
-1. The session's folder from `logs\` (the whole folder: `ff7vr.log`, and a
-   `ff7vr-crash-*.dmp` if there is one) and `VERSION.txt` from the package.
-2. A screenshot of the monitor (the game window) taken while it happens, and a
-   sentence on what you saw in the headset and when (the log has times; note the
-   time on the clock).
-3. Your `ff7vr.ini` if you changed anything.
+1. **The diagnostics zip.** After quitting the game, double-click
+   `collect-diagnostics.cmd`. It writes `diagnostics-<date-time>.zip` into the
+   package folder with the last session's log folder (`ff7vr.log`, and a
+   `ff7vr-crash-*.dmp` if the game crashed), your `ff7vr.ini`, `VERSION.txt` and a
+   `system.txt` (Windows version, graphics card and driver, the OpenXR runtimes
+   and which one the mod used, the state of the game folder). It changes nothing.
+   If you ran several sessions since the problem, send that session's folder from
+   `logs\` as well.
+2. A sentence on what you saw in the headset and when (the log has times; note the
+   time on the clock), and a screenshot of the monitor if it shows the problem.
 
 To narrow a problem down, change one setting at a time and start a new session:
 

@@ -9,7 +9,8 @@
        ff7vr.ini            the player's settings (from tools\package\ff7vr.ini)
        start-vr.cmd         starts a VR session (double-click)
        restore.cmd          puts the game folder back to normal (double-click)
-       ff7vr-launcher.ps1   what the two .cmd files run
+       collect-diagnostics.cmd  zips the last session's log, the settings and system facts
+       ff7vr-launcher.ps1   what the .cmd files run
        README.md            the user guide
        VERSION.txt          commit and build time
      and a .zip of that folder next to it.
@@ -77,6 +78,7 @@ $items = [ordered]@{
     'ff7vr-launcher.ps1' = (Join-Path $PSScriptRoot 'launcher\ff7vr-launcher.ps1')
     'start-vr.cmd'       = (Join-Path $PSScriptRoot 'launcher\start-vr.cmd')
     'restore.cmd'        = (Join-Path $PSScriptRoot 'launcher\restore.cmd')
+    'collect-diagnostics.cmd' = (Join-Path $PSScriptRoot 'launcher\collect-diagnostics.cmd')
     'README.md'          = (Join-Path $repo 'README.md')
 }
 foreach ($k in $items.Keys) {
@@ -100,7 +102,8 @@ if (-not $NoZip) {
 }
 
 Step "Package ready: $pkg"
-Get-ChildItem -LiteralPath $pkg | ForEach-Object { Write-Host ("    {0,-20} {1,10:N0} bytes" -f $_.Name, $(if ($_.PSIsContainer) { 0 } else { $_.Length })) }
+Get-ChildItem -LiteralPath $pkg | ForEach-Object { Write-Host ("    {0,-24} {1,10:N0} bytes" -f $_.Name, $(if ($_.PSIsContainer) { 0 } else { $_.Length })) }
 Write-Host ''
 Write-Host "Start a session:  $pkg\start-vr.cmd"
 Write-Host "Back to normal:   $pkg\restore.cmd"
+Write-Host "Diagnostics:      $pkg\collect-diagnostics.cmd"

@@ -26,6 +26,13 @@
   status
     Shows what is in place, changes nothing.
 
+  diagnostics
+    Collects what is needed to look into a problem into one zip next to this
+    script (diagnostics-<time>.zip): the last session's log folder (log and
+    crash dumps), the ff7vr.ini in use, VERSION.txt, and a system.txt with
+    Windows version, graphics card and driver, the OpenXR runtimes, and the
+    state of the game folder. Changes nothing else.
+
 .PARAMETER KeepInstalled
   Leave the mod (and the Luma rename, unless -KeepLuma) in place after the game
   exits, so the game can be started from Steam with the mod. Undo with restore.
@@ -51,7 +58,7 @@
 #>
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('start', 'restore', 'status')]
+    [ValidateSet('start', 'restore', 'status', 'diagnostics')]
     [string]$Action = 'start',
     [switch]$KeepInstalled,
     [switch]$KeepLuma,
@@ -251,24 +258,130 @@ function Invoke-Restore([string]$bin, [string]$why) {
     return $ok
 }
 
-function Show-Status([string]$root, [string]$bin) {
-    Say "Game folder:   $root"
-    Say ("Game running:  {0}" -f $(if (@(Get-GameProcs).Count -gt 0) { 'yes' } else { 'no' }))
+function Get-StatusLines([string]$root, [string]$bin) {
+    $out = @()
+    $out += "Game folder:   $root"
+    $out += ("Game running:  {0}" -f $(if (@(Get-GameProcs).Count -gt 0) { 'yes' } else { 'no' }))
     $session = Read-Session $bin
-    if ($session) { Say "Mod:           installed (state '$($session.state)', since $($session.started))" }
-    else { Say 'Mod:           not installed' }
-    foreach ($n in $ModFiles) { Say ("  {0,-14} {1}" -f $n, $(if (Test-Path -LiteralPath (Join-Path $bin $n)) { 'present' } else { 'absent' })) }
+    if ($session) { $out += "Mod:           installed (state '$($session.state)', since $($session.started))" }
+    else { $out += 'Mod:           not installed' }
+    foreach ($n in $ModFiles) { $out += ("  {0,-14} {1}" -f $n, $(if (Test-Path -LiteralPath (Join-Path $bin $n)) { 'present' } else { 'absent' })) }
     $luma = 'not installed'
     if (Test-Path -LiteralPath (Join-Path $bin $LumaOn)) { $luma = 'in place (dxgi.dll)' }
     if (Test-Path -LiteralPath (Join-Path $bin $LumaOff)) { $luma = 'set aside (dxgi.dll.vr-disabled)' }
-    Say "ReShade/Luma:  $luma"
-    Say ("Steam:         {0}" -f $(if (Test-SteamRunning) { 'running' } else { 'not running' }))
-    Say ("Virtual Desktop Streamer: {0}" -f $(if (Test-VirtualDesktopRunning) { 'running' } else { 'not running' }))
+    $out += "ReShade/Luma:  $luma"
+    $out += ("Steam:         {0}" -f $(if (Test-SteamRunning) { 'running' } else { 'not running' }))
+    $out += ("Virtual Desktop Streamer: {0}" -f $(if (Test-VirtualDesktopRunning) { 'running' } else { 'not running' }))
+    return $out
+}
+
+function Show-Status([string]$root, [string]$bin) { foreach ($l in (Get-StatusLines $root $bin)) { Say $l } }
+
+# ------------------------------------------------------------------ diagnostics
+
+function Get-SystemLines([string]$root, [string]$bin, [string]$logFile) {
+    $out = @()
+    $out += "Collected: $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss zzz'))"
+    try {
+        $os = Get-CimInstance Win32_OperatingSystem
+        $out += "Windows:   $($os.Caption) $($os.Version) (build $($os.BuildNumber)), $([math]::Round($os.TotalVisibleMemorySize / 1MB, 1)) GB RAM"
+    } catch { $out += "Windows:   (not readable: $_)" }
+    try { foreach ($c in @(Get-CimInstance Win32_Processor)) { $out += "CPU:       $($c.Name.Trim())" } } catch { }
+    try {
+        foreach ($g in @(Get-CimInstance Win32_VideoController)) {
+            $out += "GPU:       $($g.Name), driver $($g.DriverVersion) ($($g.DriverDate)), $($g.CurrentHorizontalResolution)x$($g.CurrentVerticalResolution) $($g.CurrentRefreshRate) Hz"
+        }
+    } catch { $out += "GPU:       (not readable: $_)" }
+    $out += "PowerShell: $($PSVersionTable.PSVersion)"
+    $out += ''
+    $out += 'OpenXR runtimes (the mod picks one through [xr] runtime; the PC default is not used unless runtime = system):'
+    try {
+        $k = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Khronos\OpenXR\1' -ErrorAction Stop
+        $out += "  PC default:  $($k.ActiveRuntime)"
+    } catch { $out += '  PC default:  none set' }
+    try {
+        $av = Get-Item -Path 'HKLM:\SOFTWARE\Khronos\OpenXR\1\AvailableRuntimes' -ErrorAction Stop
+        foreach ($n in $av.GetValueNames()) { $out += ("  installed:   {0} ({1})" -f $n, $(if (Test-Path -LiteralPath $n) { 'file present' } else { 'file missing' })) }
+    } catch { }
+    $out += ''
+    if ($root) {
+        $exe = Join-Path $bin 'ff7remake_.exe'
+        if (Test-Path -LiteralPath $exe) {
+            $vi = (Get-Item -LiteralPath $exe).VersionInfo
+            $out += "Game exe version: $($vi.FileMajorPart).$($vi.FileMinorPart).$($vi.FileBuildPart).$($vi.FilePrivatePart)"
+        }
+        $out += Get-StatusLines $root $bin
+    } else {
+        $out += 'Game folder: not found through Steam'
+    }
+    if ($logFile -and (Test-Path -LiteralPath $logFile)) {
+        $out += ''
+        $out += "From the log ($(Split-Path -Leaf (Split-Path -Parent $logFile))\$(Split-Path -Leaf $logFile)):"
+        $pat = 'ff7vr .* loaded|xr: thread started|xr: session created|xr: no session|runtime .* from now on|stereo: rendering|engine: stereo|foveation: (preset|variable|not)|CRASH|minidump written|exception 0x| ERROR '
+        $hits = @(Select-String -LiteralPath $logFile -Pattern $pat -CaseSensitive | Where-Object { $_.Line -notmatch 'config: ' } | Select-Object -First 40)
+        foreach ($h in $hits) { $out += "  $($h.Line)" }
+        if ($hits.Count -eq 0) { $out += '  (no matching lines)' }
+    }
+    # Paths in the user's own profile are shown relative to it.
+    if ($env:USERPROFILE) { $out = @($out | ForEach-Object { $_.Replace($env:USERPROFILE, '%USERPROFILE%') }) }
+    return $out
+}
+
+function Invoke-Diagnostics([string]$root, [string]$bin) {
+    $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss')
+    $stage = Join-Path ([System.IO.Path]::GetTempPath()) "ff7vr-diagnostics-$stamp"
+    New-Item -ItemType Directory -Force -Path $stage | Out-Null
+    try {
+        $logFile = $null
+        # A session that is still running or never finished has its log in the game folder.
+        if ($bin -and (Test-Path -LiteralPath (Join-Path $bin 'ff7vr.log'))) {
+            $d = Join-Path $stage 'game-folder'
+            New-Item -ItemType Directory -Force -Path $d | Out-Null
+            foreach ($pat in $RuntimeFiles + @('ff7vr.ini', $SessionFile)) {
+                Get-ChildItem -LiteralPath $bin -Filter $pat -File -ErrorAction SilentlyContinue | Copy-Item -Destination $d
+            }
+            $logFile = Join-Path $d 'ff7vr.log'
+            Info "Included the log in the game folder (a session is running or did not finish)"
+        }
+        $last = $null
+        if (Test-Path -LiteralPath $LogsDir) {
+            $last = Get-ChildItem -LiteralPath $LogsDir -Directory | Sort-Object Name -Descending | Select-Object -First 1
+        }
+        if ($last) {
+            Copy-Item -LiteralPath $last.FullName -Destination (Join-Path $stage "logs-$($last.Name)") -Recurse
+            if (-not ($logFile -and (Test-Path -LiteralPath $logFile))) { $logFile = Join-Path $last.FullName 'ff7vr.log' }
+            Info "Included the last session's log folder: logs\$($last.Name)"
+        } elseif (-not $logFile) {
+            Warn 'No session log found (no session has run from this folder yet).'
+        }
+        foreach ($n in @('ff7vr.ini', 'VERSION.txt')) {
+            $p = Join-Path $Here $n
+            if (Test-Path -LiteralPath $p) { Copy-Item -LiteralPath $p -Destination $stage }
+        }
+        [System.IO.File]::WriteAllLines((Join-Path $stage 'system.txt'), [string[]](Get-SystemLines $root $bin $logFile))
+        $zip = Join-Path $Here "diagnostics-$stamp.zip"
+        Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -Force
+        Info "Diagnostics collected: $zip"
+        Say  'Send this file along with a sentence on what happened and when. It contains the logs, your'
+        Say  'ff7vr.ini, and system.txt (Windows version, graphics card and driver, OpenXR runtimes); open it to check.'
+        return $true
+    } catch {
+        Fail "Collecting diagnostics failed: $_"
+        return $false
+    } finally {
+        Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 # ------------------------------------------------------------------ main
 
 $root = Find-GameRoot
+if ($Action -eq 'diagnostics') {
+    $b = $null
+    if ($root) { $b = Join-Path $root 'End\Binaries\Win64' }
+    if (Invoke-Diagnostics $root $b) { Finish 0 }
+    Finish 1
+}
 if (-not $root) {
     Fail 'FINAL FANTASY VII REMAKE INTERGRADE was not found through Steam.'
     Say  'Start this script with -GameDir "<the game folder that contains End>" or set FF7VR_GAME_DIR.'
