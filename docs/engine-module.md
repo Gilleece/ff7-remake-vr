@@ -26,6 +26,9 @@ global are written, and two single bytes of code can be changed:
 | D3D11 immediate context draw/dispatch/clear/copy functions | inline hooks, RHI thread | installed at the first stereo frame when the bloom fix is on (it needs to act on one DrawIndexed), or by the first GPU trace; otherwise not installed |
 | `FRenderTargetPool::FindFreeElement` | inline hook, render thread | only after `gpu names on` (GPU trace labels) |
 | the object array and name pool | read on the game thread | only with `[stereo] movie_screen = 1`: movie detection (below) |
+| the controlled pawn, its location and the view target | reflected functions called through `ProcessEvent`, game thread, every frame | camera modes: level boom and first person (see "Camera modes") |
+| the pawn's skeletal mesh components | `SetVisibility` through `ProcessEvent` | only while first person applies; put back afterwards |
+| XInput state | a filter in the loader's XInput proxy | only with stereo enabled: View/Back + right stick click toggles first person and is removed from the state |
 
 Everything else goes through the device's own function tables, which the engine calls:
 view rects, per-eye view offset and projection, the size of the separate render target,
@@ -139,6 +142,86 @@ Choices for a seated player in a third-person game:
 - The yaw from the right stick is applied as the game does it (smooth turning); recenter
   is the XR host's (`recenter` dev command of the render module).
 
+## Camera modes
+
+`src/engine/src/player.cpp`. Every frame, at the start of `UGameEngine::Tick`, the module
+finds the local player controller (`GEngine->GameInstance->LocalPlayers[0]->PlayerController`),
+the pawn it controls (`Controller.K2_GetPawn`) and the view target
+(`Controller.GetViewTarget`, which for a player controller is its camera manager's view
+target), all through reflected functions called with `ProcessEvent` (`docs/re/engine.md`,
+section 11). When the engine asks for the eye cameras it reads the pawn's location
+(`Actor.K2_GetActorLocation`, after the world has ticked) and replaces the game camera's
+location by the mode's eye base:
+
+| Mode | Eye base | Applies when |
+|---|---|---|
+| third person, level boom (`[camera] boom = level`, default) | where the game camera would be at zero pitch around a pivot `pivot_height` above the pawn's location: the camera's offset from the pivot taken in the camera's frame and put back with its yaw only (`math::level_boom`) | decoupled pitch on, follow camera |
+| third person, game boom (`boom = game`) | the game camera's location (the behaviour before the level boom) | always |
+| first person | the character's head bone plus `head_offset` (forward, right, up in cm, turned by the game camera's yaw); if the head bone cannot be read, the pawn's location plus `eye_offset`. The view is level and faces the game camera's yaw | first person wanted, stereo on, follow camera, no battle |
+| game camera | the game camera unchanged (decoupled pitch still levels the view) | anything else |
+
+**Follow camera** means: the view target is the controlled pawn or the game's own camera
+actor (the actor named `EndCameraActor`, of the engine's class `CameraActor` exactly, the view
+target in normal play; a cutscene's `CineCameraActor` does not count), and the camera looks
+at the pivot above the pawn (the pivot is in front of the camera, within `follow_distance`,
+and no more than `aim_tolerance` from its line of sight; the follow camera misses it by
+30 to 50 cm in the street, depending on the pitch). The test has a hysteresis of 30 frames each way, so a short scripted move does
+not flip the mode. A camera that looks elsewhere (an authored shot of a conversation or a
+cutscene, a scripted pan) or another view target makes the module use the game's camera as
+it is, in both modes. Whether every authored camera fails the test has not been checked:
+no conversation or cutscene has been reached yet.
+
+Why the level boom: the game's follow camera swings on a boom around the character. With
+decoupled pitch the view stays level, so in the headset the only effect of pitch input was
+that the player was lifted up to 2.4 m (camera pitched down) or lowered to counter height
+(pitched up), sometimes behind objects. With the level boom the player stays at the pivot's
+height behind the character at the boom's current length (shortened by the game's camera
+collision as before) while the right stick or mouse orbits; pitch input only changes where
+the game camera points, which decoupled pitch drops, so looking up and down is done with the
+head. Measured: see "Camera modes: evidence".
+
+### First person
+
+- **Toggle**: the keyboard key `toggle_key` (virtual-key code, default 36 = Home, while the
+  game window has the focus), the gamepad combination View/Back + right stick click
+  (`pad_toggle`), or `fp toggle` on the dev pipe. A manual toggle holds until the next
+  automatic switch.
+- **Default**: third person (`default = 0`). `default = 1` starts in first person and
+  returns to it after every battle; it should become the default once the battle signal
+  exists.
+- **Eye**: the character's head bone, found once per pawn by name over its skeletal meshes
+  (`SkinnedMeshComponent.GetNumBones` / `GetBoneName`; a bone named `head` or containing
+  `head`, not an end or helper bone) and read every frame after the world has ticked
+  (`SceneComponent.GetSocketLocation`). Its offset from the pawn's location is smoothed over
+  about 80 ms so animation jitter does not shake the view, while the pawn's own movement is
+  followed without delay. `head_offset` (forward, right, up, in the camera's yaw frame) is
+  added. When the bone cannot be read (no such bone, a call fails, a location more than
+  2.5 m from the pawn) the eyes go to the pawn's location plus `eye_offset` for that frame.
+- **Body**: with `hide = meshes` (default) every skeletal mesh component owned by the pawn
+  that is visible is hidden (`SetVisibility(false)`, not propagated to attached components)
+  when the first-person blend passes half way; exactly those are shown again when first
+  person stops applying (toggle, authored camera, battle, stereo off) or when the controlled
+  pawn changes. A mesh the game shows again while hidden is hidden again the next frame.
+  Finding the meshes scans the object array each time first person starts (a one-off cost
+  of a few milliseconds on the game thread), so meshes added since the last time (equipment)
+  are included. When the game exits nothing needs restoring (visibility is not saved).
+- **Blend**: switching between third and first person moves the eye base over
+  `blend_seconds` (smoothstep); a switch to or from an authored camera is a cut, as the
+  game's own camera cuts there.
+- **Combat**: with `auto_combat = 1` the mode switches to third person while a battle is in
+  progress and back to the default afterwards. The battle signal is not implemented yet
+  (`fp combat 1|0|auto` simulates it); see "Known problems".
+
+### Gamepad toggle
+
+The loader's XInput proxy passes every successful `XInputGetState` / `XInputGetStateEx`
+result through `ff7vr::engine::filter_pad` (registered only when the stereo device is
+enabled). When View/Back (`0x0020`) and the right stick click (`0x0080`) are both held, a
+toggle is requested once, and both bits are removed from the state from that moment until
+both buttons are released, so the game never sees either of them as part of the
+combination. The game polls XInput only while a pad is connected; `fp pad <hex buttons>`
+feeds a button state through the same filter for a test without a pad.
+
 ## ini keys (`[stereo]` in `ff7vr.ini`)
 
 | Key | Default | Meaning |
@@ -160,6 +243,32 @@ Choices for a seated player in a third-person game:
 | `fov_left_deg`, `fov_right_deg`, `fov_up_deg`, `fov_down_deg` | `-45`, `45`, `45`, `-45` | fixed host: left eye FOV (the right eye mirrors left/right) |
 | `ipd_mm` | `64` | fixed host |
 | `head_motion` | `static` | fixed host: `static`, `yaw`, `sway`, `yawsway` (same scripts as the XR Null backend) |
+| `comfort_cvars` | `1` | switch off the flat-screen camera effects while in stereo (see "Flat-screen camera effects") |
+
+`[camera]` (see "Camera modes"):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `boom` | `level` | `level`: eyes at the zero-pitch boom position around the character; `game`: the game camera's position |
+| `pivot_height` | `55` | cm above the pawn's location: the pivot of the game's camera boom (measured 55.4, `docs/re/engine.md` section 11) |
+| `follow_distance` | `1500` | cm; a camera farther than this from the pivot is not treated as the follow camera |
+| `aim_tolerance` | `75` | cm; largest distance of the pivot from the camera's line of sight for the follow camera |
+
+`[first_person]`:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `1` | first person can be used at all; `0` switches it off completely (toggle, pad combination and automatic switching) |
+| `default` | `0` | `1`: first person outside combat from the start. Off by default until the battle signal exists: without it a battle would be played in first person |
+| `auto_combat` | `1` | third person while a battle is in progress (battle signal not implemented yet) |
+| `eye` | `head` | `head`: the eyes at the character's head bone (below); `offset`: at the pawn's location plus `eye_offset` |
+| `head_offset` | `10 0 8` | forward, right, up in cm from the head bone, turned with the camera's yaw |
+| `eye_offset` | `10 0 75` | forward, right, up in cm from the pawn's location (capsule centre), turned with the camera's yaw; used with `eye = offset` and whenever the head bone cannot be read |
+| `battle_signal` | see "Combat" | `Class.Function`: a reflected function without parameters returning bool, read every frame on a live object of that class; empty = no automatic switch |
+| `hide` | `meshes` | `meshes`: hide the character's skeletal meshes while in first person; `none`: hide nothing |
+| `toggle_key` | `36` | virtual-key code of the keyboard toggle (36 = Home); `0` = none |
+| `pad_toggle` | `1` | View/Back + right stick click toggles, and is hidden from the game |
+| `blend_seconds` | `0.35` | duration of the move between third and first person |
 
 Two more sections hold console variables (names are case-insensitive):
 
@@ -191,6 +300,16 @@ Through the dev pipe (`[dev] pipe = 1`, `tools\dev\send-input.ps1 -Pipe "<comman
 | `gpu names on`, `gpu trace <prefix> [dump fullscreen \| dump <from> <to>] [scale <n>]`, `gpu status` | one-frame GPU trace (`docs/re/engine.md`, Tools) |
 | `re peek <rva> <n>`, `re poke <rva> <hex bytes>` | read or patch the game image (to try a patch in a running game) |
 | `stereo host <render\|fixed>` | switch the source of eye size and views (for tests; switching away from `render` leaves the render module in stereo mode) |
+| `fp status` | controlled pawn, view target, follow camera, mode, blend, hidden meshes, toggles (keyboard/dev and pad), pawn location, which eye base the last frame used |
+| `fp toggle`, `fp first`, `fp third` | switch first person (manual: holds until the next automatic switch) |
+| `fp available <0\|1>`, `fp hide <none\|meshes>`, `fp offset <fwd> <right> <up>`, `fp eye <head\|offset>`, `fp headoffset <fwd> <right> <up>`, `fp blend <s>` | first-person settings |
+| `fp bones [text]` | bones of the character's skeletal meshes whose name contains the text (default `head`), with world location and offset from the pawn's location |
+| `fp funcs <text> [class text]`, `fp props <text> [class text]` | reverse engineering: reflected functions or properties whose name contains the text, with their class |
+| `fp call <object address \| class name> <Class.Function> [hex parameters]` | reverse engineering: calls a reflected function on the game thread and prints the first 48 bytes of its parameter block afterwards (return values follow the arguments) |
+| `fp combat <1\|0\|auto>` | test: pretend a battle is or is not in progress |
+| `fp pad <hex buttons>` | test: feed an XInput button state through the gamepad filter, prints what the game would get |
+| `fp boom <level\|game>`, `fp pivot <cm>` | third-person camera settings |
+| `fp find <name> [outer] [class]`, `fp classes <text>`, `fp chain <hex address \| pawn \| view \| pc>` | reverse engineering: objects by name, objects whose class name contains a text, the class chain of an object |
 | `cvar get <name>` | integer and float value and set-by priority of a console variable |
 | `cvar set <name> <value>` | set it with console priority (applied on the game thread) |
 
@@ -315,6 +434,30 @@ speed, `r.MotionBlurQuality = 0` (no cost difference) removes the game's camera 
 which in a headset smears the image while the camera turns; not applied either (no capture
 of it in motion yet).
 
+## Flat-screen camera effects
+
+`[stereo] comfort_cvars = 1` (default) holds these console variables while the engine
+renders in stereo (saved when stereo starts, put back when it stops, the same mechanism as
+`[stereo_cvars]`; an entry of the same name in `[stereo_cvars]` replaces the built-in value):
+
+| Effect | What was done | Why |
+|---|---|---|
+| camera motion blur | `r.MotionBlurQuality = 0` | in a headset it smears the image while the view turns, and the head's own motion is not part of it. Costs nothing to remove (`r.MotionBlurQuality` in "Measured"). The game runs with 4 |
+| chromatic aberration | `r.SceneColorFringeQuality = 0` | an imitation of lens fringing around the image centre; each eye's image centre is not its lens centre (asymmetric projection) and the headset's lenses add their own. The game runs with 1 |
+| depth of field | not changed (`r.DepthOfFieldQuality` stays 2) | no depth of field was seen in gameplay in the scenes tested; in cutscenes it is part of the authored look. Candidate: hold it at 0 only while the follow camera applies (the camera-mode signal), once a scene with gameplay depth of field has been seen |
+| camera shake | not a console variable | shakes reach the eyes through the game camera's point of view: decoupled pitch drops their pitch and roll, the level boom their up-and-down motion along the boom, and first person uses only the camera's yaw; the yaw part and the sideways part remain in third person |
+| film grain | not changed | `r.Tonemapper.GrainQuantization 1` is the tonemapper's dithering against banding, not visible grain; grain intensity is a post-process setting without a console variable |
+| vignette | not changed | it is part of the tonemapper (`r.Tonemapper.Quality 5`); lowering the quality also changes other parts of the look. A community mod removes it for flat play, so it is a matter of taste rather than a VR problem |
+
+Verified in the street (`captures/camera/runD`, `cvar get` through the dev pipe): before
+stereo `r.MotionBlurQuality` 4 and `r.SceneColorFringeQuality` 1 (set by the engine's
+defaults, priority `0x0`); while stereo renders both 0 (console priority `0x9000000`); after
+`stereo off` 4 and 1 again. The values are put back with console priority, so a later change
+of the same variable by the game at a lower priority (for example its options menu, if it
+uses one) is ignored until the game restarts; this is how every `[stereo_cvars]` entry
+behaves. Whether the blur is visibly gone was not checked with a capture in motion: a still
+capture after a mouse move does not show it reliably.
+
 ## Right-eye bloom fix
 
 Square Enix's bloom builds a mip chain per view with every level at the origin of its
@@ -428,34 +571,57 @@ Signatures are resolved at start-up with the same rules as the rest of the modul
 match, checked against the RVA of build 1.0.0.7). `[ui] once_per_frame = 0` (or `uihook once 0`)
 lets the game draw the UI for both eyes again; `uihook status` shows the counters.
 
+## Trying the camera in the headset
+
+What to try first, in this order:
+
+1. **Third person, walking and orbiting.** Walk around and move the right stick (or the
+   mouse) up and down. The player's height should stay at the character's shoulder level
+   while the view orbits; only the left/right part of the stick turns you. Walk with your
+   back to a wall and orbit: the eyes should stay out of the wall.
+2. **First person.** Toggle with View/Back + right stick click (or Home on the keyboard).
+   The view should be at Cloud's eye height, facing where the camera faced, with no part of
+   Cloud visible. Walk, turn, toggle back and forth a few times: in third person Cloud must
+   be complete every time.
+3. **A conversation, a cutscene, a battle, a loading screen.** In each, the log should show
+   the camera mode switching to `game camera` (authored shots) or to third person (battle),
+   and back afterwards.
+
+If something is wrong, send `ff7vr.log` from the game's `End\Binaries\Win64` folder (it is
+rewritten at every start, so copy it before starting the game again) and say roughly when
+it happened. The lines that matter start with `player:` (every camera mode change with its
+reason, the follow camera on and off, the battle signal, first person toggles, meshes hidden
+and shown). Keys to flip in `ff7vr.ini` to narrow it down:
+
+| Symptom | Try |
+|---|---|
+| third person feels wrong when orbiting, or eyes inside geometry | `[camera] boom = game` (the game's own camera position, the behaviour before) |
+| first person at the wrong height or inside the head | `[first_person] eye = offset` and adjust `eye_offset`; or `head_offset` |
+| first person in a battle, or third person outside one | `[first_person] battle_signal =` (empty: no automatic switch) and `default = 0` |
+| any first-person problem | `[first_person] enabled = 0` switches the whole feature off |
+| a cutscene or conversation viewed from the wrong place | `[camera] boom = game`; if that does not fix it, the follow-camera test passed for an authored camera: the log line `player: follow camera on (...)` names the camera |
+
 ## Known problems
 
 Ordered by how much they would bother a player in the headset:
 
-1. **The game's camera boom moves the eyes up and down with the game camera's pitch**
-   (see "Evaluation in play"): turning the camera up or down with the mouse or the right
-   stick lifts the player up to about 2.4 m or lowers them to counter height while the view
-   stays level, sometimes behind an object. Candidate fix: place the eyes where the camera
-   would be at zero pitch around the boom's pivot (the character), so pitch input only
-   changes what the head looks at.
-2. **Not exercised with scripted input**: conversations (camera cuts and scripted camera
+1. **Not exercised with scripted input**: conversations (camera cuts and scripted camera
    moves), real-time cutscenes, the pause menu, loading screens, combat. How decoupled
-   pitch and the head pose combine with a cinematic camera is unknown.
-3. **Pre-rendered movies**: detection exists but no movie was reached; `[stereo]
+   pitch and the head pose combine with a cinematic camera is unknown, and whether every
+   authored camera fails the follow-camera test (so that neither the level boom nor first
+   person applies there) has not been seen.
+2. **Pre-rendered movies**: detection exists but no movie was reached; `[stereo]
    movie_screen` is off by default. Without it a movie would be rendered into both eyes
    wherever the game draws it (UI or scene).
-4. **Smooth camera yaw** is applied as the game does it (no snap turn option).
-5. **Camera motion blur** is on (`r.MotionBlurQuality 4`); in a headset it smears the image
-   while the camera turns. `r.MotionBlurQuality = 0` in `[stereo_cvars]` costs nothing;
-   not applied without a capture in motion.
-6. Square Enix's custom glare (`docs/re/engine.md`, section 10) puts both views' glare at the
+3. **Smooth camera yaw** is applied as the game does it (no snap turn option).
+4. Square Enix's custom glare (`docs/re/engine.md`, section 10) puts both views' glare at the
    same place of one target; in a scene with glare primitives the left eye would get the
    right eye's glare. Not seen yet (no glare primitives in the scenes tested).
-7. Without the UI layer (`[ui] layer = 0`, or no XR session) the in-game UI is composited
+5. Without the UI layer (`[ui] layer = 0`, or no XR session) the in-game UI is composited
    into each eye as a central crop of the 16:9 UI; the size variables cannot fix that
    (`docs/re/engine.md`, "What the UI composite does with an eye view"). With it the UI is on
    its own layer (section "UI layer").
-8. With a real OpenXR runtime the render module must hand the frame its XR thread already
+6. With a real OpenXR runtime the render module must hand the frame its XR thread already
    waited to the game thread at the start of stereo instead of waiting a second one
    (`XrController::BeginGameFrame`, in place); otherwise the game thread blocks in
    `xrWaitFrame` forever when the pipeline is idle (seen with SteamVR's null driver).

@@ -92,10 +92,18 @@ SHORT add_axis(SHORT a, SHORT b) {
     return static_cast<SHORT>(v);
 }
 
+std::atomic<PadFilter> g_pad_filter{nullptr};
+
+DWORD filtered(DWORD user, XINPUT_STATE* state, DWORD rc) {
+    const PadFilter f = g_pad_filter.load(std::memory_order_relaxed);
+    if (f && rc == ERROR_SUCCESS && state) f(user, &state->Gamepad.wButtons);
+    return rc;
+}
+
 DWORD merged_get_state(DWORD user, XINPUT_STATE* state, GetStateFn fn) {
     g_get_state_calls.fetch_add(1, std::memory_order_relaxed);
     DWORD rc = fn ? fn(user, state) : ERROR_DEVICE_NOT_CONNECTED;
-    if (user != 0 || !g_vpad_enabled.load(std::memory_order_relaxed) || !state) return rc;
+    if (user != 0 || !g_vpad_enabled.load(std::memory_order_relaxed) || !state) return filtered(user, state, rc);
     VirtualPad v;
     AcquireSRWLockShared(&g_vpad_lock);
     v = g_vpad;
@@ -115,7 +123,7 @@ DWORD merged_get_state(DWORD user, XINPUT_STATE* state, GetStateFn fn) {
     g.sThumbRY = add_axis(g.sThumbRY, v.ry);
     // Packet number must change when the state changes, or XInput users may skip it.
     state->dwPacketNumber += g_vpad_packet.load(std::memory_order_relaxed);
-    return rc;
+    return filtered(user, state, rc);
 }
 
 }  // namespace
@@ -138,6 +146,7 @@ VirtualPad virtual_pad() {
     return v;
 }
 std::uint64_t get_state_calls() { return g_get_state_calls.load(); }
+void set_pad_filter(PadFilter filter) { g_pad_filter = filter; }
 
 }  // namespace ff7vr::loader::xinput
 

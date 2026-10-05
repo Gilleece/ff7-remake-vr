@@ -7,6 +7,7 @@
 #include "rhi_command.h"
 #include "bloom_fix.h"
 #include "movie_watch.h"
+#include "player.h"
 #include "stereo_device.h"
 
 #if FF7VR_ENGINE_WITH_RENDER
@@ -23,6 +24,8 @@
 #include <windows.h>
 
 #include <atomic>
+#include <cstdio>
+#include <cwchar>
 #include <string>
 #include <thread>
 #include <utility>
@@ -134,10 +137,56 @@ void __fastcall tick_detour(void* engine, float delta_seconds, bool idle) {
     if (installed) {
         movie::tick();
         device::tick_begin();
+        player::tick(device::active(), delta_seconds);
         if (!g_view_states_logged) log_view_states(engine);
     }
     g_tick_hook->original<TickFn>()(engine, delta_seconds, idle);
     if (installed) device::tick_end();
+}
+
+// Camera effects meant for a flat screen, switched off while the engine renders in stereo
+// and put back afterwards ([stereo] comfort_cvars = 0 keeps them; a [stereo_cvars] entry of
+// the same name wins). See docs/engine-module.md, "Flat-screen camera effects".
+const std::pair<const wchar_t*, const wchar_t*> kComfortCvars[] = {
+    {L"r.MotionBlurQuality", L"0"},       // camera motion blur smears the image while the view turns
+    {L"r.SceneColorFringeQuality", L"0"}, // chromatic aberration: the headset's lenses have their own
+};
+
+// Default battle signal for the automatic third person in combat (docs/engine-module.md,
+// "Combat"): the ID of the current battle scene (an FName; its index is 0, None, outside a
+// battle). "" = none.
+constexpr const char* kBattleSignal = "EndBattleAPI.GetBattleSceneID result=0:4";
+
+void read_camera_settings(const Config& cfg) {
+    player::Settings& p = player::settings();
+    const std::string boom = cfg.get_string("camera", "boom", "level");
+    p.level_boom = boom != "game";
+    p.pivot_height = static_cast<float>(cfg.get_float("camera", "pivot_height", p.pivot_height.load()));
+    p.follow_distance = static_cast<float>(cfg.get_float("camera", "follow_distance", p.follow_distance.load()));
+    p.aim_tolerance = static_cast<float>(cfg.get_float("camera", "aim_tolerance", p.aim_tolerance.load()));
+    p.fp_available = cfg.get_bool("first_person", "enabled", p.fp_available.load());
+    p.fp_default = cfg.get_bool("first_person", "default", p.fp_default.load());
+    p.auto_combat = cfg.get_bool("first_person", "auto_combat", p.auto_combat.load());
+    p.blend_seconds = static_cast<float>(cfg.get_float("first_person", "blend_seconds", p.blend_seconds.load()));
+    p.toggle_key = static_cast<int>(cfg.get_int("first_person", "toggle_key", p.toggle_key.load()));
+    p.hide = cfg.get_string("first_person", "hide", "meshes") == "none" ? 0 : 1;
+    p.pad_toggle = cfg.get_bool("first_person", "pad_toggle", p.pad_toggle.load());
+    p.eye_head = cfg.get_string("first_person", "eye", "head") != "offset";
+    player::set_battle_signal(cfg.get_string("first_person", "battle_signal", kBattleSignal));
+    const std::string hoff = cfg.get_string("first_person", "head_offset", "");
+    float hf = 0, hr = 0, hu = 0;
+    if (!hoff.empty() && sscanf_s(hoff.c_str(), "%f %f %f", &hf, &hr, &hu) == 3) {
+        p.head_forward = hf;
+        p.head_right = hr;
+        p.head_up = hu;
+    }
+    const std::string off = cfg.get_string("first_person", "eye_offset", "");
+    float f = 0, r = 0, u = 0;
+    if (!off.empty() && sscanf_s(off.c_str(), "%f %f %f", &f, &r, &u) == 3) {
+        p.eye_forward = f;
+        p.eye_right = r;
+        p.eye_up = u;
+    }
 }
 
 // Full resolution and the Tick hook, off the loader thread.
@@ -147,6 +196,7 @@ void resolve_and_prepare() {
     if (g_addr.stereo_ok) {
         device::init(g_addr.GNearClippingPlane, g_opt.start_in_stereo, fixed_options());
         movie::init({g_addr.GUObjectArray, g_addr.FNamePool}, g_opt.movie_screen);
+        player::init(g_addr.GUObjectArray, g_addr.FNamePool, g_addr.GEngine);
         bloom_fix::init(g_addr.BloomReduceProcess, g_opt.bloom_fix);
         if (!g_tick_hook->create(g_addr.GameEngineVtable, g_addr.slot_Tick / sizeof(void*), &tick_detour)) {
             g_addr.stereo_ok = false;
@@ -186,7 +236,10 @@ bool start(const StartupContext& ctx) {
         if (mirror::parse_mode(cfg.get_string("stereo", "mirror", "crop"), mode)) s.mirror = static_cast<int>(mode);
         s.log_frames = static_cast<int>(cfg.get_int("stereo", "log_frames", 0));
         fixed_options() = FixedStereoHost::from_config(cfg);
+        read_camera_settings(cfg);
         std::vector<std::pair<std::wstring, std::wstring>> stereo_cvars;
+        if (cfg.get_bool("stereo", "comfort_cvars", true))
+            for (const auto& [name, value] : kComfortCvars) stereo_cvars.emplace_back(name, value);
         for (const std::string& line : cfg.dump()) {
             // "cvars.<name> = <value>" (set once when the device is installed) and
             // "stereo_cvars.<name> = <value>" (held only while stereo renders)
@@ -196,9 +249,11 @@ bool start(const StartupContext& ctx) {
             if (eq == std::string::npos) continue;
             if (line.rfind(prefix, 0) == 0)
                 g_opt.cvars.emplace_back(line.substr(prefix.size(), eq - prefix.size()), line.substr(eq + 3));
-            else if (line.rfind(stereo_prefix, 0) == 0)
-                stereo_cvars.emplace_back(log::widen(line.substr(stereo_prefix.size(), eq - stereo_prefix.size())),
-                                          log::widen(line.substr(eq + 3)));
+            else if (line.rfind(stereo_prefix, 0) == 0) {
+                std::wstring name = log::widen(line.substr(stereo_prefix.size(), eq - stereo_prefix.size()));
+                std::erase_if(stereo_cvars, [&](const auto& kv) { return _wcsicmp(kv.first.c_str(), name.c_str()) == 0; });
+                stereo_cvars.emplace_back(std::move(name), log::widen(line.substr(eq + 3)));
+            }
         }
         cvar::set_stereo_overrides(std::move(stereo_cvars));
 #if FF7VR_ENGINE_WITH_RENDER
@@ -218,6 +273,8 @@ bool start(const StartupContext& ctx) {
             handle_command("cvar " + std::string(args), reply);
             return reply;
         });
+        dev_commands::add("fp", "fp status|toggle|first|third|combat <0|1|auto>|offset|eye|hide|boom|pivot|bones|funcs|call (fp help): camera modes",
+                          [](std::string_view args) { return player::command(std::string(args)); });
         dev_commands::add("gpu", "gpu status | gpu names on | gpu trace <prefix> [dump <from> <to>] [scale <n>]: one-frame GPU trace",
                           [](std::string_view args) { return gpu_trace::command(std::string(args)); });
         dev_commands::add("re", "re peek <rva> <n> | re poke <rva> <hex bytes>: read or patch the game image",
@@ -262,5 +319,6 @@ void set_stereo_host(StereoHost* host) { device::set_host(host); }
 bool stereo_installed() { return g_installed.load(); }
 bool stereo_active() { return g_installed.load() && device::active(); }
 void request_stereo(bool on) { device::request_active(on); }
+void filter_pad(unsigned long user, unsigned short* buttons) { player::filter_pad(user, buttons); }
 
 }  // namespace ff7vr::engine

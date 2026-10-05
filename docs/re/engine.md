@@ -783,6 +783,53 @@ screen percentage), `+0xA0` view rect, `+0x970` stereo pass, `+0xE70` bloom/glar
 (float), `+0xF44` / `+0xF48` bloom parameters, `+0x10AC` another post-processing enable
 (float), `+0x1768` custom glare primitives.
 
+## 11. The player's character and the camera (reflection, LIVE)
+
+Found and used by `src/engine/src/player.cpp` (camera modes, `docs/engine-module.md`).
+Nothing here needs a signature: objects and functions are found by name through the object
+array and the name pool (section 2), and functions are called with `ProcessEvent`
+(UObject vtable slot 64) on the game thread.
+
+| Fact | Value | How to find it again | Status |
+|---|---|---|---|
+| Local player controller | `GEngine+0x1070` (GameInstance) `+0x38` (LocalPlayers data) `[0]` `+0x30` | section 5 offsets | LIVE (`fp status`: alive object) |
+| Controlled pawn | `Controller.K2_GetPawn()` -> `APawn*` (params: return value at +0) | UFunction `K2_GetPawn`, outer class `Controller` | LIVE: `PC0000_00_Cloud_Standard_C` in the Sector 7 slums save; none while a level loads |
+| Pawn location | `Actor.K2_GetActorLocation()` -> `FVector` at +0 | UFunction, outer `Actor` | LIVE: Z 101.1 standing on the street (capsule centre) |
+| View target | `Controller.GetViewTarget()` -> `AActor*` at +0. Virtual: a player controller returns its camera manager's view target. `PlayerCameraManager` has no reflected `GetViewTarget` in this build; the other function of that name belongs to `CameraModifier` | `fp find GetViewTarget` | LIVE |
+| Camera manager | one object of class `EndPlayerCameraManager` in `/Game/GameContents/Level/Game/EndGame.EndGame.PersistentLevel` | `fp classes CameraManager` | LIVE |
+| View target in normal play | an actor **named** `EndCameraActor` whose class is the engine's `CameraActor` (class chain `CameraActor Actor Object`), **not** the pawn | `fp status`, `fp chain view` | LIVE (street, walking and standing) |
+| Player classes | pawn `PC0000_00_Cloud_Standard_C` -> `EndCharacter` -> `Character` -> `Pawn` -> `Actor`; controller `EndPlayerControllerBP_C` -> `EndPlayerController` -> `PlayerController` | `fp chain pawn`, `fp chain pc` | LIVE |
+| Head and eye bones | Cloud's body mesh `CharacterMesh0` (547 bones) has `C_Head_a` (72.0 cm above the pawn's location), `L_Eye` / `R_Eye` (74.6 / 74.9 cm above it, 5.6 cm apart) and `C_Forehead`. Found with `SkinnedMeshComponent.GetNumBones()` (int32 at +0) and `GetBoneName(int32)` (FName at +4), located with `SceneComponent.GetSocketLocation(FName)` (FVector at +8) | `fp bones head`, `fp bones eye` | LIVE (street, standing) |
+| Mesh visibility | `SceneComponent.SetVisibility(bool bNewVisibility, bool bPropagateToChildren)` (bytes +0, +1), `SceneComponent.IsVisible()` -> bool at +0 | UFunctions, outer `SceneComponent` | LIVE (called without failures; effect: see the first-person captures in `docs/engine-module.md`) |
+| `UStruct::SuperStruct` | `+0x30`, right after `UField::Next` (+0x28): 4.18 has no `FStructBaseChain`. `+0x40` is `PropertiesSize` (int32) followed by `MinAlignment` (int32): read as a pointer it gave `0x100000990` (size 0x990, alignment 1), the bad address of the earlier attempt | `fp chain pawn` prints the whole chain up to `Object` | LIVE |
+
+### The follow camera's boom (LIVE)
+
+Street outside the first room, camera yaw fixed, pitch changed with the mouse, camera
+location from `stereo views`, pawn location from `fp status` (`captures/camera/runB`):
+
+| Camera pitch | Camera Z | Horizontal distance to the pawn |
+|---|---|---|
+| +9.9 | 98.1 | 337.8 |
+| -10.0 | 215.5 | 337.8 |
+| -29.3 | 322.4 | about 300 |
+
+`Z = 156.5 - 339 * sin(pitch)` fits all three within 0.3 cm, and the horizontal distance
+follows `339 * cos(pitch)`: the camera sits on a 339 cm boom around a pivot 55.4 cm above
+the pawn's location (at Z 156.5 here), looking at the pivot. This is what the level boom
+(`[camera] pivot_height = 55`) undoes. The game's camera collision shortens the boom near
+walls (not measured).
+
+### Battle and conversation objects (LIVE, exploration only)
+
+Out of combat the object array already holds the battle data tables
+(`/Game/GameContents/DataObject/Resident/Battle*`, classes `EndDataObjectBattle*`), a
+`BattleTalkOnEndBattle_C` actor in the persistent level and a `BattleTalk_<name>_C`
+component on each party member, and the conversation menu widgets
+(`/Game/GameContents/Menu/Resident/Cinema/TalkMenu_Center`). Their existence is therefore not
+a battle or conversation signal; a state inside one of them (or the camera manager's mode)
+has to be compared in and out of a battle, which has not been reached yet.
+
 ## Tools
 
 All in `tools/re/`, run with the repo's `.venv` Python. The exe is found through Steam's

@@ -39,4 +39,10 @@ bool stereo_active();
 // game normally into the window (the device stays installed).
 void request_stereo(bool on);
 
+// Gamepad filter, called by the XInput proxy with every successful XInputGetState result of
+// any thread. View/Back together with the right stick click toggles first person
+// ([first_person] pad_toggle); both buttons are removed from the state from the moment the
+// combination is held until both are released, so the game never acts on them.
+void filter_pad(unsigned long user, unsigned short* buttons);
+
 }  // namespace ff7vr::engine

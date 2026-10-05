@@ -123,6 +123,25 @@ int main() {
     const double depth = (100 * m.M[2][2] + m.M[3][2]) / (100 * m.M[2][3]);
     check(near(depth, 0.1), "reversed-Z depth = near / z");
 
+    // Level boom: a camera 400 cm behind the pivot on a boom pitched down 34 degrees (looking
+    // down from above) comes back to the pivot's height, 400 cm behind it along the yaw.
+    {
+        const double pitch = -34 * kDeg, yaw = 90 * kDeg;
+        const Vec pivot{1000, 2000, 160};
+        const Vec fwd{std::cos(pitch) * std::cos(yaw), std::cos(pitch) * std::sin(yaw), std::sin(pitch)};
+        const ue::FVector cam{static_cast<float>(pivot.x - 400 * fwd.x), static_cast<float>(pivot.y - 400 * fwd.y),
+                              static_cast<float>(pivot.z - 400 * fwd.z)};
+        const Vec b = level_boom(ue::FRotator{-34, 90, 0}, cam, pivot);
+        check(near(b.x, 1000, 0.05) && near(b.y, 1600, 0.05) && near(b.z, 160, 0.05),
+              "level boom: pitched camera back to the pivot's height");
+        // A sideways offset of the camera (over the shoulder) is kept.
+        const ue::FVector cam2{cam.X + 50, cam.Y, cam.Z};  // yaw 90: +X is the camera's left
+        const Vec b2 = level_boom(ue::FRotator{-34, 90, 0}, cam2, pivot);
+        check(near(b2.x, 1050, 0.05) && near(b2.y, 1600, 0.05) && near(b2.z, 160, 0.05), "level boom keeps the sideways offset");
+        const Vec b3 = level_boom(ue::FRotator{0, 90, 0}, ue::FVector{1000, 1600, 160}, pivot);
+        check(near(b3.x, 1000, 0.05) && near(b3.y, 1600, 0.05) && near(b3.z, 160, 0.05), "level boom: zero pitch unchanged");
+    }
+
     std::printf("%s (%d failure%s)\n", g_failures ? "RESULT: FAIL" : "RESULT: PASS", g_failures, g_failures == 1 ? "" : "s");
     return g_failures ? 1 : 0;
 }

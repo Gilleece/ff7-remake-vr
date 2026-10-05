@@ -127,4 +127,11 @@ void compose_eye(const EyeCameraInput& in, ue::FRotator& out_rotation, ue::FVect
     out_location.Z = static_cast<float>(in.camera_location.Z + offset.z);
 }
 
+Vec level_boom(const ue::FRotator& camera_rotation, const ue::FVector& camera_location, const Vec& pivot) {
+    const Quat q_cam = quat_from_rotator(ue::FRotator{camera_rotation.Pitch, camera_rotation.Yaw, 0.0f});
+    const Quat q_yaw = quat_from_rotator(ue::FRotator{0.0f, camera_rotation.Yaw, 0.0f});
+    const Vec v{camera_location.X - pivot.x, camera_location.Y - pivot.y, camera_location.Z - pivot.z};
+    return add(pivot, rotate(q_yaw, rotate(conjugate(q_cam), v)));
+}
+
 }  // namespace ff7vr::engine::math

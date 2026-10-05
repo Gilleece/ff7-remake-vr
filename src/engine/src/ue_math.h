@@ -59,4 +59,10 @@ struct EyeCameraInput {
 };
 void compose_eye(const EyeCameraInput& in, ue::FRotator& out_rotation, ue::FVector& out_location);
 
+// Where a follow camera at `camera_location` with `camera_rotation` would be at zero pitch
+// (and no roll) around `pivot`: the camera's offset from the pivot, taken in the camera's
+// frame, put back with the camera's yaw only. A camera boom that swings over the pivot when
+// the camera pitches is brought back to the pivot's height.
+Vec level_boom(const ue::FRotator& camera_rotation, const ue::FVector& camera_location, const Vec& pivot);
+
 }  // namespace ff7vr::engine::math

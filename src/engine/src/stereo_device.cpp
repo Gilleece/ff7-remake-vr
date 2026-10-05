@@ -4,6 +4,7 @@
 #include "bloom_fix.h"
 #include "fixes.h"
 #include "gpu_trace.h"
+#include "player.h"
 #include "rhi_command.h"
 #include "ue_math.h"
 
@@ -232,11 +233,18 @@ void CalculateStereoViewOffset(void*, EStereoscopicPass pass, FRotator* rotation
     ++g_count.view_offset;
     const int e = eye_index(pass);
     const Settings& s = g_settings;
+    // The game's camera, then the camera mode's eye base (level boom, first person).
+    const FRotator game_rot = *rotation;
+    const FVector game_loc = *location;
+    FRotator base_rot = game_rot;
+    FVector base_loc = game_loc;
+    bool force_decouple = false;
+    player::adjust_camera(base_rot, base_loc, s.decouple_pitch.load(), force_decouple);
     math::EyeCameraInput in;
-    in.camera_rotation = *rotation;
-    in.camera_location = *location;
+    in.camera_rotation = base_rot;
+    in.camera_location = base_loc;
     in.units_per_metre = static_cast<double>(world_to_meters > 0 ? world_to_meters : 100.0f) * s.world_scale.load();
-    in.decouple_pitch = s.decouple_pitch.load();
+    in.decouple_pitch = s.decouple_pitch.load() || force_decouple;
     in.positional = s.positional.load();
     in.eye = g.views[e].pose;
     in.head = g.frame.head;
@@ -258,8 +266,8 @@ void CalculateStereoViewOffset(void*, EStereoscopicPass pass, FRotator* rotation
     }
     {
         std::lock_guard lock(g_diag_mutex);
-        g.cam_rot = *rotation;
-        g.cam_loc = *location;
+        g.cam_rot = game_rot;
+        g.cam_loc = game_loc;
         g.world_to_meters = world_to_meters;
         g.eye_rot[e] = out_rot;
         g.eye_loc[e] = out_loc;
@@ -268,7 +276,7 @@ void CalculateStereoViewOffset(void*, EStereoscopicPass pass, FRotator* rotation
         try {
             log::info("stereo: eye {} cam rot ({:.2f} {:.2f} {:.2f}) loc ({:.1f} {:.1f} {:.1f}) w2m {} -> rot ({:.2f} {:.2f} {:.2f}) "
                       "loc ({:.1f} {:.1f} {:.1f})",
-                      e == 0 ? "L" : "R", rotation->Pitch, rotation->Yaw, rotation->Roll, location->X, location->Y, location->Z,
+                      e == 0 ? "L" : "R", game_rot.Pitch, game_rot.Yaw, game_rot.Roll, game_loc.X, game_loc.Y, game_loc.Z,
                       world_to_meters, out_rot.Pitch, out_rot.Yaw, out_rot.Roll, out_loc.X, out_loc.Y, out_loc.Z);
         } catch (...) {
         }

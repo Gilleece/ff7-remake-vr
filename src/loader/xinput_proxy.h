@@ -30,6 +30,10 @@ void set_virtual_pad_enabled(bool enabled);
 bool virtual_pad_enabled();
 void set_virtual_pad(const VirtualPad& state);
 VirtualPad virtual_pad();
+// Filter applied to every successful XInputGetState / XInputGetStateEx result (after the
+// virtual pad is merged): it may change the buttons. Set once at start-up; nullptr = none.
+using PadFilter = void (*)(unsigned long user, unsigned short* buttons);
+void set_pad_filter(PadFilter filter);
 // Number of XInputGetState calls seen (diagnostics: proves the game polls us).
 std::uint64_t get_state_calls();
 
