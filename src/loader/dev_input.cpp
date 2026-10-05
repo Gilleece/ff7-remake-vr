@@ -4,6 +4,10 @@
 
 #include "ff7vr/core/log.h"
 
+#if FF7VR_HAVE_DEV
+#include "ff7vr/dev/dev.h"
+#endif
+
 #include <windows.h>
 #include <xinput.h>
 
@@ -80,6 +84,12 @@ std::string handle(const std::string& line) {
     xinput::VirtualPad pad = xinput::virtual_pad();
 
     if (cmd == "ping") return "ok pong xinput_calls=" + std::to_string(xinput::get_state_calls());
+#if FF7VR_HAVE_DEV
+    {
+        std::string reply;
+        if (ff7vr::dev::handle_command(line, reply)) return reply;
+    }
+#endif
     if (cmd == "mark") {
         std::string text = line.size() > 5 ? line.substr(5) : "";
         log::info("MARK {}", text);

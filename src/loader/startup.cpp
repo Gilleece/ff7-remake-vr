@@ -29,6 +29,10 @@
 
 #include "ff7vr/core/log.h"
 
+#if FF7VR_HAVE_DEV
+#include "ff7vr/dev/dev.h"
+#endif
+
 namespace ff7vr::loader {
 
 void start_modules(const StartupContext& ctx) {
@@ -47,7 +51,8 @@ void start_modules(const StartupContext& ctx) {
     // if (cfg.get_bool("xr", "enabled", true)) ff7vr::xr::start(ctx);
 #endif
 #if FF7VR_HAVE_DEV
-    // ff7vr::dev::start(ctx);
+    // Measurement tools (frame timer for tools/bench); each is off unless the ini enables it.
+    ff7vr::dev::start(ctx);
 #endif
 
     log::info("startup: modules started{}", ctx.is_game ? "" : " (host is not ff7remake_.exe)");

@@ -14,6 +14,7 @@
 //   stick <L|R> <x> <y> [ms]     deflect a stick (-1..1), hold ms (default 300), recenter
 //   trigger <L|R> <0..1> [ms]
 //   mark <text>                  write "MARK <text>" into ff7vr.log
+//   bench ...                    frame timer commands (src/dev, see ff7vr/dev/dev.h)
 //
 // <buttons>: names joined with '+': A B X Y UP DOWN LEFT RIGHT START BACK
 // LB RB LS RS (LS/RS = stick clicks). Example: "tap DOWN 100".

@@ -18,6 +18,12 @@
      dumps go to captures\runs\<time>\), restores dxgi.dll, releases the lock.
      With -KeepRunning, run stop.ps1 when done.
 
+  -Set overrides single ini keys for one run without editing any file, for
+  example -Set "xr.backend=null;log.level=trace" (section.key=value, separated
+  by ';' or given as an array). The keys are appended to a copy of the ini
+  (-Ini, or the build's ff7vr.ini), so they win over the same keys earlier in
+  the file. The merged ini is kept in captures\runs\<time>-ini\.
+
   Exit code 0 when every requested step succeeded. Environment variables for
   the game can be passed with -GameEnv NAME=value[;NAME2=value2] (they reach the game because
   it is started directly).
@@ -32,10 +38,14 @@
   # Vanilla game (no mod) for comparison, with an OpenXR runtime override.
   powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev\launch.ps1 -NoMod -Until title
   powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev\launch.ps1 -GameEnv "XR_RUNTIME_JSON=C:\path\to\runtime.json"
+
+  # Override ini keys for one run.
+  powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev\launch.ps1 -Until title -Set "xr.backend=null;log.level=trace"
 #>
 param(
     [string]$BuildDir = '',
     [string]$Ini = '',
+    [string[]]$Set = @(),
     [ValidateSet('none', 'title', 'gameplay')]
     [string]$Until = 'none',
     [string]$WaitLog = '',
@@ -86,7 +96,16 @@ try {
         if (Read-DeployManifest) { [void](Invoke-Undeploy) }
         Write-Step 'Running without the mod (-NoMod)'
     } else {
-        [void](Invoke-Deploy -buildDir $BuildDir -iniPath $Ini)
+        $iniToDeploy = $Ini
+        $overrides = @($Set | ForEach-Object { $_ -split ';' } | Where-Object { $_ -and $_.Trim() })
+        if ($overrides.Count -gt 0) {
+            $base = $Ini
+            if (-not $base) { $base = Join-Path (Get-BuildOutputDir $BuildDir) 'ff7vr.ini' }
+            $iniToDeploy = Join-Path $script:CapturesDir "runs\$runStamp-ini\ff7vr.ini"
+            New-OverrideIni -baseIni $base -overrides $overrides -outPath $iniToDeploy
+            Write-Step ('ini overrides: ' + ($overrides -join '; '))
+        }
+        [void](Invoke-Deploy -buildDir $BuildDir -iniPath $iniToDeploy)
     }
 
     $envVars = @{}

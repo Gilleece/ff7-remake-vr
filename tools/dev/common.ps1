@@ -581,6 +581,24 @@ function Invoke-Deploy([string]$buildDir, [string]$iniPath = '') {
     return $entries
 }
 
+# Writes a copy of $baseIni with "section.key=value" overrides appended as
+# their own [section] blocks. The mod's ini reader keeps the last value of a
+# key, so the overrides win. The base file may be missing (overrides only).
+function New-OverrideIni([string]$baseIni, [string[]]$overrides, [string]$outPath) {
+    $lines = @()
+    if ($baseIni -and (Test-Path -LiteralPath $baseIni)) { $lines += @(Get-Content -LiteralPath $baseIni) }
+    $lines += ''
+    $lines += '; ---- overrides for this run ----'
+    foreach ($o in $overrides) {
+        $o = $o.Trim()
+        if ($o -notmatch '^([^.=\s]+)\.([^=]+?)\s*=(.*)$') { throw "Bad ini override '$o' (expected section.key=value)" }
+        $lines += "[$($Matches[1])]"
+        $lines += ("{0} = {1}" -f $Matches[2].Trim(), $Matches[3].Trim())
+    }
+    Ensure-Dir (Split-Path $outPath -Parent)
+    [System.IO.File]::WriteAllLines($outPath, [string[]]$lines, (New-Object System.Text.UTF8Encoding($false)))
+}
+
 # Archives runtime files (log, dumps) from the game folder to captures\runs\<stamp>\ and
 # deletes them from the game folder. Returns the archive folder or $null if there was nothing.
 function Save-RuntimeFiles([string]$stamp = (Get-Date).ToString('yyyyMMdd-HHmmss')) {
