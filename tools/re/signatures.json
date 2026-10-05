@@ -1,0 +1,357 @@
+{
+  "format": 1,
+  "build": {
+    "file": "End/Binaries/Win64/ff7remake_.exe",
+    "file_version": "1.0.0.7",
+    "sha256": "25b54c345c94ee9f6c6876b9c7537a69e6b0eef25f322207c32a8ddcee816635",
+    "size": 96927560,
+    "pe_timestamp": "0x698ba49c",
+    "size_of_image": "0x5efc000"
+  },
+  "notes": "Patterns are unique in .text of the build above. 'expect' is the value for that build (an RVA for globals/functions/vtables, a byte offset for structure members and vtable slots).",
+  "entries": [
+    {
+      "name": "GEngine",
+      "kind": "global",
+      "pattern": "48 83 EC 28 48 8B 42 20 33 C9 48 85 C0 0F 95 C1 48 03 C8 48 89 4A 20 E8 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ??",
+      "resolve": {
+        "type": "rip",
+        "insn": 28,
+        "disp": 3,
+        "len": 7
+      },
+      "expect": "0x5831188",
+      "desc": "UEngine* GEngine (the UGameEngine instance).",
+      "howto": "String L\"CALIBRATEMOTION\" -> its only code reference -> the mov rcx,[rip+x] just before it."
+    },
+    {
+      "name": "GMalloc",
+      "kind": "global",
+      "pattern": "48 8B 0D ?? ?? ?? ?? 48 85 C9 75 0C E8 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 48 8B 01 48 8B D3 FF 50 20 48 8B C3 48 83 C4 20 5B C3 CC CC CC CC CC CC CC CC CC CC CC CC CC CC 48 8B C4 48 89 48 08 55 41 56",
+      "resolve": {
+        "type": "rip",
+        "insn": 0,
+        "disp": 3,
+        "len": 7
+      },
+      "expect": "0x5825680",
+      "desc": "FMalloc* GMalloc. Every engine allocation goes through its vtable (+0x10 Malloc, +0x18 Realloc, +0x20 Free). Lazily created by the function called when it is null.",
+      "howto": "Any `mov rcx,[GMalloc]; test rcx,rcx; jne; call CreateGMalloc` sequence, e.g. in the FFakeStereoRendering destructor."
+    },
+    {
+      "name": "IConsoleManager::Singleton",
+      "kind": "global",
+      "pattern": "48 8B 0D ?? ?? ?? ?? 48 85 C9 75 0C E8 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 48 8B 01 4C 8D 0D ?? ?? ?? ?? 0F 57 D2 89 7C 24 20",
+      "resolve": {
+        "type": "rip",
+        "insn": 0,
+        "disp": 3,
+        "len": 7
+      },
+      "expect": "0x57f9ca0",
+      "desc": "IConsoleManager* singleton (FConsoleManager). Null until IConsoleManager::SetupSingleton runs (the call that follows).",
+      "howto": "Inside any static TAutoConsoleVariable registration, e.g. the one for L\"r.StereoEmulationFOV\"."
+    },
+    {
+      "name": "IConsoleManager::SetupSingleton",
+      "kind": "function",
+      "pattern": "48 8B 0D ?? ?? ?? ?? 48 85 C9 75 0C E8 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 48 8B 01 4C 8D 0D ?? ?? ?? ?? 0F 57 D2 89 7C 24 20",
+      "resolve": {
+        "type": "rip",
+        "insn": 12,
+        "disp": 1,
+        "len": 5
+      },
+      "expect": "0x1c1bda0",
+      "desc": "Creates the console manager if it does not exist yet."
+    },
+    {
+      "name": "UEngine::StereoRenderingDevice",
+      "kind": "offset",
+      "pattern": "49 83 BE ?? ?? ?? ?? 00 0F 95 C0 48 81 C4 60 01 00 00",
+      "resolve": {
+        "type": "i32",
+        "offset": 3
+      },
+      "expect": "0xd50",
+      "desc": "Offset of TSharedPtr<IStereoRendering, ESPMode::ThreadSafe> StereoRenderingDevice in UEngine: object pointer here, reference controller at +8. Read from the last statement of UEngine::InitializeHMDDevice (return StereoRenderingDevice.IsValid())."
+    },
+    {
+      "name": "UEngine::XRSystem",
+      "kind": "offset",
+      "pattern": "4D 8D BE ?? ?? ?? ?? 49 39 37 0F 85 ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B C8 48 8D 15 ?? ?? ?? ?? E8 ?? ?? ?? ??",
+      "resolve": {
+        "type": "i32",
+        "offset": 3
+      },
+      "expect": "0xd60",
+      "desc": "Offset of TSharedPtr<IXRTrackingSystem, ESPMode::ThreadSafe> XRSystem in UEngine. Read from InitializeHMDDevice: `else if (!XRSystem.IsValid() && !FParse::Param(cmdline, L\"nohmd\"))`."
+    },
+    {
+      "name": "UEngine::ViewExtensions",
+      "kind": "offset",
+      "pattern": "48 8B 0D ?? ?? ?? ?? 48 8D 54 24 78 45 33 C0 48 8B 89 ?? ?? ?? ?? E8 ?? ?? ?? ??",
+      "resolve": {
+        "type": "i32",
+        "offset": 18
+      },
+      "expect": "0xd70",
+      "desc": "Offset of TSharedPtr<FSceneViewExtensions> ViewExtensions in UEngine. Read from ULocalPlayer::GetProjectionData (GEngine->ViewExtensions->GatherActiveExtensions())."
+    },
+    {
+      "name": "UEngine::GameViewport",
+      "kind": "offset",
+      "pattern": "48 8B 8F 70 10 00 00 48 89 B7 ?? ?? ?? ?? 48 8B 51 30 48 89 B2 38 02 00 00",
+      "resolve": {
+        "type": "i32",
+        "offset": 10
+      },
+      "expect": "0x980",
+      "desc": "Offset of UGameViewportClient* GameViewport in UEngine. Read from UGameEngine::Init (GameViewport = ViewportClient right after the client is created)."
+    },
+    {
+      "name": "UEngine::InitializeHMDDevice",
+      "kind": "function",
+      "pattern": "48 8B C4 48 89 48 08 55 41 56 41 57 48 8D 68 88 48 81 EC 60 01 00 00 80 3D ?? ?? ?? ?? 00 4C 8B F1 0F 85 ?? ?? ?? ??",
+      "resolve": {
+        "type": "match",
+        "offset": 0
+      },
+      "expect": "0x3317ca0",
+      "desc": "bool UEngine::InitializeHMDDevice(). Virtual, UGameEngine vtable slot 111 (+0x378). Honours -emulatestereo and r.EnableStereoEmulation (creates FFakeStereoRendering), else asks the HMD modules. Called once from UEngine::Init before the game viewport and local player are created.",
+      "howto": "String L\"emulatestereo\" -> its code reference -> containing function. Its first instruction block also references L\"r.EnableStereoEmulation\"."
+    },
+    {
+      "name": "UEngine::Init",
+      "kind": "function",
+      "pattern": "48 89 5C 24 10 48 89 74 24 18 48 89 7C 24 20 55 41 54 41 55 41 56 41 57 48 8D 6C 24 80 48 81 EC 80 01 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 45 70 4C 8B E9",
+      "resolve": {
+        "type": "match",
+        "offset": 0
+      },
+      "expect": "0x3312380",
+      "desc": "void UEngine::Init(IEngineLoop*). UEngine vtable slot 74. Calls InitializeHMDDevice through the vtable.",
+      "howto": "The only function that calls [vtable+0x378] on `this` among the engine vtables; called from UGameEngine::Init."
+    },
+    {
+      "name": "UEngine::IsStereoscopic3D",
+      "kind": "function",
+      "pattern": "40 53 48 83 EC 20 48 8B 1D ?? ?? ?? ?? 48 85 D2",
+      "resolve": {
+        "type": "match",
+        "offset": 0
+      },
+      "expect": "0x33187d0",
+      "desc": "bool UEngine::IsStereoscopic3D(FViewport* InViewport): (!InViewport || InViewport->IsStereoRenderingAllowed()) && StereoRenderingDevice && StereoRenderingDevice->IsStereoEnabled(). Reads GEngine, not this."
+    },
+    {
+      "name": "UGameEngine::vftable",
+      "kind": "vtable",
+      "pattern": "48 8D 05 ?? ?? ?? ?? 48 89 03 48 8D 05 ?? ?? ?? ?? 48 89 43 28 33 C0 48 89 83 78 10 00 00",
+      "resolve": {
+        "type": "rip",
+        "insn": 0,
+        "disp": 3,
+        "len": 7
+      },
+      "expect": "0x4e56fa8",
+      "desc": "UGameEngine vtable. Tick is slot 78, Init slot 74, InitializeHMDDevice slot 111."
+    },
+    {
+      "name": "UGameEngine::Tick",
+      "kind": "function",
+      "pattern": "48 8B C4 44 88 40 18 48 89 48 08 55 41 55",
+      "resolve": {
+        "type": "match",
+        "offset": 0
+      },
+      "expect": "0x2f32420",
+      "desc": "void UGameEngine::Tick(float DeltaSeconds, bool bIdleMode). UGameEngine vtable slot 78. Game thread, once per frame."
+    },
+    {
+      "name": "UGameEngine::Init",
+      "kind": "function",
+      "pattern": "48 89 5C 24 10 55 56 57 41 54 41 55 41 56 41 57 48 8D 6C 24 D9 48 81 EC A0 00 00 00 45 33 E4",
+      "resolve": {
+        "type": "match",
+        "offset": 0
+      },
+      "expect": "0x2f2ff40",
+      "desc": "void UGameEngine::Init(IEngineLoop*). Calls UEngine::Init, then creates the UGameViewportClient, the game viewport and the first local player."
+    },
+    {
+      "name": "FFakeStereoRendering::vftable",
+      "kind": "vtable",
+      "pattern": "48 8D 05 ?? ?? ?? ?? 41 BE 20 00 00 00",
+      "resolve": {
+        "type": "rip",
+        "insn": 0,
+        "disp": 3,
+        "len": 7
+      },
+      "expect": "0x4eba6c0",
+      "desc": "vtable of the engine's own FFakeStereoRendering (15 slots: 14 IStereoRendering virtuals + virtual destructor). Gives the IStereoRendering layout of this build.",
+      "howto": "Constructor = the function referencing L\"r.StereoEmulationHeight\"; its first lea rax,[rip+x] is the vtable."
+    },
+    {
+      "name": "FFakeStereoRendering::FFakeStereoRendering",
+      "kind": "function",
+      "pattern": "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 48 89 7C 24 20 41 56 48 83 EC 40 48 8D 05 ?? ?? ?? ?? 41 BE 20 00 00 00",
+      "resolve": {
+        "type": "match",
+        "offset": 0
+      },
+      "expect": "0x3317590",
+      "desc": "FFakeStereoRendering constructor (this, no other arguments). Sets FOV=100, Width=640, Height=480, then applies r.StereoEmulationFOV/Width/Height. Object size 0x18."
+    },
+    {
+      "name": "FFakeStereoRendering::SharedRefController::vftable",
+      "kind": "vtable",
+      "pattern": "41 8D 50 18 FF 50 10 48 85 C0 74 1E 48 8D 0D ?? ?? ?? ?? C7 40 08 01 00 00 00 48 89 08 C7 40 0C 01 00 00 00 48 89 58 10 EB 03 48 8B C6 4C 8B C3 48 89 45 C8",
+      "resolve": {
+        "type": "rip",
+        "insn": 12,
+        "disp": 3,
+        "len": 7
+      },
+      "expect": "0x4eb9c98",
+      "desc": "vtable of the TSharedPtr reference controller InitializeHMDDevice allocates for the fake device (slot 0 DestroyObject -> device vtable +0x70, slot 1 scalar deleting destructor)."
+    },
+    {
+      "name": "FSceneViewport::FViewport::vftable",
+      "kind": "vtable",
+      "pattern": "48 8D 05 ?? ?? ?? ?? 48 89 47 08 48 8D 05 ?? ?? ?? ?? 48 89 47 18",
+      "resolve": {
+        "type": "rip",
+        "insn": 0,
+        "disp": 3,
+        "len": 7
+      },
+      "expect": "0x4eaeff8",
+      "desc": "vtable of the FViewport subobject of FSceneViewport (FSceneViewport+8; UGameViewportClient::Viewport points here). 51 slots. [1] GetRenderTargetTexture, [3] GetSizeXY, [34] GetDebugCanvas, [37] EnqueueBeginRenderFrame, [48] IsStereoRenderingAllowed, [49] GetRenderTargetTextureSizeXY, [50] UpdateViewportRHI."
+    },
+    {
+      "name": "FSceneViewport::EnqueueBeginRenderFrame",
+      "kind": "function",
+      "pattern": "4C 8B DC 55 53 56 57 49 8D AB 28 FB FF FF",
+      "resolve": {
+        "type": "match",
+        "offset": 0
+      },
+      "expect": "0x3260420",
+      "desc": "void FSceneViewport::EnqueueBeginRenderFrame(bool bShouldPresent). Game thread. Asks the render target manager ShouldUseSeparateRenderTarget / NeedReAllocateViewportRenderTarget, sets bForceSeparateRenderTarget and calls UpdateViewportRHI when needed, and at the end calls IStereoRenderTargetManager::UpdateViewport."
+    },
+    {
+      "name": "FSceneViewport::InitDynamicRHI",
+      "kind": "function",
+      "pattern": "4C 8B DC 55 53 49 8D AB 08 FB FF FF",
+      "resolve": {
+        "type": "match",
+        "offset": 0
+      },
+      "expect": "0x3261520",
+      "desc": "void FSceneViewport::InitDynamicRHI() (FRenderResource subobject, this = FViewport+0x10). Render thread. Sizes the separate render target with CalculateRenderTargetSize and allocates it with AllocateRenderTargetTexture, falling back to RHICreateTargetableShaderResource2D."
+    },
+    {
+      "name": "RHICreateTargetableShaderResource2D",
+      "kind": "function",
+      "pattern": "48 89 5C 24 10 48 89 6C 24 18 48 89 74 24 20 89 4C 24 08",
+      "resolve": {
+        "type": "match",
+        "offset": 0
+      },
+      "expect": "0x2284ea0",
+      "desc": "RHICreateTargetableShaderResource2D(SizeX, SizeY, Format, NumMips, Flags, TargetableFlags, bForceSeparate, CreateInfo, OutTargetable, OutShaderResource, NumSamples). Used by InitDynamicRHI when the stereo device does not allocate the target."
+    },
+    {
+      "name": "UGameViewportClient::Draw",
+      "kind": "function",
+      "pattern": "48 8B C4 48 89 58 20 55 56 57 41 54 41 55 41 56 41 57 48 8D A8 78 FB FF FF",
+      "resolve": {
+        "type": "match",
+        "offset": 0
+      },
+      "expect": "0x2f65ce0",
+      "desc": "void UGameViewportClient::Draw(FViewport*, FCanvas*). Game thread. Builds the view family; in stereo it asks every local player for 2 views (3 with the monoscopic far field) through ULocalPlayer::CalcSceneView with pass 1, 2 (3)."
+    },
+    {
+      "name": "FSlateRHIRenderer::DrawWindow_RenderThread",
+      "kind": "function",
+      "pattern": "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 98 FE FF FF 48 81 EC 68 02 00 00 0F 29 B4 24 50 02 00 00",
+      "resolve": {
+        "type": "match",
+        "offset": 0
+      },
+      "expect": "0x287db70",
+      "desc": "Slate window draw on the render thread. Calls StereoRenderingDevice->RenderTexture_RenderThread(RHICmdList, BackBuffer, ViewportRT, WindowSize) when a stereo device is set and the viewport has a separate render target."
+    },
+    {
+      "name": "ULocalPlayer::GetProjectionData",
+      "kind": "function",
+      "pattern": "40 55 53 56 57 41 54 41 56 48 8D AC 24 38 F8 FF FF",
+      "resolve": {
+        "type": "match",
+        "offset": 0
+      },
+      "expect": "0x3019240",
+      "desc": "bool ULocalPlayer::GetProjectionData(FViewport*, EStereoscopicPass, FSceneViewProjectionData&) const. ULocalPlayer vtable slot 82. Calls AdjustViewRect, CalculateStereoViewOffset (with WorldSettings->WorldToMeters) and GetStereoProjectionMatrix on the stereo device."
+    },
+    {
+      "name": "ULocalPlayer::CalcSceneView",
+      "kind": "function",
+      "pattern": "4C 8B DC 55 56 49 8D AB 08 F8 FF FF",
+      "resolve": {
+        "type": "match",
+        "offset": 0
+      },
+      "expect": "0x3018da0",
+      "desc": "FSceneView* ULocalPlayer::CalcSceneView(...). ULocalPlayer vtable slot 73 (+0x248)."
+    },
+    {
+      "name": "ULocalPlayer::GetViewPoint",
+      "kind": "function",
+      "pattern": "48 89 5C 24 18 55 56 57 48 83 EC 40 48 8B F2",
+      "resolve": {
+        "type": "match",
+        "offset": 0
+      },
+      "expect": "0x30185f0",
+      "desc": "void ULocalPlayer::GetViewPoint(FMinimalViewInfo&, EStereoscopicPass). ULocalPlayer vtable slot 72 (+0x240)."
+    },
+    {
+      "name": "ULocalPlayer::PostInitProperties",
+      "kind": "function",
+      "pattern": "40 53 48 83 EC 30 48 8B D9 48 C7 44 24 20 00 00 00 00 48 8B 49 10 45 33 C9 41 B0 01 48 8B D3 48 8B 01 FF 90 D0 02 00 00 48 8B C3 0F 1F 44 00 00 F6 40 08 30 75 43",
+      "resolve": {
+        "type": "match",
+        "offset": 0
+      },
+      "expect": "0x3016dd0",
+      "desc": "ULocalPlayer::PostInitProperties: ViewState.Allocate(); if (GEngine->StereoRenderingDevice) { StereoViewState.Allocate(); MonoViewState.Allocate(); }. ULocalPlayer vtable slot 9."
+    },
+    {
+      "name": "FSceneViewStateReference::Allocate",
+      "kind": "function",
+      "pattern": "40 53 48 83 EC 40 48 8B D9 E8 ?? ?? ?? ?? 48 8B C8 48 8B 10 FF 52 68",
+      "resolve": {
+        "type": "match",
+        "offset": 0
+      },
+      "expect": "0x32085c0",
+      "desc": "void FSceneViewStateReference::Allocate(). Game thread."
+    },
+    {
+      "name": "ULocalPlayer::vftable",
+      "kind": "vtable",
+      "pattern": "48 8D 05 ?? ?? ?? ?? 48 89 03 48 8D 05 ?? ?? ?? ?? 48 89 43 28 48 8D 05 ?? ?? ?? ?? 48 89 4B 48",
+      "resolve": {
+        "type": "rip",
+        "insn": 0,
+        "disp": 3,
+        "len": 7
+      },
+      "expect": "0x4e6d668",
+      "desc": "ULocalPlayer vtable (no SE subclass seen at runtime yet)."
+    }
+  ]
+}
