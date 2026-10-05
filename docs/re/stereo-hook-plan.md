@@ -331,7 +331,7 @@ away during development runs.
 | Light patch: write `0x60` to the byte at RVA `0x22351b1` (`RenderLights light sort-key patch site` + 1). Test scenes with and without; it is a widescreen fix too. | M1 test, M3 | medium |
 | HZB occlusion: keep `r.HZBOcclusion` at the game's value. Each eye has its own view state when the device is installed at startup (verified), which is what HZB needs. Only disable if the right eye shows popping. | M1 test | medium |
 | Instance culling: nothing to do (the UEVR toggle targets a UE5 cvar that does not exist here). | - | high |
-| Movies: detect `MediaPlayer::IsPlaying` (reflection) and present them as a flat quad. | M3 | low |
+| Movies: detect `MediaPlayer::IsPlaying` (reflection) and present them as a flat quad. Implemented as `[stereo] movie_screen` (stereo held off while a movie plays, the virtual screen shows it); class and function found live, a playing movie not seen yet. | M3 | medium |
 | Vignette: zero `VignetteIntensity` at the end of `FPostProcessSettings`' constructor or lower `r.Tonemapper.Quality`. | M3 | low |
 
 ## Pitfalls specific to this game

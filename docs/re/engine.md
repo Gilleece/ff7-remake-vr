@@ -392,7 +392,7 @@ only) and the `FF7RemakeFix` mod (source public on GitHub, MIT).
 | HZB occlusion (`VR_DisableHZBOcclusion`) | UEVR sets `r.HZBOcclusion 0` (cvar data at RVA `0x5928198`). HZB occlusion uses per-view history from the view state. | cvar | Disables HZB occlusion (falls back to hardware occlusion queries). | UEVR. A real fix looks feasible: with the device installed before the local player exists, each eye has its own view state (LIVE), which is what HZB needs. Test with it on first. |
 | Instance culling (`VR_DisableInstanceCulling`) | Sets `r.InstanceCulling.OcclusionCull`, a UE5 cvar. | - | **Nothing on this game**: UEVR's log says the cvar string does not exist in this exe. No performance cost to remove, nothing to fix. | UEVR log |
 | HDR compositing (`VR_DisableHDRCompositing`) | Sets `r.HDR.UI.CompositeMode 0` (cvar data at RVA `0x59f7c68`). Only matters when HDR output is on. | cvar | Disables HDR UI compositing. | UEVR log |
-| Movies | The movie plugin iterates `/Script/MediaAssets.MediaPlayer` objects, calls `IsPlaying` (ignoring ones whose path contains `/Menu/`) and switches UEVR to its 2D screen mode while a cinematic plays. | UObject reflection | Shows pre-rendered movies on a flat screen instead of in stereo. | strings only (INFERRED) |
+| Movies | The movie plugin iterates `/Script/MediaAssets.MediaPlayer` objects, calls `IsPlaying` (ignoring ones whose path contains `/Menu/`) and switches UEVR to its 2D screen mode while a cinematic plays. | UObject reflection | Shows pre-rendered movies on a flat screen instead of in stereo. | The game's movies are `.emov` files (VP9, strings `.emov`, `_MediaPlayer_VP9` at `0x43e8f30`) under `Content/GameContents/Movie/<area>/<name>/`, played through `UMediaPlayer` assets named `<name>_MediaPlayer`; the `MediaPlayer` class and its `IsPlaying` UFunction are found by name in gameplay (LIVE). The mod's detection (`docs/engine-module.md`, "Movies") has not seen a movie play yet. |
 | Vignette | `FF7RemakeFix` hooks the end of `FPostProcessSettings::FPostProcessSettings` (`0x32050f0`, hook at the epilogue `0x320590f`) and overrides `VignetteIntensity`. | `0x32050f0` | Sets the default vignette intensity (0 disables it). `r.Tonemapper.Quality` below 2 also drops the vignette in stock 4.18 (INFERRED). | source of the mod |
 
 ### Evaluation with the mod's two-view rendering (LIVE, per-eye captures)
@@ -518,7 +518,24 @@ returns the field at `+0xC4`) is 1 (windowed fullscreen), `ViewRect` and
 `ConstrainedViewRect` become `(0, 0, GSystemResolution.ResX, ResY)`. In that window mode
 both eyes would render the full target. The mod makes the `jne` at RVA `0x3018fb8`
 unconditional while stereo renders (signature `CalcSceneView windowed-fullscreen view
-rect`). Not exercised live: the test harness runs windowed (mode 2).
+rect`). LIVE: that patch is not enough. In windowed fullscreen both eyes still come out
+broken (left eye black, right eye shrunk into a corner, `captures/stereo/runS1/g_modes.png`):
+`GSystemResolution.WindowMode` (`0x53e3ae8`) is compared with 1 in about twenty more
+renderer functions (`0x22fe350` to `0x23217b0`, all of the same shape, plus `0x228bde0` in
+the post-processing code), which then use other rectangles. The mod therefore switches the
+game to a normal window while VR renders (`docs/engine-module.md`, "Window modes").
+
+Exclusive fullscreen: `RestoreSystemResolution` (`0x287d8e0`, run when the window is
+activated) calls `FSystemResolution::RequestResolutionChange` (`0x3326eb0`) with
+`GSystemResolution.ResX/ResY` and sets `bForceRefresh` (`0x53e3aec`) when the window mode is
+0, so a reactivation while the stereo override is active would ask for the eye target size
+as a display mode. The `r.SetRes` sink (`0x3310ee0`) compares the parsed `r.SetRes` with
+`GSystemResolution` and re-requests the resolution when they differ or when
+`bForceRefresh` is set; it runs whenever a console variable changes, which with the
+override active re-requests the window's own size (harmless: no resize). LIVE: switching
+modes with `r.SetRes` while stereo rendered made the game call `ResizeBuffers`; with the
+mod's old desktop mirror (which kept a view of the back buffer) that call failed with
+`DXGI_ERROR_INVALID_CALL` and the game terminated.
 
 ### Frame pipeline (LIVE)
 
