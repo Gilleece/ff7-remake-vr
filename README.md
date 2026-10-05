@@ -316,14 +316,13 @@ Known problems:
   `[stereo_cvars]` at the end, remove the `;` at the start of the line
   `; r.BloomQuality = 0` (console variables in that section apply only while 3D
   runs).
-- **Indoors, exposed skin on characters showed white square blocks** (fixed, not yet
-  confirmed in the headset). Reproduced with the simulated headset in the first
+- **Indoors, exposed skin on characters showed white square blocks** (fixed, and the
+  fix confirmed in the headset). Reproduced with the simulated headset in the first
   interior of the save used in testing, in both eyes; the game's tiled lighting pass
   mishandles the eye views. The same pass also left the lowest third of the view
   without some lamp light indoors, cut off at a hard horizontal line. The fix
-  (`[stereo] light_fix = 1`, on by default) removed both in every capture. If you
-  still see either in the headset, say so; `light_fix = 0` brings back the old
-  behaviour.
+  (`[stereo] light_fix = 1`, on by default) removed both. If you still see either
+  in another area, say so; `light_fix = 0` brings back the old behaviour.
 - **Posters on a sandwich board** in the Sector 7 slums street sat on the board only
   when looked at directly and drifted off it otherwise. This was seen before the
   right-eye ghost fix and has not been checked since.
