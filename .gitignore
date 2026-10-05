@@ -9,3 +9,4 @@ captures/
 .vs/
 CMakeUserPresets.json
 __pycache__/
+dist/

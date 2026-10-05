@@ -1012,6 +1012,47 @@ function Stop-GameRun([string]$owner = (Get-DefaultOwner), [switch]$force) {
 # when the screen shows the expected state. Returns $true when gameplay is
 # reached (the loading screen was seen and has been gone for $settleSeconds).
 function Invoke-ReachGameplay([int]$timeoutSeconds = 240, [int]$settleSeconds = 6, [string]$shotDir = '') {
+    # In stereo the window shows a crop of an eye instead of the title screen and
+    # menus the classifier knows. If the mod's dev pipe answers and stereo is
+    # switched on, switch it off while driving the menus and on again afterwards.
+    $stereoPaused = Suspend-StereoForMenus
+    try {
+        return (Invoke-ReachGameplayMono -timeoutSeconds $timeoutSeconds -settleSeconds $settleSeconds -shotDir $shotDir)
+    } finally {
+        if ($stereoPaused) { Resume-Stereo }
+    }
+}
+
+# Returns $true if stereo was on and has been switched off through the dev pipe.
+function Suspend-StereoForMenus([int]$pipeWaitSeconds = 20) {
+    $deadline = (Get-Date).AddSeconds($pipeWaitSeconds)
+    $pipe = $false
+    while ((Get-Date) -lt $deadline -and @(Get-GameProcesses).Count -gt 0) {
+        if (Test-DevPipe) { $pipe = $true; break }
+        Start-Sleep -Milliseconds 500
+    }
+    if (-not $pipe) { return $false }
+    $reply = ''
+    try { $reply = [string](@(Send-DevCommand @('stereo status'))[0]) } catch { return $false }
+    if ($reply -notmatch 'wanted=1') { return $false }
+    try { [void](Send-DevCommand @('stereo off')) } catch { return $false }
+    Write-Step 'Stereo switched off while the menus are driven (the window would show an eye crop); back on in gameplay'
+    return $true
+}
+
+function Resume-Stereo {
+    if (@(Get-GameProcesses).Count -eq 0) { return }
+    try { [void](Send-DevCommand @('stereo on')); Write-Step 'Stereo switched on again' }
+    catch { Write-Step "WARNING: could not switch stereo on again: $_" }
+}
+
+# A run-unique folder name below captures\runs (time to the millisecond plus the
+# process id), so concurrent runs never share a folder.
+function New-RunFolderName([string]$suffix) {
+    return ('{0}-{1}-{2}' -f (Get-Date).ToString('yyyyMMdd-HHmmss-fff'), $PID, $suffix)
+}
+
+function Invoke-ReachGameplayMono([int]$timeoutSeconds = 240, [int]$settleSeconds = 6, [string]$shotDir = '') {
     $deadline = (Get-Date).AddSeconds($timeoutSeconds)
     $seenLoading = $false
     $otherSince = $null

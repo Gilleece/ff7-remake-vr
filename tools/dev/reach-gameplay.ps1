@@ -23,7 +23,7 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\common.ps1"
 
 if (@(Get-GameProcesses).Count -eq 0) { Write-Step 'The game is not running'; exit 1 }
-$shotDir = Join-Path $script:CapturesDir ('runs\' + (Get-Date).ToString('yyyyMMdd-HHmmss') + '-steps')
+$shotDir = Join-Path $script:CapturesDir ('runs\' + (New-RunFolderName 'steps'))
 if (Invoke-ReachGameplay -timeoutSeconds $TimeoutSeconds -shotDir $shotDir) {
     Write-Step "Gameplay reached (step captures in $shotDir)"
     exit 0

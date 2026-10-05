@@ -101,7 +101,7 @@ try {
         if ($overrides.Count -gt 0) {
             $base = $Ini
             if (-not $base) { $base = Join-Path (Get-BuildOutputDir $BuildDir) 'ff7vr.ini' }
-            $iniToDeploy = Join-Path $script:CapturesDir "runs\$runStamp-ini\ff7vr.ini"
+            $iniToDeploy = Join-Path $script:CapturesDir ('runs\' + (New-RunFolderName 'ini') + '\ff7vr.ini')
             New-OverrideIni -baseIni $base -overrides $overrides -outPath $iniToDeploy
             Write-Step ('ini overrides: ' + ($overrides -join '; '))
         }
@@ -143,7 +143,7 @@ try {
         if (-not (Wait-ScreenState @('title') $UntilTimeout)) { $failures += 'title screen not reached' }
         else { Write-Step ("Title screen after {0:N1} s" -f ((Get-Date) - $t0).TotalSeconds) }
     } elseif ($Until -eq 'gameplay') {
-        $shotDir = Join-Path $script:CapturesDir ("runs\$runStamp-steps")
+        $shotDir = Join-Path $script:CapturesDir ('runs\' + (New-RunFolderName 'steps'))
         if (Invoke-ReachGameplay -timeoutSeconds $UntilTimeout -shotDir $shotDir) {
             Write-Step ("Gameplay reached after {0:N1} s (step captures in {1})" -f ((Get-Date) - $t0).TotalSeconds, $shotDir)
         } else { $failures += 'gameplay not reached' }

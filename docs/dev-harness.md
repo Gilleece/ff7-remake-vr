@@ -66,7 +66,8 @@ these environment variables override the detection:
 | `third_party\_fetched\` | Fetched dependencies, shared by all build directories | no |
 | `captures\*.png` | Screenshots | no |
 | `captures\runs\<time>\` | `ff7vr.log` and crash dumps of each run | no |
-| `captures\runs\<time>-steps\` | One PNG per screen change while reaching gameplay | no |
+| `captures\runs\<time>-<pid>-steps\` | One PNG per screen change while reaching gameplay | no |
+| `dist\` | Packages built by `tools\package\package.ps1` | no |
 | `.locks\game`, `.locks\steamvr` | Run locks (see below) | no |
 | `.locks\state\` | Small state files of the scripts | no |
 
@@ -383,10 +384,14 @@ client area (relative coordinates, so it works at any 16:9 window size; tested
 at 1280x720 and 960x540): the title text, the highlighted Continue entry, the
 blue dialog box with Yes highlighted, the loading screen's blue glow. Gameplay
 counts as reached when the loading screen has been seen and something else has
-been on screen for 6 seconds. If the menu cursor is not on Continue the script
+been on screen for 6 seconds. If the mod's dev pipe answers and stereo is
+switched on (`[stereo] start_in_stereo = 1`), stereo is switched off through the
+pipe while the menus are driven and on again once gameplay is reached: in stereo
+the window shows a crop of an eye, which the classifier does not recognise. If the menu cursor is not on Continue the script
 presses Escape instead of Enter, and it stops at any other dialog, so it never
 starts a new game and never saves. A PNG of every screen change is stored in
-`captures\runs\<time>-steps\`.
+`captures\runs\<time>-<pid>-steps\` (time to the millisecond plus the script's
+process id, so runs started in the same second do not share a folder).
 
 ```
 launch.ps1 -Until gameplay -Screenshot -KeepRunning
@@ -488,6 +493,25 @@ experiments:
 ```
 powershell -NoProfile -Command ". .\tools\dev\common.ps1; Get-GameRoot; (Get-ScreenState).State"
 ```
+
+## Packaging for players: `tools\package\`
+
+`package.ps1` makes a Release build (`build\release`) and assembles
+`dist\ff7vr-<date>-<commit>\` (plus a zip): the DLL, the player's ini
+(`tools\package\ff7vr.ini`), the launcher (`tools\package\launcher\`) and the
+user guide (`README.md`). The package does not use this repository or these
+scripts: the launcher finds the game itself, records its changes in
+`End\Binaries\Win64\ff7vr.session.json` and undoes them after the session or with
+`restore`. Its manifest is separate from `ff7vr.deploy-manifest.json`; each
+refuses to overwrite files the other put there. On a development machine take the
+game lock (`lock.ps1 -Acquire`) before running the launcher by hand.
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\package\package.ps1 [-Clean] [-NoZip]
+```
+
+Keep the checkout at a short path: the OpenXR loader's build fails with
+"Cannot open compiler generated file" when its object paths pass 260 characters.
 
 ## Troubleshooting
 
