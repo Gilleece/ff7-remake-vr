@@ -168,9 +168,12 @@ function Unlock-SteamVr([string]$owner, [switch]$force) {
     return $true
 }
 
+# Same default as the other tools\dev scripts, so a caller that passes no -Owner
+# to one script and its default owner to another still matches.
 function Get-DefaultSvOwner {
     if ($env:FF7VR_ROLE) { return $env:FF7VR_ROLE }
-    return $env:USERNAME
+    if ($env:FF7VR_DEV_NAME) { return $env:FF7VR_DEV_NAME }
+    return 'dev'
 }
 
 # ---------------------------------------------------------------- JSON

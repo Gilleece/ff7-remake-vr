@@ -19,6 +19,11 @@
   stop it first. Nothing outside steamvr.vrsettings is changed, and the system
   default OpenXR runtime is not touched.
 
+  Takes the SteamVR lock (.locks\steamvr) for -Owner first, waiting up to
+  -WaitLockSeconds, so it cannot change the settings under someone else's run
+  or race their restore. steamvr-start.ps1 / steamvr-stop.ps1 with the same
+  owner continue with that lock; steamvr-stop.ps1 releases it.
+
 .EXAMPLE
   powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev\steamvr-null-enable.ps1
   powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev\steamvr-null-enable.ps1 -RenderWidth 2064 -RenderHeight 2208 -RefreshHz 90
@@ -29,7 +34,9 @@ param(
     [double]$RefreshHz = 0,
     [int]$WindowWidth = 0,
     [int]$WindowHeight = 0,
-    [switch]$StopSteamVr
+    [switch]$StopSteamVr,
+    [string]$Owner = '',
+    [int]$WaitLockSeconds = 900
 )
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\steamvr-common.ps1"
@@ -42,6 +49,9 @@ if (-not (Test-Path -LiteralPath (Join-Path $vrRoot 'drivers\null\bin\win64\driv
 }
 Write-Sv "SteamVR: $vrRoot"
 Write-Sv "Null driver defaults (read only, not modified): $nullDefaults"
+
+if (-not $Owner) { $Owner = Get-DefaultSvOwner }
+if (-not (Lock-SteamVr -owner $Owner -waitSeconds $WaitLockSeconds)) { Write-Sv 'Not changing the settings while someone else uses SteamVR'; exit 1 }
 
 if (Test-SteamVrRunning) {
     if (-not $StopSteamVr) { Write-Sv 'SteamVR is running. Close it first or pass -StopSteamVr.'; exit 1 }
