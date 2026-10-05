@@ -113,29 +113,36 @@ autosaves as usual).
   loading screen, a long hitch), the headset switches to the virtual screen and back
   without a black frame.
 - The view is centred once, when the headset connects: face the direction you want
-  to play in at that moment.
+  to play in at that moment, or press End (View/Back + left stick click) later.
 
 ## Controls
 
-The game's own controls are unchanged. The mod adds:
+The game's own controls are unchanged. The mod adds these; the keys work while the
+game window has the focus, and on the gamepad you **hold View/Back and press** the
+second button:
 
-| Input | Effect |
-|---|---|
-| **Home** key (game window in focus) | switch between first and third person |
-| Gamepad **View/Back + right stick click** together | the same; the game does not see this combination |
+| Keyboard | Gamepad (hold View/Back +) | Effect |
+|---|---|---|
+| **Home** | right stick click | switch between first and third person |
+| **End** | left stick click | **recenter**: the direction you face now becomes forward, and the HUD panel and the virtual screen move in front of you |
+| **Insert** | Menu/Start | 3D off (the game on the virtual screen) and on again |
+| **Page Down** / **Page Up** | D-pad down / up | HUD/menu panel 0.25 m nearer / farther |
 
-That is all the mod adds. 3D starts in first person outside battles. First person
-puts the view between the character's eyes, hides the character and the sword, and
-blends over in about a third of a second. It only applies while the game's normal
-follow camera is active: during a scripted camera shot the game's camera is used as
-it is. A battle switches to third person and its end back to first person; a manual
-switch lasts until the next battle starts or ends.
+On the gamepad the game does not see these combinations. View/Back pressed on its own
+still reaches the game, but only when you release it (so the map does not open on
+the way to a combination). All keys can be changed in `ff7vr.ini` (`[controls]`,
+`[first_person] toggle_key`).
 
-**There is no recenter button or key.** The view and the floating panels are centred
-once, when the headset connects: face the direction you want to play in at that
-moment. The headset's own recenter (on a Quest, hold the Meta button) should move
-everything in front of you, because the mod follows the runtime's room setup, but it
-has not been tried. Failing that, quitting and restarting the game re-centres.
+3D starts in first person outside battles. First person puts the view between the
+character's eyes, hides the character and the sword, and blends over in about a
+third of a second. It only applies while the game's normal follow camera is active:
+during a scripted camera shot the game's camera is used as it is. A battle switches
+to third person and its end back to first person; a manual switch lasts until the
+next battle starts or ends.
+
+The view and the panels are also centred once, when the headset connects. The
+headset's own recenter (on a Quest, holding the Meta button) has not been tried with
+the mod; End does the same job.
 
 ## Settings worth knowing
 
@@ -148,14 +155,15 @@ the package folder. The ones you are most likely to touch on day one:
 | `[stereo] enabled` | `1` | `0` = no 3D: the whole game is shown on the virtual screen. The fallback if 3D misbehaves |
 | `[xr] resolution_scale` | `1.0` | per-eye render size relative to what Virtual Desktop asks for. `0.8` renders 64 % of the pixels: faster, softer |
 | `[foveation] preset` | `quality` | lower detail at the outer edges of each eye to save GPU time: `quality` (barely visible), `balanced`, `performance` (visibly blocky edges), `off` |
-| `[ui] distance`, `[ui] size` | `3.0`, `2.0` | distance and height in metres of the HUD/menu panel. `size = 1.57` lines the markers over enemies up with the enemies; `2.0` is easier to read |
+| `[ui] distance`, `[ui] size` | `3.0`, `2.0` | distance and height in metres of the HUD/menu panel (Page Down/Up change the distance during play, until the game is restarted). `size = 1.57` lines the markers over enemies up with the enemies; `2.0` is easier to read |
 | `[ui] follow_head` | `0` | `1` = the panel follows your head |
 | `[stereo] world_scale` | `1.0` | above 1 the world looks smaller (you become a giant), below 1 larger |
 | `[first_person] default` | `1` | `0` = third person from the start and after every battle |
 | `[first_person] enabled` | `1` | `0` = first person is off completely (no key, no pad combination, no automatic switch) |
 | `[first_person] auto_combat` | `1` | `0` = no automatic third person in battles |
 | `[first_person] battle_signal` | see the ini | how a battle is detected. Empty (`battle_signal =`) if battles stay in first person or exploration switches to third person by itself |
-| `[first_person] toggle_key` | `36` | the keyboard key for the switch, as a Windows virtual-key code (36 = Home, 35 = End, 45 = Insert, 0 = none) |
+| `[first_person] toggle_key`, `[controls] ..._key` | Home, End, Insert, Page Down/Up | the keys of "Controls", as Windows virtual-key codes (0 = none) |
+| `[controls] pad` | `1` | `0` = no gamepad combinations for recenter, 3D on/off and the panel distance |
 | `[camera] boom` | `level` | `game` = in third person, follow the game camera's height as it tilts (the eyes rise and sink) |
 | `[stereo] decoupled_pitch` | `1` | `0` = apply the game camera's tilt to the view too (the horizon tilts) |
 | `[screen] distance`, `width` | `2.0`, `1.8` | the virtual screen, in metres |
@@ -209,8 +217,9 @@ session it is `ff7vr.log` in the game's `End\Binaries\Win64` folder).
 6. **Smoothness.** Turning your head must feel smooth. The log's `timing:` lines
    every 10 seconds show the frame rate and `errors 0`.
 7. **HUD panel.** Complete to its corners, sharp, comfortable to read; open the
-   command menu (Space or the pad's command button). Adjust `[ui] size` / `distance`
-   if needed.
+   command menu (Space or the pad's command button). Try Page Down / Page Up (or
+   View/Back + D-pad) for its distance, End (or View/Back + left stick click) to
+   recenter, and note what you like for `[ui] distance` / `size`.
 8. **First person** (the start): the view at Cloud's eye height, facing where the
    camera faced, no part of Cloud or his sword in view. Walk and turn: comfortable?
 9. **Third person** with Home or View/Back + right stick click: behind Cloud at
@@ -250,10 +259,12 @@ Not tested at all:
   (`[stereo] movie_screen = 0`) because it was never seen to work. A movie may be
   shown inside the 3D scene or the HUD panel instead of on the virtual screen.
   Setting `[stereo] movie_screen = 1` is worth a try if movies look broken.
-- **A connected gamepad.** The gamepad combination was tested only with a simulated
-  button state (no pad was connected; the game reads the pad only while one is).
-  The Home key was tested in the game.
-- **The headset's own recenter** (holding the Meta button) with the mod.
+- **A connected gamepad.** The gamepad combinations were tested only with simulated
+  button states (no pad was connected; the game reads the pad only while one is),
+  so what the game does with the View/Back press handed over on release is not
+  known. The keys (Home, End, Insert, Page Down/Up) were tested in the game.
+- **The headset's own recenter** (holding the Meta button) with the mod. The mod's
+  own recenter (End) was tested with the simulated headset.
 - **Disconnecting and reconnecting the headset** during a session, and quitting from
   Virtual Desktop's menu, were tested with SteamVR's virtual headset only.
 - **Other save games and areas** than the first rooms of the save used in testing
@@ -266,8 +277,6 @@ Not tested at all:
 
 Known problems:
 
-- **No recenter button or key** (see "Controls"). If the view ends up off to the
-  side and the headset's own recenter does not help, restart the game.
 - **Smooth turning only.** The game camera turns you smoothly, as in the flat game;
   there is no snap turn. This can be uncomfortable for some players.
 - **Markers over enemies and objects are slightly off** on the default HUD panel
