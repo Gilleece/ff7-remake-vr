@@ -125,7 +125,7 @@ second button:
 |---|---|---|
 | **Home** | right stick click | switch between first and third person |
 | **End** | left stick click | **recenter**: the direction you face now becomes forward, and the HUD panel and the virtual screen move in front of you |
-| **Insert** | Menu/Start | 3D off (the game on the virtual screen) and on again |
+| **Insert** | Menu/Start | 3D off (the game on the virtual screen) and on again. If the headset has lost the game (for example after Virtual Desktop or SteamVR was closed and opened again), the same key reconnects it |
 | **Page Down** / **Page Up** | D-pad down / up | HUD/menu panel 0.25 m nearer / farther |
 
 On the gamepad the game does not see these combinations. View/Back pressed on its own

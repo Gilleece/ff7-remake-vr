@@ -767,7 +767,7 @@ and shown). Keys to flip in `ff7vr.ini` to narrow it down:
 The configuration a player gets (`tools/package/ff7vr.ini`: stereo, UI layer, foveation
 `quality`, first person by default) with the Null backend (Quest 3 class eyes 2064x2208,
 90 Hz) and the dev pipe on, from the latest save, 15.5 minutes of scripted play
-(`captures/soak/runN`): 20 rounds of walking out and back (rooms, then outdoors in the
+(`captures/soak/runN`): 20 loops of walking out and back (rooms, then outdoors in the
 slums), turning and pitching with the mouse, Home twice, the command menu and the main
 menu opened and closed, End, Insert twice (stereo off for 4 s), idle. Process samples every
 30 s (`monitor.csv`: working set, private bytes, handles, threads, GPU memory of the
@@ -793,10 +793,10 @@ the test script brought the window to the front and pressed a movement key (60 s
 presses in the run), not at a switch; the cause was not found. The log has no warning or error line (2140 lines,
 about 140 per minute); 20 recenters and 40 stereo switches were logged, `submit errors 0`,
 the bloom fix `missed 0` for 75180 frames. Eye captures at the start, after the first
-round, in the middle and at the end (`s00` to `s03`) show the scene correctly in both eyes.
+loop, in the middle and at the end (`s00` to `s03`) show the scene correctly in both eyes.
 
 The same configuration on SteamVR's null driver (OpenXR, eyes 1512x1680, `captures/soak/runV`),
-4 minutes of the same rounds with SteamVR closed in the middle the way a user quits it:
+4 minutes of the same loops with SteamVR closed in the middle the way a user quits it:
 the runtime moved the session through STOPPING to EXITING, the render module ended it in
 6 ms and, as `[xr] reconnect_after_exit = 0` says, stayed off; the engine went to mono
 within 0.4 s, the game carried on in its window (frame interval median 8.33 ms) and
