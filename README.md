@@ -58,8 +58,8 @@ Desktop (it can also be done later), then double-click `start-vr.cmd`. The launc
    the monitor, and the mod keeps trying to reach the headset every 5 seconds, so
    connecting it later is enough;
 4. sets ReShade/Luma aside for the session (it renames `dxgi.dll` in the game's
-   `End\Binaries\Win64` folder to `dxgi.dll.vr-disabled`; the two have not been
-   tested together);
+   `End\Binaries\Win64` folder to `dxgi.dll.vr-disabled`; with ReShade/Luma loaded
+   the mod does not reach the headset);
 5. copies `xinput1_3.dll` and `ff7vr.ini` into that folder and records every change
    in `ff7vr.session.json` there;
 6. starts the game (with `-d3d11`) and waits;
@@ -96,10 +96,15 @@ autosaves as usual).
   left eye with the HUD drawn over it.
 - **In the headset, title screen, menus and loading screens:** the game on a flat
   virtual screen, 1.8 m wide, 2 m in front of you at eye height.
-- **In the headset, in the world:** the 3D scene around you, from behind the
-  character as in the normal game. The horizon stays level: the game camera turns
-  you left and right, but looking up and down is done with your head. Leaning moves
-  the view.
+- **In the headset, in the world:** the 3D scene around you, **in first person**:
+  you see through Cloud's eyes, his body and sword are hidden. Home (or View/Back +
+  right stick click on the pad) switches to third person, behind the character at
+  shoulder height. The horizon stays level: the game camera turns you left and
+  right, but looking up and down is done with your head. Leaning moves the view.
+- **In a battle** the view should switch to third person by itself and back to first
+  person afterwards (this has not been seen in a real battle yet; see below).
+- **Conversations and cutscenes** that use their own camera shots are shown from the
+  game's camera, as the game frames them (not seen in testing either).
 - **HUD and menus in the world:** on a flat panel about 3 m in front of you, 3.56 x
   2 m, that stays in place when you turn your head. Whatever the game shows full
   screen (main menu, command menu, dialogue) is on that panel too.
@@ -115,15 +120,21 @@ The game's own controls are unchanged. The mod adds:
 
 | Input | Effect |
 |---|---|
-| **Home** key (game window in focus) | switch between third and first person |
+| **Home** key (game window in focus) | switch between first and third person |
 | Gamepad **View/Back + right stick click** together | the same; the game does not see this combination |
 
-First person puts the view at the character's head, hides the character's body,
-and blends over in about a third of a second. It only applies while the normal
+That is all the mod adds. 3D starts in first person outside battles. First person
+puts the view between the character's eyes, hides the character and the sword, and
+blends over in about a third of a second. It only applies while the game's normal
 follow camera is active: during a scripted camera shot the game's camera is used as
-it is. A manual switch lasts until the next automatic one.
+it is. A battle switches to third person and its end back to first person; a manual
+switch lasts until the next battle starts or ends.
 
-There is no recenter button in the mod (see known problems).
+**There is no recenter button or key.** The view and the floating panels are centred
+once, when the headset connects: face the direction you want to play in at that
+moment. The headset's own recenter (on a Quest, hold the Meta button) should move
+everything in front of you, because the mod follows the runtime's room setup, but it
+has not been tried. Failing that, quitting and restarting the game re-centres.
 
 ## Settings worth knowing
 
@@ -139,12 +150,15 @@ the package folder. The ones you are most likely to touch on day one:
 | `[ui] distance`, `[ui] size` | `3.0`, `2.0` | distance and height in metres of the HUD/menu panel. `size = 1.57` lines the markers over enemies up with the enemies; `2.0` is easier to read |
 | `[ui] follow_head` | `0` | `1` = the panel follows your head |
 | `[stereo] world_scale` | `1.0` | above 1 the world looks smaller (you become a giant), below 1 larger |
-| `[first_person] enabled` | `1` | `0` = first person cannot be switched on at all |
+| `[first_person] default` | `1` | `0` = third person from the start and after every battle |
+| `[first_person] enabled` | `1` | `0` = first person is off completely (no key, no pad combination, no automatic switch) |
+| `[first_person] auto_combat` | `1` | `0` = no automatic third person in battles |
+| `[first_person] battle_signal` | see the ini | how a battle is detected. Empty (`battle_signal =`) if battles stay in first person or exploration switches to third person by itself |
 | `[first_person] toggle_key` | `36` | the keyboard key for the switch, as a Windows virtual-key code (36 = Home, 35 = End, 45 = Insert, 0 = none) |
-| `[first_person] default` | `0` | `1` = start in first person. Off because battles are not detected yet |
 | `[camera] boom` | `level` | `game` = in third person, follow the game camera's height as it tilts (the eyes rise and sink) |
 | `[stereo] decoupled_pitch` | `1` | `0` = apply the game camera's tilt to the view too (the horizon tilts) |
 | `[screen] distance`, `width` | `2.0`, `1.8` | the virtual screen, in metres |
+| `[stereo] movie_screen` | `0` | `1` = pre-rendered movies on the virtual screen; try it if movies look broken in 3D |
 | `[log] level` | `debug` | how much goes into the log; `info` keeps it shorter |
 
 ## Performance
@@ -196,17 +210,24 @@ session it is `ff7vr.log` in the game's `End\Binaries\Win64` folder).
 7. **HUD panel.** Complete to its corners, sharp, comfortable to read; open the
    command menu (Space or the pad's command button). Adjust `[ui] size` / `distance`
    if needed.
-8. **Walking and turning the camera** with the stick or mouse: comfortable? Does the
-   camera height stay steady when you tilt the game camera?
-9. **First person** with Home or View + right stick click: the view at head height,
-   the body hidden, back to third person with the same input.
+8. **First person** (the start): the view at Cloud's eye height, facing where the
+   camera faced, no part of Cloud or his sword in view. Walk and turn: comfortable?
+9. **Third person** with Home or View/Back + right stick click: behind Cloud at
+   shoulder height. Move the right stick or mouse up and down: your height should
+   stay the same while the view orbits. Walk with your back to a wall and orbit: the
+   eyes should stay out of the wall. Switch back and forth a few times: Cloud and his
+   sword must be complete every time in third person.
 10. **Foveated rendering.** Look straight ahead and let your eyes wander to the edges:
     it should look as sharp as before up to well beyond comfortable eye movement.
     Compare with `[foveation] enabled = 0`.
-11. **Things the developer could not reach:** combat, a conversation, a real-time
-    cutscene, a loading screen between areas, a pre-rendered movie, the pause menu.
-    See the list below for what to look for.
-12. **Quit the game** normally: the headset returns to Virtual Desktop's own view,
+11. **A battle:** third person when it starts, first person again when it ends. The log
+    shows `player: battle signal 0 -> 1` and `player: battle started: third person`;
+    if no such line appears, battle detection does not work (see the settings).
+12. **A conversation, a real-time cutscene, a loading screen between areas, a
+    pre-rendered movie, the pause menu:** none of these was reached during
+    development. The log shows `player: camera mode ... -> game camera` when a
+    scripted shot takes over. See the list below for what to look for.
+13. **Quit the game** normally: the headset returns to Virtual Desktop's own view,
     the launcher tidies up. Afterwards ReShade/Luma works again in the flat game.
 
 ## Known problems and what has not been tested
@@ -218,30 +239,34 @@ Not tested at all:
   rendering looks behind the lenses. With Virtual Desktop and no headset connected,
   only this was checked: the game runs flat and the mod retries every 5 seconds.
 - **Combat, conversations, real-time cutscenes, loading screens between areas,
-  pre-rendered movies, the pause menu.** None of these was reached in testing. What
-  to look for: scripted camera shots should be shown as the game frames them (the
-  mod then uses the game's camera); a battle is played in third person only if you
-  are in third person (battles are not detected yet); the camera may cut between
-  shots, which can be uncomfortable in a headset.
+  pre-rendered movies, the pause menu.** None of these was reached in testing; they
+  are for you to try. What to look for: a battle should switch to third person and
+  back (the battle detection is an educated guess: it reads a battle scene ID that
+  is empty outside battles, but it has never been seen in a battle); scripted camera
+  shots should be shown as the game frames them (the mod then uses the game's
+  camera); the camera may cut between shots, which can be uncomfortable in a headset.
 - **Pre-rendered movies** are very likely wrong: movie detection exists but is off
   (`[stereo] movie_screen = 0`) because it was never seen to work. A movie may be
   shown inside the 3D scene or the HUD panel instead of on the virtual screen.
   Setting `[stereo] movie_screen = 1` is worth a try if movies look broken.
 - **A connected gamepad.** The gamepad combination was tested only with a simulated
-  button state; the game reads the pad only while one is connected.
+  button state (no pad was connected; the game reads the pad only while one is).
+  The Home key was tested in the game.
+- **The headset's own recenter** (holding the Meta button) with the mod.
 - **Disconnecting and reconnecting the headset** during a session, and quitting from
   Virtual Desktop's menu, were tested with SteamVR's virtual headset only.
 - **Other save games and areas** than the first rooms of the save used in testing
   (Sector 7 slums). Sunlit areas, fog and big open areas are untested in 3D.
-- **ReShade/Luma together with the mod.** Not tested; the launcher sets it aside.
+- **ReShade/Luma together with the mod** does not work yet: with `-KeepLuma` the game
+  ran flat on the monitor and the mod never reached the headset. The launcher
+  sets ReShade/Luma aside for every session and puts it back afterwards.
 - **The game's HDR output.** The virtual screen assumes normal (SDR) output; with HDR
   switched on in the game it will look wrong.
 
 Known problems:
 
-- **No recenter button.** The view is centred once, when the headset connects. The
-  Quest's own recenter (holding the Meta button) has not been tried with the mod;
-  if the view ends up off to the side, restarting the game re-centres it.
+- **No recenter button or key** (see "Controls"). If the view ends up off to the
+  side and the headset's own recenter does not help, restart the game.
 - **Smooth turning only.** The game camera turns you smoothly, as in the flat game;
   there is no snap turn. This can be uncomfortable for some players.
 - **Markers over enemies and objects are slightly off** on the default HUD panel
@@ -251,8 +276,16 @@ Known problems:
   mode, and is not switched back when the game exits. Whether the game remembers the
   small window for the next flat session is untested; if it does, set the display
   mode again in the game's options.
-- **First person without battle detection:** if you are in first person when a
-  battle starts, you stay in first person. Switch with Home or View + right stick.
+- **Battle detection unverified.** If battles stay in first person, switch with Home
+  or View/Back + right stick click, and send the log. If it misfires outside battles,
+  set `battle_signal =` (empty) and `default = 0`.
+- **First person:** the whole character is hidden, probably its shadow too; the view
+  stays level and does not follow the head's animation; climbing, squeezing through
+  gaps and other special animations were not tried.
+- **Third person near obstacles:** the eyes are where the game camera would be at
+  zero tilt, so something the tilted camera passed over (a counter, a low wall, a
+  person) can be right in front of your eyes. `[camera] boom = game` uses the game
+  camera's own position instead.
 - **The desktop window** shows a crop of the left eye, not the full picture.
 - **Some effects stay as in the flat game:** the vignette (darker image corners),
   and the game's depth of field in cutscenes. Camera motion blur and chromatic
@@ -284,7 +317,9 @@ To narrow a problem down, change one setting at a time and start a new session:
 | HUD or menus missing, cut off, doubled | `[ui] layer = 0` (the HUD goes back into the 3D image, cropped) |
 | blocky or shimmering edges, any odd shading | `[foveation] enabled = 0` |
 | uncomfortable camera height or movement | `[camera] boom = game`, then `[stereo] decoupled_pitch = 0` |
-| anything in first person | `[first_person] enabled = 0` |
+| first person in a battle, or third person outside one | `[first_person] battle_signal =` (empty) and `default = 0` |
+| first person at the wrong height or inside the head | `[first_person] eye = offset` (a fixed height above the character's position instead of its eyes) |
+| anything else in first person | `[first_person] enabled = 0` |
 | stutter or low frame rate | `[xr] resolution_scale = 0.8`, then `[foveation] preset = balanced` |
 | the game does not start or crashes at once | `restore.cmd`, then start the game from Steam without the mod to rule out the game itself |
 
