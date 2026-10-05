@@ -53,6 +53,7 @@ enum class Preset : unsigned { Default = 0, J = 10, K = 11, L = 12, M = 13 };
 
 struct Settings {
     std::atomic<bool> enabled{false};
+    std::atomic<int> mode{0};  // 0 dlaa, 1 upscale
     std::atomic<bool> init_requested{false};
     std::atomic<unsigned> preset{static_cast<unsigned>(Preset::Default)};
     std::atomic<bool> auto_exposure{true};
@@ -222,7 +223,7 @@ bool lookup_rows(ID3D11Buffer* b, ViewRows& out) {
 // ------------------------------------------------------------------ NGX (RHI thread)
 struct Feature {
     NVSDK_NGX_Handle* handle = nullptr;
-    UINT w = 0, h = 0;
+    UINT w = 0, h = 0, ow = 0, oh = 0;
     unsigned preset = 0;
     int flags = 0;
     std::uint64_t last_eval_frame = 0;
@@ -422,20 +423,33 @@ void release_feature(Feature& f) {
     f = Feature{};
 }
 
-int wanted_flags() {
-    int flags = NVSDK_NGX_DLSS_Feature_Flags_IsHDR | NVSDK_NGX_DLSS_Feature_Flags_MVLowRes | NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
+int wanted_flags(bool hdr = true) {
+    int flags = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes | NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
+    if (hdr) flags |= NVSDK_NGX_DLSS_Feature_Flags_IsHDR;
     if (g_set.auto_exposure.load()) flags |= NVSDK_NGX_DLSS_Feature_Flags_AutoExposure;
     if (g_set.mv_jitter.load() == 1) flags |= NVSDK_NGX_DLSS_Feature_Flags_MVJittered;
     return flags;
 }
 
-bool ensure_feature(ID3D11DeviceContext* ctx, int eye, UINT w, UINT h, bool& created) {
+NVSDK_NGX_PerfQuality_Value quality_for(UINT in_w, UINT out_w) {
+    const double ratio = static_cast<double>(in_w) / static_cast<double>(out_w);
+    return in_w >= out_w     ? NVSDK_NGX_PerfQuality_Value_DLAA
+           : ratio >= 0.66   ? NVSDK_NGX_PerfQuality_Value_MaxQuality
+           : ratio >= 0.57   ? NVSDK_NGX_PerfQuality_Value_Balanced
+           : ratio >= 0.49   ? NVSDK_NGX_PerfQuality_Value_MaxPerf
+                             : NVSDK_NGX_PerfQuality_Value_UltraPerformance;
+}
+
+// One feature per eye: input w x h, output ow x oh (equal for DLAA), HDR or display-referred input.
+bool ensure_feature(ID3D11DeviceContext* ctx, int eye, UINT w, UINT h, bool& created, UINT ow = 0, UINT oh = 0, bool hdr = true) {
     Rhi& R = *g_rhi;
     Feature& f = R.feat[eye];
+    if (!ow) ow = w;
+    if (!oh) oh = h;
     const unsigned preset = g_set.preset.load();
-    const int flags = wanted_flags();
+    const int flags = wanted_flags(hdr);
     created = false;
-    if (f.handle && f.w == w && f.h == h && f.preset == preset && f.flags == flags) return true;
+    if (f.handle && f.w == w && f.h == h && f.ow == ow && f.oh == oh && f.preset == preset && f.flags == flags) return true;
     release_feature(f);
     NVSDK_NGX_Parameter_SetUI(R.params, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA, preset);
     NVSDK_NGX_Parameter_SetUI(R.params, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality, preset);
@@ -445,16 +459,16 @@ bool ensure_feature(ID3D11DeviceContext* ctx, int eye, UINT w, UINT h, bool& cre
     NVSDK_NGX_DLSS_Create_Params cp{};
     cp.Feature.InWidth = w;
     cp.Feature.InHeight = h;
-    cp.Feature.InTargetWidth = w;
-    cp.Feature.InTargetHeight = h;
-    cp.Feature.InPerfQualityValue = NVSDK_NGX_PerfQuality_Value_DLAA;
+    cp.Feature.InTargetWidth = ow;
+    cp.Feature.InTargetHeight = oh;
+    cp.Feature.InPerfQualityValue = quality_for(w, ow);
     cp.InFeatureCreateFlags = flags;
     cp.InEnableOutputSubrects = true;
     const auto t0 = std::chrono::steady_clock::now();
     const NVSDK_NGX_Result r = NGX_D3D11_CREATE_DLSS_EXT(ctx, &f.handle, R.params, &cp);
     const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-    std::string text = std::format("eye {} {}x{} DLAA preset {} flags 0x{:x}: create {} in {:.1f} ms", eye, w, h, preset_name(preset), flags,
-                                   result_text(r), ms);
+    std::string text = std::format("eye {} {}x{} -> {}x{} quality value {} preset {} flags 0x{:x}: create {} in {:.1f} ms", eye, w, h, ow, oh,
+                                   static_cast<int>(cp.Feature.InPerfQualityValue), preset_name(preset), flags, result_text(r), ms);
     log::info("dlss: feature {}", text);
     with_info([&](Info& i) {
         i.features[eye] = text;
@@ -467,6 +481,8 @@ bool ensure_feature(ID3D11DeviceContext* ctx, int eye, UINT w, UINT h, bool& cre
     }
     f.w = w;
     f.h = h;
+    f.ow = ow;
+    f.oh = oh;
     f.preset = preset;
     f.flags = flags;
     created = true;
@@ -861,6 +877,245 @@ bool run_dlss(ID3D11DeviceContext* ctx, PassInputs& in, int eye, std::string& wh
 
 std::atomic<std::uint64_t> g_fallback_log{0};
 
+ComPtr<ID3D11Texture2D> make_tex(ID3D11Device* dev, UINT w, UINT h, DXGI_FORMAT f, UINT bind);
+
+// ------------------------------------------------------------------ upscale mode
+// With r.ScreenPercentage below 100 the engine renders, anti-aliases, blooms and tonemaps each
+// eye at the reduced size, and its last pass (colour grading, film grain) scales the result
+// up into the eye's rectangle of the eye texture (docs/re/engine.md section 12). In this mode
+// the anti-aliasing pass only passes the jittered image through (and the motion vectors are
+// made then); the last pass is run once more into a texture at the reduced size (same pass,
+// smaller viewport, so it grades without scaling), and DLSS scales that up into the eye's
+// rectangle of the eye texture, with display-referred input.
+struct Stash {
+    std::uint64_t frame = 0;
+    UINT x = 0, y = 0, w = 0, h = 0;
+    float jx = 0, jy = 0;
+    ComPtr<ID3D11Resource> depth;
+};
+Stash g_stash[2];  // RHI thread
+ComPtr<ID3D11Texture2D> g_graded;  // the last pass at the reduced size
+ComPtr<ID3D11RenderTargetView> g_graded_rtv;
+D3D11_TEXTURE2D_DESC g_graded_desc{};
+ComPtr<ID3D11Texture2D> g_up_out;  // DLSS output, like the eye texture
+D3D11_TEXTURE2D_DESC g_up_out_desc{};
+ID3D11PixelShader* g_final_ps = nullptr;  // compared only
+std::atomic<std::uint64_t> g_up_count{0}, g_up_fail{0};
+
+void draw_motion_vectors(ID3D11DeviceContext* ctx, const PassInputs& in, UINT x, UINT y, UINT w, UINT h) {
+    Rhi& R = *g_rhi;
+    PassConsts pc{};
+    pc.rect[0] = static_cast<float>(x);
+    pc.rect[1] = static_cast<float>(y);
+    pc.rect[2] = static_cast<float>(w);
+    pc.rect[3] = static_cast<float>(h);
+    pc.opt[0] = 1.0f / static_cast<float>(w);
+    pc.opt[1] = 1.0f / static_cast<float>(h);
+    pc.opt[2] = g_set.mv_jitter.load() == 0 ? 1.0f : 0.0f;
+    D3D11_MAPPED_SUBRESOURCE m{};
+    if (SUCCEEDED(ctx->Map(R.cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
+        std::memcpy(m.pData, &pc, sizeof(pc));
+        ctx->Unmap(R.cb.Get(), 0);
+    }
+    ID3D11Buffer* cbs[2] = {R.cb.Get(), in.cb1.Get()};
+    ID3D11ShaderResourceView* srvs[2] = {in.srv[1].Get(), in.srv[4].Get()};
+    ID3D11RenderTargetView* rt = R.mv_rtv.Get();
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx->VSSetShader(R.vs.Get(), nullptr, 0);
+    ctx->PSSetShader(R.ps.Get(), nullptr, 0);
+    ctx->PSSetConstantBuffers(0, 2, cbs);
+    ctx->PSSetShaderResources(0, 2, srvs);
+    ctx->OMSetRenderTargets(1, &rt, nullptr);
+    ctx->RSSetViewports(1, &in.vp);
+    ctx->Draw(3, 0);
+    ctx->ClearState();
+}
+
+// Anti-aliasing pass in upscale mode: motion vectors, jittered colour passed through.
+bool run_passthrough(ID3D11DeviceContext* ctx, PassInputs& in, int eye, std::string& why) {
+    Rhi& R = *g_rhi;
+    ViewRows rows;
+    if (!lookup_rows(in.cb1.Get(), rows)) {
+        why = "no captured view constants for constant buffer 1";
+        with_info([](Info& i) { ++i.no_rows; });
+        return false;
+    }
+    if (!ensure_shaders(R.dev) || !ensure_textures(R.dev, in.color_desc, typed_output(in.target_desc.Format))) {
+        why = "motion vector resources unavailable";
+        return false;
+    }
+    const UINT x = static_cast<UINT>(in.vp.TopLeftX), y = static_cast<UINT>(in.vp.TopLeftY);
+    const UINT w = static_cast<UINT>(in.vp.Width), h = static_cast<UINT>(in.vp.Height);
+    if (x + w > in.color_desc.Width || y + h > in.color_desc.Height || in.target_desc.Format != in.color_desc.Format) {
+        why = "viewport outside the colour texture or formats differ";
+        return false;
+    }
+    ComPtr<ID3D11DeviceContext1> ctx1;
+    if (FAILED(ctx->QueryInterface(IID_PPV_ARGS(&ctx1)))) return false;
+    ID3DDeviceContextState* game_state = nullptr;
+    ctx1->SwapDeviceContextState(R.state.Get(), &game_state);
+    draw_motion_vectors(ctx, in, x, y, w, h);
+    const D3D11_BOX box{x, y, 0, x + w, y + h, 1};
+    ctx->CopySubresourceRegion(in.target.Get(), in.target_view.Texture2D.MipSlice, x, y, 0, in.color.Get(), 0, &box);
+    ctx1->SwapDeviceContextState(game_state, nullptr);
+    if (game_state) game_state->Release();
+    Stash& s = g_stash[eye];
+    s.frame = R.frame;
+    s.x = x;
+    s.y = y;
+    s.w = w;
+    s.h = h;
+    s.jx = rows.v[kRowJitter - kRowFirst][0] * static_cast<float>(w) * g_set.jitter_scale_x.load();
+    s.jy = rows.v[kRowJitter - kRowFirst][1] * static_cast<float>(h) * g_set.jitter_scale_y.load();
+    s.depth = in.depth;
+    return true;
+}
+
+// The last pass of a view in upscale mode: true if it was replaced.
+bool try_final(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_trace::DrawIndexedFn original) {
+    Rhi& R = *g_rhi;
+    if (g_stash[0].frame != R.frame && g_stash[1].frame != R.frame) return false;
+    ID3D11PixelShader* ps = nullptr;
+    ctx->PSGetShader(&ps, nullptr, nullptr);
+    if (ps) ps->Release();
+    if (g_final_ps && ps != g_final_ps) return false;
+    D3D11_VIEWPORT vp{};
+    UINT nvp = 1;
+    ctx->RSGetViewports(&nvp, &vp);
+    if (nvp == 0) return false;
+    const int eye = vp.TopLeftX >= 1.0f ? 1 : 0;
+    Stash& s = g_stash[eye];
+    if (s.frame != R.frame || !s.depth) return false;
+    ID3D11RenderTargetView* rtv[8]{};
+    ID3D11DepthStencilView* dsv = nullptr;
+    ctx->OMGetRenderTargets(8, rtv, &dsv);
+    ComPtr<ID3D11RenderTargetView> saved_rtv[8];
+    for (int i = 0; i < 8; ++i) saved_rtv[i].Attach(rtv[i]);
+    ComPtr<ID3D11DepthStencilView> saved_dsv;
+    saved_dsv.Attach(dsv);
+    if (!saved_rtv[0] || saved_rtv[1]) return false;
+    ComPtr<ID3D11Resource> target;
+    saved_rtv[0]->GetResource(&target);
+    D3D11_TEXTURE2D_DESC td{};
+    if (!tex_desc(target.Get(), td)) return false;
+    if ((td.Format != DXGI_FORMAT_R10G10B10A2_UNORM && td.Format != DXGI_FORMAT_R10G10B10A2_TYPELESS) ||
+        td.Width != static_cast<UINT>(vp.Width * 2.0f) || vp.Width < static_cast<float>(s.w) || vp.Height < static_cast<float>(s.h))
+        return false;
+    ID3D11ShaderResourceView* srv1 = nullptr;
+    ctx->PSGetShaderResources(1, 1, &srv1);
+    ComPtr<ID3D11ShaderResourceView> input;
+    input.Attach(srv1);
+    if (!input) return false;
+    ComPtr<ID3D11Resource> input_res;
+    input->GetResource(&input_res);
+    D3D11_TEXTURE2D_DESC id{};
+    if (!tex_desc(input_res.Get(), id) || s.x + s.w > id.Width || s.y + s.h > id.Height) return false;
+    if (!g_final_ps) {
+        g_final_ps = ps;
+        log::info("dlss: last pass recognised: pixel shader {} | target {}x{} format {} | vp {} {} {} {} | input {}x{} format {} | eye rect at the reduced size {} {} {} {}",
+                  static_cast<void*>(ps), td.Width, td.Height, static_cast<int>(td.Format), vp.TopLeftX, vp.TopLeftY, vp.Width, vp.Height, id.Width,
+                  id.Height, static_cast<int>(id.Format), s.x, s.y, s.w, s.h);
+    }
+    // 1. The last pass once more, into a texture at the reduced size: same shaders and inputs,
+    //    a viewport the size of the eye's reduced rectangle.
+    if (!g_graded || g_graded_desc.Width != id.Width || g_graded_desc.Height != id.Height || g_graded_desc.Format != td.Format) {
+        g_graded.Reset();
+        g_graded_rtv.Reset();
+        g_graded = make_tex(R.dev, id.Width, id.Height, td.Format, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
+        if (!g_graded || FAILED(R.dev->CreateRenderTargetView(g_graded.Get(), nullptr, &g_graded_rtv))) {
+            g_graded.Reset();
+            return false;
+        }
+        g_graded->GetDesc(&g_graded_desc);
+        log::info("dlss: graded texture {}x{} format {}", id.Width, id.Height, static_cast<int>(td.Format));
+    }
+    if (!g_up_out || g_up_out_desc.Width != td.Width || g_up_out_desc.Height != td.Height) {
+        g_up_out.Reset();
+        UINT support = 0;
+        R.dev->CheckFormatSupport(DXGI_FORMAT_R10G10B10A2_UNORM, &support);
+        if (!(support & D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW)) {
+            ++g_up_fail;
+            return false;
+        }
+        g_up_out = make_tex(R.dev, td.Width, td.Height, DXGI_FORMAT_R10G10B10A2_UNORM, D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE);
+        if (!g_up_out) return false;
+        g_up_out->GetDesc(&g_up_out_desc);
+        log::info("dlss: upscale output texture {}x{} R10G10B10A2_UNORM", td.Width, td.Height);
+    }
+    D3D11_VIEWPORT reduced_vp{static_cast<float>(s.x), static_cast<float>(s.y), static_cast<float>(s.w), static_cast<float>(s.h), vp.MinDepth, vp.MaxDepth};
+    ID3D11RenderTargetView* graded = g_graded_rtv.Get();
+    ctx->OMSetRenderTargets(1, &graded, saved_dsv.Get());
+    ctx->RSSetViewports(1, &reduced_vp);
+    original(ctx, count, start, base);
+    ID3D11RenderTargetView* restore[8];
+    for (int i = 0; i < 8; ++i) restore[i] = saved_rtv[i].Get();
+    ctx->OMSetRenderTargets(8, restore, saved_dsv.Get());
+    ctx->RSSetViewports(nvp, &vp);
+    // 2. DLSS from the reduced rectangle into the eye's rectangle.
+    ComPtr<ID3D11DeviceContext1> ctx1;
+    if (FAILED(ctx->QueryInterface(IID_PPV_ARGS(&ctx1)))) return false;
+    ID3DDeviceContextState* game_state = nullptr;
+    ctx1->SwapDeviceContextState(R.state.Get(), &game_state);
+    bool ok = false, created = false;
+    const UINT ox = static_cast<UINT>(vp.TopLeftX), oy = static_cast<UINT>(vp.TopLeftY);
+    const UINT ow = static_cast<UINT>(vp.Width), oh = static_cast<UINT>(vp.Height);
+    Feature& f = R.feat[eye];
+    if (ensure_feature(ctx, eye, s.w, s.h, created, ow, oh, false)) {
+        Timing* t = begin_timing(ctx, eye);
+        if (t) ctx->End(t->t1);
+        bool reset = created || f.last_eval_frame + 1 < R.frame || g_set.reset_requests.load() > 0;
+        NVSDK_NGX_D3D11_DLSS_Eval_Params ep{};
+        ep.Feature.pInColor = g_graded.Get();
+        ep.Feature.pInOutput = g_up_out.Get();
+        ep.pInDepth = s.depth.Get();
+        ep.pInMotionVectors = R.mv.Get();
+        ep.InJitterOffsetX = s.jx;
+        ep.InJitterOffsetY = s.jy;
+        ep.InRenderSubrectDimensions = {s.w, s.h};
+        ep.InReset = reset ? 1 : 0;
+        ep.InMVScaleX = 1.0f;
+        ep.InMVScaleY = 1.0f;
+        ep.InColorSubrectBase = {s.x, s.y};
+        ep.InDepthSubrectBase = {s.x, s.y};
+        ep.InMVSubrectBase = {s.x, s.y};
+        ep.InOutputSubrectBase = {ox, oy};
+        ep.InFrameTimeDeltaInMsec = R.frame_dt_ms;
+        const NVSDK_NGX_Result r = NGX_D3D11_EVALUATE_DLSS_EXT(ctx, f.handle, R.params, &ep);
+        ctx->ClearState();
+        if (NVSDK_NGX_SUCCEED(r)) {
+            const D3D11_BOX box{ox, oy, 0, ox + ow, oy + oh, 1};
+            ctx->CopySubresourceRegion(target.Get(), 0, ox, oy, 0, g_up_out.Get(), 0, &box);
+            f.last_eval_frame = R.frame;
+            ok = true;
+            ++g_up_count;
+            with_info([&](Info& i) {
+                i.jitter_px[eye][0] = s.jx;
+                i.jitter_px[eye][1] = s.jy;
+            });
+        } else {
+            ++g_up_fail;
+            with_info([&](Info& i) {
+                ++i.eval_fail;
+                i.last_error = std::format("upscale EvaluateFeature {}", result_text(r));
+            });
+        }
+        if (t) {
+            ctx->End(t->t2);
+            ctx->End(t->disjoint);
+            t->pending = true;
+        }
+    } else {
+        ++g_up_fail;
+    }
+    ctx1->SwapDeviceContextState(game_state, nullptr);
+    if (game_state) game_state->Release();
+    s.frame = 0;  // one use per frame
+    s.depth.Reset();
+    // If DLSS failed, the eye's rectangle still holds the previous frame; draw the game's pass.
+    if (!ok) original(ctx, count, start, base);
+    return true;
+}
+
 ComPtr<ID3D11Texture2D> make_tex(ID3D11Device* dev, UINT w, UINT h, DXGI_FORMAT f, UINT bind) {
     D3D11_TEXTURE2D_DESC d{};
     d.Width = w;
@@ -976,10 +1231,11 @@ void start(const Config& cfg, const std::filesystem::path& dll_dir) {
     const std::string extra = cfg.get_string("dlss", "dll_dir", "");
     if (!extra.empty()) g_extra_dll_dir = log::widen(extra);
     const std::string mode = cfg.get_string("dlss", "mode", "dlaa");
-    if (mode != "dlaa") log::warn("dlss: mode '{}' is not available (only dlaa: the anti-aliasing at the eye size)", mode);
-    log::info("dlss: built in; {} (preset {}, auto exposure {}, motion vector jitter mode {}{})", g_set.enabled.load() ? "ON" : "off ([dlss] enabled = 0)",
-              preset_name(g_set.preset.load()), g_set.auto_exposure.load() ? "on" : "off", g_set.mv_jitter.load(),
-              extra.empty() ? "" : ", extra library folder " + extra);
+    g_set.mode = mode == "upscale" ? 1 : 0;
+    if (mode != "dlaa" && mode != "upscale") log::warn("dlss: mode '{}' unknown; dlaa used", mode);
+    log::info("dlss: built in; {} (mode {}, preset {}, auto exposure {}, motion vector jitter mode {}{})",
+              g_set.enabled.load() ? "ON" : "off ([dlss] enabled = 0)", g_set.mode.load() ? "upscale" : "dlaa", preset_name(g_set.preset.load()),
+              g_set.auto_exposure.load() ? "on" : "off", g_set.mv_jitter.load(), extra.empty() ? "" : ", extra library folder " + extra);
 }
 
 bool wants_hooks() { return g_set.enabled.load(std::memory_order_relaxed) || g_set.init_requested.load(std::memory_order_relaxed); }
@@ -1021,8 +1277,10 @@ void frame(ID3D11Texture2D* any_texture) {
     dev->Release();
 }
 
-bool on_draw_indexed(ID3D11DeviceContext* ctx, UINT count, UINT, INT, gpu_trace::DrawIndexedFn) {
+bool on_draw_indexed(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_trace::DrawIndexedFn original) {
     if (count != 3 || !wants_hooks() || !device::active()) return false;
+    const bool upscale = g_set.mode.load(std::memory_order_relaxed) == 1;
+    if (upscale && g_set.enabled.load(std::memory_order_relaxed) && g_rhi->ngx_state == 1 && try_final(ctx, count, start, base, original)) return true;
     PassInputs in;
     if (!read_pass(ctx, in, nullptr)) return false;
     const int eye = in.vp.TopLeftX >= 1.0f ? 1 : 0;
@@ -1041,7 +1299,7 @@ bool on_draw_indexed(ID3D11DeviceContext* ctx, UINT count, UINT, INT, gpu_trace:
         return false;
     }
     std::string why;
-    const bool ok = run_dlss(ctx, in, eye, why);
+    const bool ok = upscale ? run_passthrough(ctx, in, eye, why) : run_dlss(ctx, in, eye, why);
     with_info([&](Info& i) {
         ++(ok ? i.replaced : i.fallback);
         if (!ok) i.last_error = why;
@@ -1068,6 +1326,12 @@ std::string command(const std::string& args) {
         g_set.reset_requests = 2;
         log::info("dlss: switched {} (dev command)", sub);
         return std::string("ok dlss ") + sub;
+    }
+    if (sub == "mode" && a.size() == 2 && (a[1] == "dlaa" || a[1] == "upscale")) {
+        g_set.mode = a[1] == "upscale" ? 1 : 0;
+        g_set.reset_requests = 2;
+        log::info("dlss: mode {} (dev command)", a[1]);
+        return std::format("ok mode {}{}", a[1], a[1] == "upscale" ? " (set r.ScreenPercentage below 100 for fewer rendered pixels)" : "");
     }
     if (sub == "init") {
         g_set.init_requested = true;
@@ -1146,6 +1410,7 @@ std::string command(const std::string& args) {
             i.features[1].empty() ? "-" : i.features[1], avg(0, i.ms_sum), avg(1, i.ms_sum), avg(0, i.mv_ms_sum), avg(1, i.mv_ms_sum), i.ms_n[0], i.ms_n[1],
             i.jitter_px[0][0], i.jitter_px[0][1], i.jitter_px[1][0], i.jitter_px[1][1], g_ub_size.load(), g_ub_captures_map.load(),
             g_ub_captures_update.load(), g_ub_captures_create.load(), i.optimal.empty() ? "" : " | optimal:" + i.optimal);
+        s += std::format(" | mode {} | upscaled {} upscale failures {}", g_set.mode.load() ? "upscale" : "dlaa", g_up_count.load(), g_up_fail.load());
         if (!i.bench.empty())
             s += std::format(" | {}{}: GPU {:.3f} ms (samples {})", i.bench, g_set.bench.load() ? "" : " (off)", avg(2, i.ms_sum), i.ms_n[2]);
     });
