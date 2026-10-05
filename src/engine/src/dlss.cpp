@@ -18,6 +18,7 @@
 #include <nvsdk_ngx.h>
 #include <nvsdk_ngx_helpers.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cctype>
@@ -901,6 +902,35 @@ ComPtr<ID3D11Texture2D> g_up_out;  // DLSS output, like the eye texture
 D3D11_TEXTURE2D_DESC g_up_out_desc{};
 ID3D11PixelShader* g_final_ps = nullptr;  // compared only
 std::atomic<std::uint64_t> g_up_count{0}, g_up_fail{0};
+// The last pass's pixel shader constants (cb0, 1024 bytes): rows 30/31 the input rectangle
+// and size, rows 34/35 the output rectangle (min x, min y, max x, max y) and size (w, h,
+// 1/w, 1/h); the pixel shader maps SV_Position through rows 34/35 (docs/re/engine.md
+// section 12). For the run at the reduced size a copy of cb0 gets rows 34/35 replaced.
+constexpr UINT kFinalOutRectRow = 34;
+ComPtr<ID3D11Buffer> g_cb_copy, g_cb_patch;
+int g_cb_checked = 0;  // 0 not yet, 1 rows 34/35 matched the viewport, -1 they did not
+
+// One-time check (stalls once): rows 34/35 of the bound cb0 describe the current viewport.
+bool check_final_rows(ID3D11DeviceContext* ctx, ID3D11Buffer* cb, const D3D11_VIEWPORT& vp) {
+    Rhi& R = *g_rhi;
+    D3D11_BUFFER_DESC sd{};
+    sd.ByteWidth = 16 * (kFinalOutRectRow + 2);
+    sd.Usage = D3D11_USAGE_STAGING;
+    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Buffer> st;
+    if (FAILED(R.dev->CreateBuffer(&sd, nullptr, &st))) return false;
+    const D3D11_BOX box{0, 0, 0, sd.ByteWidth, 1, 1};
+    ctx->CopySubresourceRegion(st.Get(), 0, 0, 0, 0, cb, 0, &box);
+    D3D11_MAPPED_SUBRESOURCE m{};
+    if (FAILED(ctx->Map(st.Get(), 0, D3D11_MAP_READ, 0, &m))) return false;
+    const float* f = static_cast<const float*>(m.pData) + 4 * kFinalOutRectRow;
+    const bool ok = f[0] == vp.TopLeftX && f[1] == vp.TopLeftY && f[2] == vp.TopLeftX + vp.Width && f[3] == vp.TopLeftY + vp.Height &&
+                    f[4] == vp.Width && f[5] == vp.Height;
+    log::info("dlss: last pass cb0 rows {}/{}: {} {} {} {} | {} {} {} {} ({} the viewport {} {} {} {})", kFinalOutRectRow, kFinalOutRectRow + 1, f[0],
+              f[1], f[2], f[3], f[4], f[5], f[6], f[7], ok ? "match" : "DO NOT match", vp.TopLeftX, vp.TopLeftY, vp.Width, vp.Height);
+    ctx->Unmap(st.Get(), 0);
+    return ok;
+}
 
 void draw_motion_vectors(ID3D11DeviceContext* ctx, const PassInputs& in, UINT x, UINT y, UINT w, UINT h) {
     Rhi& R = *g_rhi;
@@ -944,9 +974,12 @@ bool run_passthrough(ID3D11DeviceContext* ctx, PassInputs& in, int eye, std::str
         why = "motion vector resources unavailable";
         return false;
     }
+    // At screen percentages below 100 the right view's rectangle can reach a pixel or two past
+    // the scaled buffer (4116 wide for two 2059-pixel views at 67 %); the rest is clipped.
     const UINT x = static_cast<UINT>(in.vp.TopLeftX), y = static_cast<UINT>(in.vp.TopLeftY);
-    const UINT w = static_cast<UINT>(in.vp.Width), h = static_cast<UINT>(in.vp.Height);
-    if (x + w > in.color_desc.Width || y + h > in.color_desc.Height || in.target_desc.Format != in.color_desc.Format) {
+    const UINT w = std::min(static_cast<UINT>(in.vp.Width), in.color_desc.Width > x ? in.color_desc.Width - x : 0u);
+    const UINT h = std::min(static_cast<UINT>(in.vp.Height), in.color_desc.Height > y ? in.color_desc.Height - y : 0u);
+    if (w < 64 || h < 64 || in.target_desc.Format != in.color_desc.Format) {
         why = "viewport outside the colour texture or formats differ";
         return false;
     }
@@ -954,7 +987,7 @@ bool run_passthrough(ID3D11DeviceContext* ctx, PassInputs& in, int eye, std::str
     if (FAILED(ctx->QueryInterface(IID_PPV_ARGS(&ctx1)))) return false;
     ID3DDeviceContextState* game_state = nullptr;
     ctx1->SwapDeviceContextState(R.state.Get(), &game_state);
-    draw_motion_vectors(ctx, in, x, y, w, h);
+    draw_motion_vectors(ctx, in, x, y, static_cast<UINT>(in.vp.Width), static_cast<UINT>(in.vp.Height));
     const D3D11_BOX box{x, y, 0, x + w, y + h, 1};
     ctx->CopySubresourceRegion(in.target.Get(), in.target_view.Texture2D.MipSlice, x, y, 0, in.color.Get(), 0, &box);
     ctx1->SwapDeviceContextState(game_state, nullptr);
@@ -965,8 +998,8 @@ bool run_passthrough(ID3D11DeviceContext* ctx, PassInputs& in, int eye, std::str
     s.y = y;
     s.w = w;
     s.h = h;
-    s.jx = rows.v[kRowJitter - kRowFirst][0] * static_cast<float>(w) * g_set.jitter_scale_x.load();
-    s.jy = rows.v[kRowJitter - kRowFirst][1] * static_cast<float>(h) * g_set.jitter_scale_y.load();
+    s.jx = rows.v[kRowJitter - kRowFirst][0] * in.vp.Width * g_set.jitter_scale_x.load();
+    s.jy = rows.v[kRowJitter - kRowFirst][1] * in.vp.Height * g_set.jitter_scale_y.load();
     s.depth = in.depth;
     return true;
 }
@@ -1042,11 +1075,51 @@ bool try_final(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_t
         g_up_out->GetDesc(&g_up_out_desc);
         log::info("dlss: upscale output texture {}x{} R10G10B10A2_UNORM", td.Width, td.Height);
     }
+    ID3D11Buffer* cb0_raw = nullptr;
+    ctx->PSGetConstantBuffers(0, 1, &cb0_raw);
+    ComPtr<ID3D11Buffer> game_cb0;
+    game_cb0.Attach(cb0_raw);
+    D3D11_BUFFER_DESC cbd{};
+    if (game_cb0) game_cb0->GetDesc(&cbd);
+    if (!game_cb0 || cbd.ByteWidth < 16 * (kFinalOutRectRow + 2)) return false;
+    if (g_cb_checked == 0) g_cb_checked = check_final_rows(ctx, game_cb0.Get(), vp) ? 1 : -1;
+    if (g_cb_checked < 0) {
+        ++g_up_fail;
+        return false;
+    }
+    if (!g_cb_copy || [&] {
+            D3D11_BUFFER_DESC d{};
+            g_cb_copy->GetDesc(&d);
+            return d.ByteWidth != cbd.ByteWidth;
+        }()) {
+        g_cb_copy.Reset();
+        g_cb_patch.Reset();
+        D3D11_BUFFER_DESC d{};
+        d.ByteWidth = cbd.ByteWidth;
+        d.Usage = D3D11_USAGE_DEFAULT;
+        d.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        D3D11_BUFFER_DESC p = d;
+        p.ByteWidth = 32;
+        if (FAILED(R.dev->CreateBuffer(&d, nullptr, &g_cb_copy)) || FAILED(R.dev->CreateBuffer(&p, nullptr, &g_cb_patch))) {
+            g_cb_copy.Reset();
+            return false;
+        }
+    }
+    const float patch[8] = {static_cast<float>(s.x), static_cast<float>(s.y), static_cast<float>(s.x + s.w), static_cast<float>(s.y + s.h),
+                            static_cast<float>(s.w), static_cast<float>(s.h), 1.0f / static_cast<float>(s.w), 1.0f / static_cast<float>(s.h)};
+    ctx->UpdateSubresource(g_cb_patch.Get(), 0, nullptr, patch, 0, 0);
+    ctx->CopyResource(g_cb_copy.Get(), game_cb0.Get());
+    const D3D11_BOX pbox{0, 0, 0, 32, 1, 1};
+    ctx->CopySubresourceRegion(g_cb_copy.Get(), 0, 16 * kFinalOutRectRow, 0, 0, g_cb_patch.Get(), 0, &pbox);
     D3D11_VIEWPORT reduced_vp{static_cast<float>(s.x), static_cast<float>(s.y), static_cast<float>(s.w), static_cast<float>(s.h), vp.MinDepth, vp.MaxDepth};
     ID3D11RenderTargetView* graded = g_graded_rtv.Get();
+    ID3D11Buffer* patched = g_cb_copy.Get();
     ctx->OMSetRenderTargets(1, &graded, saved_dsv.Get());
     ctx->RSSetViewports(1, &reduced_vp);
+    ctx->PSSetConstantBuffers(0, 1, &patched);
     original(ctx, count, start, base);
+    ID3D11Buffer* game_cb0_raw = game_cb0.Get();
+    ctx->PSSetConstantBuffers(0, 1, &game_cb0_raw);
     ID3D11RenderTargetView* restore[8];
     for (int i = 0; i < 8; ++i) restore[i] = saved_rtv[i].Get();
     ctx->OMSetRenderTargets(8, restore, saved_dsv.Get());
@@ -1263,6 +1336,13 @@ void frame(ID3D11Texture2D* any_texture) {
     if (ctx) {
         install_ub_hooks(dev, ctx);
         if (R.ngx_state == 0) init_ngx(dev);
+        // Features hold several hundred MB of video memory each: release them while DLSS is off.
+        if (!g_set.enabled.load() && (R.feat[0].handle || R.feat[1].handle)) {
+            release_feature(R.feat[0]);
+            release_feature(R.feat[1]);
+            with_info([](Info& i) { i.features[0] = i.features[1] = "released (off)"; });
+            log::info("dlss: features released (off)");
+        }
         if (g_set.recreate_requests.exchange(0) > 0) {
             release_feature(R.feat[0]);
             release_feature(R.feat[1]);

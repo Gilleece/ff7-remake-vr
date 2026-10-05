@@ -934,6 +934,36 @@ size, 8652 and 15120 over 721 frames; not all of them view buffers); none create
 initial data. The capture is keyed by the buffer object, so the rows found for the bound
 `cb1` are those of that view.
 
+### Below 100 % screen percentage: where the upscale happens (LIVE, GPU trace)
+
+`r.ScreenPercentage 50` / `67` in stereo at eyes 3072x3264 (`captures/dlss/r3/tr_sp50.txt`,
+`captures/dlss/r7/tr_sp{100,67,50}.txt` with constant buffer dumps, third person in the first
+room):
+
+- The scene buffers shrink with the percentage (3072x1632 at 50 %, 4116x2188 at 67 %) and
+  every pass up to the tonemapper runs at the reduced view rectangles (`vp 0 0 1536 1632` and
+  `vp 1536 0 1536 1632` at 50 %). At 67 % the views are 2059 wide and the right one starts at
+  2059 (2060 in the last pass's constants), so it reaches up to 2 pixels past the 4116-pixel
+  buffer; the excess is clipped.
+- Anti-aliasing (section above), bloom and the tonemapper (into `Tonemap`, `R16G16B16A16_FLOAT`)
+  stay at the reduced size. **The last pass of each view does the upscale**: one full-screen
+  `DrawIndexed 3 6 0` into the eye texture (`R10G10B10A2_UNORM`, 6144x3264) at the full eye
+  rectangle, reading `t1` = the reduced `Tonemap` target, `t2`/`t3` 32x32x32 lookup tables
+  (colour grading), noise and grain textures; pixel shader constants `cb0` 1024 bytes. At
+  100 % the same pass runs 1:1. It is the only full-size pass after the tonemapper.
+- Its `cb0` rows (float4): **30** input rectangle (min x, min y, max x, max y: `0 0 1536 1632`
+  left, `1536 0 3072 1632` right at 50 %), **31** input size and inverse, **34** output
+  rectangle (`0 0 3072 3264` / `3072 0 6144 3264`), **35** output size and inverse
+  (`3072 3264 1/3072 1/3264`); **0** the input buffer size and inverse, **1** half of it. The
+  pixel shader maps `SV_Position` through rows 34/35 to the input rectangle: drawing it with
+  a smaller viewport and unchanged constants reads only the top-left part of the input
+  (seen: the top-left quarter of the view at 50 %). The vertex shader's `cb2` holds UE's
+  `DrawRectangle` parameters (`PosScaleBias` = reduced size, `UVScaleBias` = reduced size
+  and offset, `InvTargetSizeAndTextureSize`); its triangle covers the viewport whatever its
+  size.
+- Frame times of the game's own path (third person, first room, 6 s windows): 100 % 10.16 ms,
+  67 % 7.18 ms, 50 % 5.35 ms; street: 9.82, 5.86 (67 %), 5.05 (58 %), 4.49 ms (50 %).
+
 ## Tools
 
 All in `tools/re/`, run with the repo's `.venv` Python. The exe is found through Steam's
