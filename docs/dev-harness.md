@@ -387,7 +387,15 @@ counts as reached when the loading screen has been seen and something else has
 been on screen for 6 seconds. If the mod's dev pipe answers and stereo is
 switched on (`[stereo] start_in_stereo = 1`), stereo is switched off through the
 pipe while the menus are driven and on again once gameplay is reached: in stereo
-the window shows a crop of an eye, which the classifier does not recognise. If the menu cursor is not on Continue the script
+the window shows a crop of an eye, which the classifier does not recognise. The
+script waits for `stereo status` to report `installed=1` before it decides (up to
+30 seconds): the pipe answers a few seconds before the engine creates the stereo
+device, and until then the status reads `wanted=0`; the device then switches
+stereo on by itself. Deciding on that early answer left stereo on during the
+menus, and the title menu was classified `other` although Continue was
+highlighted: in the darker eye crop the Continue bar's blue (about 15,75,113 at
+its left end against 17,96,147 in mono) fails the UI-blue test (blue above 120),
+so the `menu` state never came and the run timed out. If the menu cursor is not on Continue the script
 presses Escape instead of Enter, and it stops at any other dialog, so it never
 starts a new game and never saves. A PNG of every screen change is stored in
 `captures\runs\<time>-<pid>-steps\` (time to the millisecond plus the script's

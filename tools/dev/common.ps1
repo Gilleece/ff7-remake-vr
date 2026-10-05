@@ -1024,16 +1024,27 @@ function Invoke-ReachGameplay([int]$timeoutSeconds = 240, [int]$settleSeconds = 
 }
 
 # Returns $true if stereo was on and has been switched off through the dev pipe.
-function Suspend-StereoForMenus([int]$pipeWaitSeconds = 20) {
+#
+# The pipe answers a few seconds before the engine creates the stereo device.
+# Until then "stereo status" reports installed=0 wanted=0, and the device then
+# switches stereo on by itself ([stereo] start_in_stereo). Deciding on that
+# early answer left stereo on during the menus, so the window showed the darker
+# eye crop and the title menu was never recognised. Wait for installed=1.
+function Suspend-StereoForMenus([int]$pipeWaitSeconds = 30) {
     $deadline = (Get-Date).AddSeconds($pipeWaitSeconds)
-    $pipe = $false
+    $reply = ''
     while ((Get-Date) -lt $deadline -and @(Get-GameProcesses).Count -gt 0) {
-        if (Test-DevPipe) { $pipe = $true; break }
+        if (Test-DevPipe) {
+            try { $reply = [string](@(Send-DevCommand @('stereo status'))[0]) } catch { $reply = '' }
+            if ($reply -match 'installed=1') { break }
+            if ($reply -and $reply -notlike 'ok*') { return $false }   # no stereo command: stereo disabled in the ini
+        }
         Start-Sleep -Milliseconds 500
     }
-    if (-not $pipe) { return $false }
-    $reply = ''
-    try { $reply = [string](@(Send-DevCommand @('stereo status'))[0]) } catch { return $false }
+    if ($reply -notmatch 'installed=1') {
+        if ($reply) { Write-Step 'WARNING: the stereo device did not install in time; menus are driven as they are' }
+        return $false
+    }
     if ($reply -notmatch 'wanted=1') { return $false }
     try { [void](Send-DevCommand @('stereo off')) } catch { return $false }
     Write-Step 'Stereo switched off while the menus are driven (the window would show an eye crop); back on in gameplay'
