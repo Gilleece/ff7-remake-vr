@@ -404,3 +404,8 @@ modified, nothing is installed, the PC's OpenXR settings are not changed, and th
 Steam launch options are not touched. The mod's name `xinput1_3.dll` is how the game
 loads it: the game loads a file of that name from its own folder before the one in
 Windows.
+
+## Licence
+
+MIT, see `LICENSE`. The third-party components the mod is built with, and their
+licences, are listed in `THIRD-PARTY-NOTICES.md`.
