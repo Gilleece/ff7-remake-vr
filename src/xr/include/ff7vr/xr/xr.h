@@ -191,6 +191,9 @@ struct InitDesc {
     // by setting each layer's own disable_environment variable before the
     // instance is created. The layers found are listed in RuntimeInfo either way.
     bool disableImplicitApiLayers = false;
+    // Disable only the implicit layers whose name or manifest path contains one
+    // of these strings (case-insensitive), e.g. "reshade". Same mechanism.
+    std::vector<std::string> disableImplicitApiLayersMatching;
     // Measure the GPU time of the library's own copies with timestamp queries
     // (read with TakeGpuCopyTimes). Costs a few queries per frame.
     bool gpuTiming = false;
@@ -337,7 +340,8 @@ struct FrameStats {
     // Cumulative CPU time spent inside runtime calls on the submitting thread (OpenXR), milliseconds.
     double acquireWaitMs = 0;  // xrAcquireSwapchainImage + xrWaitSwapchainImage
     double releaseMs = 0;      // xrReleaseSwapchainImage
-    double endFrameMs = 0;     // xrBeginFrame + xrEndFrame
+    double beginFrameMs = 0;   // xrBeginFrame
+    double endFrameMs = 0;     // xrEndFrame
 };
 
 class IXrBackend {
@@ -419,6 +423,7 @@ bool ApplyRuntimeSelection(std::string_view selection, std::string* outPath, std
 // Implicit API layers registered for this user/machine (HKLM and HKCU).
 struct ImplicitLayer {
     std::string manifest;            // JSON path
+    std::string name;                // layer name from the manifest ("" if unreadable)
     std::string disableEnvironment;  // variable that disables it ("" if none)
     bool enabledInRegistry = false;
 };
@@ -426,6 +431,9 @@ std::vector<ImplicitLayer> EnumerateImplicitApiLayers();
 // Sets the disable_environment variable of every enabled implicit layer in
 // this process. Returns how many layers were disabled (their manifests in *disabled).
 int DisableImplicitApiLayers(std::vector<std::string>* disabled = nullptr);
+// Same for the layers whose name or manifest path contains one of `patterns`
+// (case-insensitive).
+int DisableImplicitApiLayersMatching(const std::vector<std::string>& patterns, std::vector<std::string>* disabled = nullptr);
 
 const char* DxgiFormatName(DXGI_FORMAT f);
 

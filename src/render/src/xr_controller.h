@@ -31,6 +31,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace ff7vr::render {
 
@@ -46,7 +47,8 @@ struct RenderConfig {
     std::string runtime = "virtualdesktop";
     float resolutionScale = 1.0f;
     uint32_t eyeWidth = 0, eyeHeight = 0;
-    bool disableImplicitLayers = false;
+    bool disableImplicitLayers = false;              // all of them
+    std::vector<std::string> disableLayersMatching;  // or those whose name contains one of these
     bool debugUtils = false;
     double retryIntervalS = 5.0;
     bool reconnectAfterExit = false;
@@ -55,8 +57,10 @@ struct RenderConfig {
     bool nullPace = true;
     xr::NullMotion nullMotion = xr::NullMotion::Static;
     // [screen]
-    float screenDistance = 2.5f;
-    float screenWidth = 2.4f;
+    // 1.8 m at 2 m: about 48 x 28 degrees for 16:9, the whole image (HUD corners
+    // included) within a small eye movement, at about the headset's focal distance.
+    float screenDistance = 2.0f;
+    float screenWidth = 1.8f;
     float screenOffsetY = 0.0f;
     bool screenFollowHead = false;
     bool recenterOnStart = true;
@@ -80,6 +84,10 @@ public:
     std::string Recenter();
     std::string Restart();
     std::string SetModeCommand(const std::string& mode);
+    std::string StereoTestCommand(const std::string& args);
+    std::string Stop();
+    std::string SetRuntime(const std::string& runtime);
+    std::string SetFrameWait(const std::string& where);
 
     // Engine interface (see render.h).
     void SetMode(Mode m) { mode_.store(m); }
@@ -134,6 +142,11 @@ private:
     bool holdAfterExit_ = false;
     bool sessionStarted_ = false;  // reached a running frame since Init (for recenter on start)
     std::atomic<bool> restartRequested_{false};
+    std::atomic<bool> stopRequested_{false};    // xr-stop: end the session and stay off until xr-restart
+    std::atomic<bool> waitOnPresent_{false};    // [xr] frame_wait = present (switchable with frame-wait)
+    std::mutex pendingMutex_;
+    std::string pendingRuntime_;                // xr-runtime: applied by the XR thread before the next attempt
+    bool hasPendingRuntime_ = false;
 
     // Park protocol.
     std::mutex parkMutex_;
@@ -157,6 +170,23 @@ private:
     std::deque<PendingStereo> stereoQueue_;
     std::atomic<Mode> mode_{Mode::Screen};
 
+    // Automatic fallback in stereo mode (see docs/render.md, "Switching").
+    // The game thread paces while it calls BeginGameFrame; after kGameIdleMs
+    // without a call the XR thread paces instead, so the runtime keeps getting
+    // frames (screen layer) while the game thread is blocked.
+    static constexpr double kGameIdleMs = 100.0;
+    // A frame without a stereo image re-shows the last stereo image if that is
+    // younger than this (hitches), otherwise it shows the screen layer.
+    static constexpr double kStereoHoldMs = 300.0;
+    std::atomic<int64_t> lastGameFrameQpc_{0};  // last BeginGameFrame call in stereo mode
+    bool xrPacesStereo_ = false;                // XR thread: it currently paces in stereo mode (for logging)
+    int64_t lastStereoQpc_ = 0;                 // RT: last frame ended with a new stereo image (0 = none this session)
+    bool GameThreadPaces() const;
+    // Stereo test controls (dev commands).
+    std::atomic<int64_t> testPauseUntilQpc_{0};
+    std::atomic<uint32_t> testDropEvery_{0};
+    uint64_t testFrames_ = 0;  // RT
+
     // Screen layer (RT).
     xr::LayerHandle screenLayer_ = 0;
     uint32_t screenW_ = 0, screenH_ = 0;
@@ -170,6 +200,8 @@ private:
     // Counters.
     std::atomic<uint64_t> presents_{0}, submittedScreen_{0}, submittedStereo_{0}, presentsWithoutFrame_{0}, submitErrors_{0};
     std::atomic<uint64_t> monoFallbacks_{0};
+    std::atomic<uint64_t> heldStereo_{0};      // frames that re-showed the last stereo image
+    std::atomic<uint64_t> screenInStereo_{0};  // frames ended with the screen layer while in stereo mode
     GpuTimer gpu_;
     int64_t lastStatsQpc_ = 0;
     xr::FrameStats lastFrameStats_{};  // backend counters at the previous report (XR thread)

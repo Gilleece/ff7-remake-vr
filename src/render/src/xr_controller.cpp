@@ -3,6 +3,7 @@
 #include "ff7vr/core/log.h"
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <format>
 
@@ -49,6 +50,7 @@ XrController& XrController::Get() {
 void XrController::Start(const RenderConfig& cfg) {
     if (started_.exchange(true)) return;
     cfg_ = cfg;
+    waitOnPresent_ = cfg_.waitOnPresentThread;
     if (cfg_.stereoTest) mode_ = Mode::Stereo;
     lastStatsQpc_ = QpcNow();
     thread_ = std::thread([this] { ThreadMain(); });
@@ -69,6 +71,21 @@ void XrController::ThreadMain() {
         }
         if (!cfg_.xrEnabled) {
             Sleep(100);
+            continue;
+        }
+        {
+            std::lock_guard lk(pendingMutex_);
+            if (hasPendingRuntime_) {
+                cfg_.runtime = pendingRuntime_;
+                hasPendingRuntime_ = false;
+                failedAttempts_ = 0;
+                log::info("xr: runtime '{}' from now on", cfg_.runtime);
+            }
+        }
+        if (stopRequested_.exchange(false)) {
+            if (ready_.load()) Teardown(TeardownReason::Restart, "stop requested");
+            holdAfterExit_ = true;
+            log::info("xr: staying off until 'xr-restart'");
             continue;
         }
         if (ready_.load()) {
@@ -93,10 +110,25 @@ void XrController::ThreadMain() {
                 nextAttemptQpc_ = QpcNow() + MsToQpc(cfg_.retryIntervalS * 1000.0);
                 continue;
             }
-            if (mode_.load() == Mode::Screen && !cfg_.waitOnPresentThread)
+            const bool gamePaces = GameThreadPaces();
+            if (mode_.load() == Mode::Stereo && gamePaces == xrPacesStereo_) {
+                xrPacesStereo_ = !gamePaces;
+                static uint64_t switches = 0;
+                ++switches;
+                if (switches > 32 && !PowerOfTwo(switches)) {
+                    // rate limited
+                } else if (xrPacesStereo_)
+                    log::info("xr: stereo mode, but the game thread is not starting frames: the {} thread paces, the screen layer shows the game",
+                              waitOnPresent_.load() ? "present" : "xr");
+                else
+                    log::info("xr: stereo mode: the game thread paces frames again");
+            } else if (mode_.load() == Mode::Screen) {
+                xrPacesStereo_ = false;
+            }
+            if (!gamePaces && !waitOnPresent_.load())
                 PaceOnce();
             else
-                Sleep(5);
+                Sleep(2);
             continue;
         }
         // Not initialised.
@@ -145,6 +177,7 @@ void XrController::TryInit() {
     d.eyeHeight = cfg_.eyeHeight;
     d.resolutionScale = cfg_.resolutionScale;
     d.disableImplicitApiLayers = cfg_.disableImplicitLayers;
+    d.disableImplicitApiLayersMatching = cfg_.disableLayersMatching;
     d.enableDebugUtils = cfg_.debugUtils;
     d.gpuTiming = cfg_.gpuTiming;
     d.null.refreshHz = cfg_.nullRefreshHz;
@@ -201,7 +234,14 @@ void XrController::TryInit() {
     }
     sessionStarted_ = false;
     lastFrameStats_ = xr::FrameStats{};
+    lastStereoQpc_ = 0;
     ready_ = true;
+}
+
+bool XrController::GameThreadPaces() const {
+    if (mode_.load() != Mode::Stereo) return false;
+    const int64_t last = lastGameFrameQpc_.load();
+    return last != 0 && QpcToMs(QpcNow() - last) <= kGameIdleMs;
 }
 
 bool XrController::WaitOne(bool fromGameThread, xr::FrameInfo* out) {
@@ -219,7 +259,7 @@ bool XrController::WaitOne(bool fromGameThread, xr::FrameInfo* out) {
         sessionStarted_ = true;
         if (cfg_.recenterOnStart) backend_->Recenter();
         log::info("xr: frame loop running (state {}, frame wait on the {} thread)", xr::ToString(out->state),
-                  fromGameThread ? "game" : (cfg_.waitOnPresentThread ? "present" : "xr"));
+                  fromGameThread ? "game" : (waitOnPresent_.load() ? "present" : "xr"));
     }
     {
         std::lock_guard lk(eyeMutex_);
@@ -280,6 +320,7 @@ void XrController::Teardown(TeardownReason why, const char* text) {
         }
         screenLayer_ = 0;
         screenW_ = screenH_ = 0;
+        lastStereoQpc_ = 0;
     }
     {
         std::lock_guard lk(queueMutex_);
@@ -310,10 +351,10 @@ void XrController::LogStats() {
     const double seconds = QpcToMs(QpcNow() - lastStatsQpc_) / 1000.0;
     const xr::SessionState st = ready_.load() ? backend_->GetState() : xr::SessionState::Uninitialized;
     if (frames == 0 && !ready_.load()) return;  // nothing happening, keep the log quiet
-    log::info("timing: last {:.1f} s, {:.1f} fps; xr {} ({}); mode {}; presents {} submitted screen {} stereo {} without XR frame {} errors {}",
+    log::info("timing: last {:.1f} s, {:.1f} fps; xr {} ({}); mode {}; presents {} submitted screen {} stereo {} held {} without XR frame {} errors {}",
               seconds, seconds > 0 ? double(frames) / seconds : 0.0, ready_.load() ? BackendName(cfg_.backend) : "off", xr::ToString(st),
-              ModeName(mode_.load()), presents_.load(), submittedScreen_.load(), submittedStereo_.load(), presentsWithoutFrame_.load(),
-              submitErrors_.load());
+              ModeName(mode_.load()), presents_.load(), submittedScreen_.load(), submittedStereo_.load(), heldStereo_.load(),
+              presentsWithoutFrame_.load(), submitErrors_.load());
     std::string runtimeCalls;
     if (ready_.load()) {
         std::lock_guard rl(rtMutex_);
@@ -322,10 +363,11 @@ void XrController::LogStats() {
             const xr::FrameStats cur = backend_->GetStats();
             const uint64_t ended = (cur.framesSubmitted + cur.framesSkipped) - (lastFrameStats_.framesSubmitted + lastFrameStats_.framesSkipped);
             if (ended > 0 && cur.framesSubmitted >= lastFrameStats_.framesSubmitted)
-                runtimeCalls = std::format("runtime calls per ended frame (CPU, render thread): acquire+wait image {:.3f} ms, release image {:.3f} ms, "
-                                           "begin+end frame {:.3f} ms (n {})",
+                runtimeCalls = std::format("runtime calls per ended frame (CPU, presenting thread): acquire+wait image {:.3f} ms, release image {:.3f} ms, "
+                                           "begin frame {:.3f} ms, end frame {:.3f} ms (n {})",
                                            (cur.acquireWaitMs - lastFrameStats_.acquireWaitMs) / double(ended),
                                            (cur.releaseMs - lastFrameStats_.releaseMs) / double(ended),
+                                           (cur.beginFrameMs - lastFrameStats_.beginFrameMs) / double(ended),
                                            (cur.endFrameMs - lastFrameStats_.endFrameMs) / double(ended), ended);
             lastFrameStats_ = cur;
         }
@@ -341,6 +383,10 @@ void XrController::StereoTestThread() {
     SetThreadDescription(GetCurrentThread(), L"ff7vr stereo test");
     log::info("render: stereo test: a test thread calls BeginGameFrame and the back buffer is submitted as both eyes");
     while (!stop_.load()) {
+        if (QpcNow() < testPauseUntilQpc_.load()) {
+            Sleep(5);  // stands in for a game thread blocked by a load
+            continue;
+        }
         if (mode_.load() == Mode::Stereo && ready_.load()) {
             const StereoFrame f = BeginGameFrame();
             if (!f.stereo) Sleep(5);
@@ -407,6 +453,11 @@ void XrController::SubmitOne(const PresentInfo& p, const Waited& w) {
         // Images for this frame or older ones are done with (a frame ends exactly once).
         std::erase_if(stereoQueue_, [&](const PendingStereo& ps) { return ps.submit.frameId <= w.info.frameId; });
     }
+    // No image for this frame, but one shortly before (a hitch, a dropped frame
+    // id): show that image again, re-projected with the poses it was rendered
+    // with, instead of the back buffer (which holds the desktop mirror in stereo).
+    const bool hold = !stereo && mode_.load() == Mode::Stereo && lastStereoQpc_ != 0 &&
+                      QpcToMs(QpcNow() - lastStereoQpc_) < kStereoHoldMs;
     if (stereo) {
         d.texture = stereoTex.Get();
         d.viewFormat = s.viewFormat;
@@ -415,6 +466,12 @@ void XrController::SubmitOne(const PresentInfo& p, const Waited& w) {
             d.eyes[e].rect = s.eyeRects[e];
             if (s.haveRenderedViews) d.eyes[e].viewOverride = &s.renderedViews[e];
         }
+    } else if (hold) {
+        // Both eyes keep their last image (nothing is read from the texture,
+        // which only has to pass validation).
+        d.texture = p.backBuffer;
+        d.viewFormat = TypedFormat(p.format);
+        d.eyes[0].update = d.eyes[1].update = false;
     } else {
         if (!EnsureScreenLayer(p)) {
             backend_->SkipFrame(w.info.frameId);
@@ -437,7 +494,15 @@ void XrController::SubmitOne(const PresentInfo& p, const Waited& w) {
     GetTiming().submit.Add(QpcToMs(QpcNow() - t0));
     if (cfg_.gpuTiming) gpu_.End(p.context);
     if (r == xr::Result::Ok) {
-        ++(stereo ? submittedStereo_ : submittedScreen_);
+        if (stereo) {
+            ++submittedStereo_;
+            lastStereoQpc_ = QpcNow();
+        } else if (hold) {
+            ++heldStereo_;
+        } else {
+            ++submittedScreen_;
+            if (mode_.load() == Mode::Stereo) ++screenInStereo_;
+        }
     } else if (PowerOfTwo(++submitErrors_)) {
         log::warn("xr: SubmitFrame({}): {} ({} errors so far)", w.info.frameId, xr::ToString(r), submitErrors_.load());
     }
@@ -460,7 +525,11 @@ void XrController::OnPresent(const PresentInfo& p) {
     std::unique_lock rl(rtMutex_);
     if (!ready_.load() || !backend_ || device_.Get() != p.device) return;
 
-    if (cfg_.waitOnPresentThread && mode_.load() == Mode::Screen) {
+    // The screen layer exists whenever a session runs, so a switch to it never
+    // has to create a swapchain at that moment (cheap check when it exists).
+    EnsureScreenLayer(p);
+
+    if (waitOnPresent_.load() && !GameThreadPaces()) {
         // Frame wait on this thread: blocks the game for pacing. try_lock: never wait behind a teardown.
         std::unique_lock wl(waitMutex_, std::try_to_lock);
         bool empty = false;
@@ -484,6 +553,8 @@ void XrController::OnPresent(const PresentInfo& p) {
                     break;
                 }
         }
+        const uint32_t drop = testDropEvery_.load();
+        if (id && drop && (++testFrames_ % drop) == 0) id = 0;  // test: no image for this frame
         if (id) {
             StereoSubmit s;
             s.frameId = id;
@@ -518,7 +589,9 @@ bool XrController::GetEyeSetup(EyeSetup* out) {
 
 StereoFrame XrController::BeginGameFrame() {
     StereoFrame f;
-    if (mode_.load() != Mode::Stereo || !ready_.load() || stopping_.load()) return f;
+    if (mode_.load() != Mode::Stereo) return f;
+    lastGameFrameQpc_ = QpcNow();
+    if (!ready_.load() || stopping_.load()) return f;
     {
         // Never block the game when earlier frames are not being presented.
         std::lock_guard lk(queueMutex_);
@@ -531,6 +604,11 @@ StereoFrame XrController::BeginGameFrame() {
     }
     std::lock_guard wl(waitMutex_);
     if (!ready_.load() || stopping_.load()) return f;
+    {
+        // The XR thread may have waited a frame while it still paced (hand-over): at most two ahead.
+        std::lock_guard lk(queueMutex_);
+        if (queue_.size() >= 2) return f;
+    }
     xr::FrameInfo fi;
     if (!WaitOne(true, &fi)) return f;
     f.stereo = true;
@@ -551,6 +629,12 @@ void XrController::SubmitStereoFrame(const StereoSubmit& s) {
     ps.submit = s;
     ps.submit.texture = nullptr;
     ps.texture = s.texture;  // keeps it alive until the Present that submits it
+    // A newer image for the same frame replaces the older one.
+    auto same = std::find_if(stereoQueue_.begin(), stereoQueue_.end(), [&](const PendingStereo& e) { return e.submit.frameId == s.frameId; });
+    if (same != stereoQueue_.end()) {
+        *same = std::move(ps);
+        return;
+    }
     stereoQueue_.push_back(std::move(ps));
     while (stereoQueue_.size() > 4) stereoQueue_.pop_front();
 }
@@ -576,9 +660,11 @@ std::string XrController::Status() {
         xrLine = std::format("xr not running (last result {}, {} failed attempts{})", xr::ToString(lastInitResult_), failedAttempts_,
                              holdAfterExit_ ? ", waiting for xr-restart" : "");
     }
-    const std::string counters = std::format("mode {}; presents {} submitted screen {} stereo {} without XR frame {} submit errors {} mono fallbacks {}",
-                                             ModeName(mode_.load()), presents_.load(), submittedScreen_.load(), submittedStereo_.load(),
-                                             presentsWithoutFrame_.load(), submitErrors_.load(), monoFallbacks_.load());
+    const std::string counters =
+        std::format("mode {}; presents {} submitted screen {} stereo {} held stereo {} screen in stereo mode {} without XR frame {} submit errors {} "
+                    "mono fallbacks {}",
+                    ModeName(mode_.load()), presents_.load(), submittedScreen_.load(), submittedStereo_.load(), heldStereo_.load(),
+                    screenInStereo_.load(), presentsWithoutFrame_.load(), submitErrors_.load(), monoFallbacks_.load());
     log::info("status: d3d11: {}", d3d);
     log::info("status: threads: {}", ThreadReport());
     log::info("status: {}", xrLine);
@@ -641,6 +727,53 @@ std::string XrController::SetModeCommand(const std::string& mode) {
     }
     log::info("render: mode {}", ModeName(mode_.load()));
     return std::string("ok mode ") + ModeName(mode_.load());
+}
+
+std::string XrController::Stop() {
+    stopRequested_ = true;
+    return "ok";
+}
+
+std::string XrController::SetRuntime(const std::string& runtime) {
+    if (runtime.empty()) return "err usage: xr-runtime virtualdesktop|steamvr|system|inherit|<path to runtime json>";
+    {
+        std::lock_guard lk(pendingMutex_);
+        pendingRuntime_ = runtime;
+        hasPendingRuntime_ = true;
+    }
+    restartRequested_ = true;
+    return "ok runtime " + runtime + " (session restarts)";
+}
+
+std::string XrController::SetFrameWait(const std::string& where) {
+    if (where != "thread" && where != "present") return "err usage: frame-wait thread|present";
+    waitOnPresent_ = where == "present";
+    log::info("render: frame wait on the {} thread", waitOnPresent_.load() ? "present" : "xr");
+    return "ok frame-wait " + where;
+}
+
+std::string XrController::StereoTestCommand(const std::string& args) {
+    const size_t sp = args.find(' ');
+    const std::string verb = args.substr(0, sp);
+    uint32_t v = 0;
+    if (sp != std::string::npos) {
+        const char* b = args.data() + sp + 1;
+        const auto [ptr, ec] = std::from_chars(b, args.data() + args.size(), v);
+        if (ec != std::errc()) return "err usage: stereo-test pause <ms> | drop <n>";
+    } else {
+        return "err usage: stereo-test pause <ms> | drop <n>";
+    }
+    if (verb == "pause") {
+        testPauseUntilQpc_ = QpcNow() + MsToQpc(std::min(v, 600000u));
+        log::info("render: stereo test: the test thread starts no frames for {} ms", v);
+        return std::format("ok paused for {} ms", v);
+    }
+    if (verb == "drop") {
+        testDropEvery_ = v;
+        log::info("render: stereo test: {}", v ? std::format("every {}. frame has no stereo image", v) : std::string("no dropped images"));
+        return std::format("ok drop every {}", v);
+    }
+    return "err usage: stereo-test pause <ms> | drop <n>";
 }
 
 void XrController::StopForExit() {

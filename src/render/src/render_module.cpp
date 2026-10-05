@@ -45,7 +45,26 @@ RenderConfig LoadConfig(const StartupContext& ctx) {
     r.resolutionScale = static_cast<float>(std::clamp(c.get_float("xr", "resolution_scale", r.resolutionScale), 0.1, 4.0));
     r.eyeWidth = static_cast<uint32_t>(std::clamp<long long>(c.get_int("xr", "eye_width", 0), 0, 16384));
     r.eyeHeight = static_cast<uint32_t>(std::clamp<long long>(c.get_int("xr", "eye_height", 0), 0, 16384));
-    r.disableImplicitLayers = c.get_bool("xr", "disable_implicit_layers", r.disableImplicitLayers);
+    {
+        // 0/none: keep every implicit layer; 1/all: disable all of them; otherwise a
+        // comma-separated list of name parts. Default "reshade": ReShade's XR layer
+        // would load a second ReShade into a game that may already run one as dxgi.dll.
+        const std::string v = Lower(c.get_string("xr", "disable_implicit_layers", "reshade"));
+        if (v == "1" || v == "all" || v == "true") {
+            r.disableImplicitLayers = true;
+        } else if (!(v.empty() || v == "0" || v == "none" || v == "false")) {
+            size_t b = 0;
+            while (b <= v.size()) {
+                size_t e = v.find(',', b);
+                if (e == std::string::npos) e = v.size();
+                std::string part = v.substr(b, e - b);
+                part.erase(0, part.find_first_not_of(' '));
+                while (!part.empty() && part.back() == ' ') part.pop_back();
+                if (!part.empty()) r.disableLayersMatching.push_back(part);
+                b = e + 1;
+            }
+        }
+    }
     r.debugUtils = c.get_bool("xr", "debug_utils", r.debugUtils);
     r.retryIntervalS = std::clamp(c.get_float("xr", "retry_interval", r.retryIntervalS), 0.5, 600.0);
     r.reconnectAfterExit = c.get_bool("xr", "reconnect_after_exit", r.reconnectAfterExit);
@@ -132,6 +151,21 @@ void RegisterCommands() {
     dev_commands::add("mode", "mode screen|stereo|stereo-test: switch the presentation mode", [](std::string_view args) {
         return XrController::Get().SetModeCommand(Lower(std::string(args)));
     });
+    dev_commands::add("xr-stop", "xr-stop: end the XR session and stay off until xr-restart (hooks and timing keep running)",
+                      [](std::string_view) { return XrController::Get().Stop(); });
+    dev_commands::add("xr-runtime", "xr-runtime <selection>: use another OpenXR runtime ([xr] runtime values) and reconnect",
+                      [](std::string_view args) {
+                          std::string a(args);
+                          while (!a.empty() && a.back() == ' ') a.pop_back();
+                          if (a.size() >= 2 && a.front() == '"' && a.back() == '"') a = a.substr(1, a.size() - 2);
+                          return XrController::Get().SetRuntime(a);
+                      });
+    dev_commands::add("frame-wait", "frame-wait thread|present: where the frame wait runs in screen mode",
+                      [](std::string_view args) { return XrController::Get().SetFrameWait(Lower(std::string(args))); });
+    dev_commands::add("stereo-test",
+                      "stereo-test pause <ms> | drop <n>: in mode stereo-test, stop starting frames for <ms> (like a game thread "
+                      "blocked by a load) or leave every n-th frame without a stereo image (0 = off)",
+                      [](std::string_view args) { return XrController::Get().StereoTestCommand(Lower(std::string(args))); });
 }
 
 }  // namespace

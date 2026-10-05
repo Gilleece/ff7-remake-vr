@@ -126,7 +126,17 @@ private:
 std::string OpenXrBackend::Name(XrResult r) const {
     char buf[XR_MAX_RESULT_STRING_SIZE] = {};
     if (instance_ != XR_NULL_HANDLE && XR_SUCCEEDED(xrResultToString(instance_, r, buf))) return buf;
-    return std::format("XrResult({})", static_cast<int>(r));
+    // Without an instance: the results that occur before one exists.
+    switch (r) {
+        case XR_ERROR_RUNTIME_UNAVAILABLE: return "XR_ERROR_RUNTIME_UNAVAILABLE";
+        case XR_ERROR_RUNTIME_FAILURE: return "XR_ERROR_RUNTIME_FAILURE";
+        case XR_ERROR_INSTANCE_LOST: return "XR_ERROR_INSTANCE_LOST";
+        case XR_ERROR_API_VERSION_UNSUPPORTED: return "XR_ERROR_API_VERSION_UNSUPPORTED";
+        case XR_ERROR_EXTENSION_NOT_PRESENT: return "XR_ERROR_EXTENSION_NOT_PRESENT";
+        case XR_ERROR_API_LAYER_NOT_PRESENT: return "XR_ERROR_API_LAYER_NOT_PRESENT";
+        case XR_ERROR_INITIALIZATION_FAILED: return "XR_ERROR_INITIALIZATION_FAILED";
+        default: return std::format("XrResult({})", static_cast<int>(r));
+    }
 }
 
 bool OpenXrBackend::Check(XrResult r, const char* what) const {
@@ -194,7 +204,10 @@ Result OpenXrBackend::InitImpl(const InitDesc& desc) {
 
     // ---- implicit API layers ----
     std::vector<std::string> disabledLayers;
-    if (desc.disableImplicitApiLayers) DisableImplicitApiLayers(&disabledLayers);
+    if (desc.disableImplicitApiLayers)
+        DisableImplicitApiLayers(&disabledLayers);
+    else if (!desc.disableImplicitApiLayersMatching.empty())
+        DisableImplicitApiLayersMatching(desc.disableImplicitApiLayersMatching, &disabledLayers);
     for (const ImplicitLayer& l : EnumerateImplicitApiLayers()) {
         const bool disabledHere = std::find(disabledLayers.begin(), disabledLayers.end(), l.manifest) != disabledLayers.end();
         info.implicitLayers.push_back(l.manifest + (disabledHere ? " (disabled for this process)"
@@ -706,7 +719,7 @@ Result OpenXrBackend::BeginLocked(FrameRecord& r) {
         ScopedStateBackup backup(stateBackup_, context_.Get());
         xr = xrBeginFrame(session_, &bi);
     }
-    AddMs(&FrameStats::endFrameMs, t0);
+    AddMs(&FrameStats::beginFrameMs, t0);
     r.begun = true;
     if (xr == XR_FRAME_DISCARDED) {
         CountStat(&FrameStats::framesDiscarded);

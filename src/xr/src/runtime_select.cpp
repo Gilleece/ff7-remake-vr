@@ -202,6 +202,7 @@ void CollectImplicitLayers(HKEY root, std::vector<ImplicitLayer>& out) {
             std::stringstream ss;
             ss << f.rdbuf();
             l.disableEnvironment = JsonStringValue(ss.str(), "disable_environment");
+            l.name = JsonStringValue(ss.str(), "name");  // the only "name" key of a layer manifest is api_layer.name
         }
         out.push_back(std::move(l));
     }
@@ -217,10 +218,28 @@ std::vector<ImplicitLayer> EnumerateImplicitApiLayers() {
     return out;
 }
 
-int DisableImplicitApiLayers(std::vector<std::string>* disabled) {
+namespace {
+
+std::string LowerAscii(std::string s) {
+    for (char& c : s)
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    return s;
+}
+
+bool LayerMatches(const ImplicitLayer& l, const std::vector<std::string>* patterns) {
+    if (!patterns) return true;
+    const std::string name = LowerAscii(l.name), path = LowerAscii(l.manifest);
+    for (const std::string& p : *patterns) {
+        const std::string lp = LowerAscii(p);
+        if (!lp.empty() && (name.find(lp) != std::string::npos || path.find(lp) != std::string::npos)) return true;
+    }
+    return false;
+}
+
+int DisableLayers(const std::vector<std::string>* patterns, std::vector<std::string>* disabled) {
     int n = 0;
     for (const ImplicitLayer& l : EnumerateImplicitApiLayers()) {
-        if (!l.enabledInRegistry || l.disableEnvironment.empty()) continue;
+        if (!l.enabledInRegistry || l.disableEnvironment.empty() || !LayerMatches(l, patterns)) continue;
         const std::wstring var = Utf8ToWide(l.disableEnvironment);
         SetEnvironmentVariableW(var.c_str(), L"1");
         _wputenv_s(var.c_str(), L"1");
@@ -228,6 +247,14 @@ int DisableImplicitApiLayers(std::vector<std::string>* disabled) {
         ++n;
     }
     return n;
+}
+
+}  // namespace
+
+int DisableImplicitApiLayers(std::vector<std::string>* disabled) { return DisableLayers(nullptr, disabled); }
+
+int DisableImplicitApiLayersMatching(const std::vector<std::string>& patterns, std::vector<std::string>* disabled) {
+    return DisableLayers(&patterns, disabled);
 }
 
 }  // namespace ff7vr::xr

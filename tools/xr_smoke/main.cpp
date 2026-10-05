@@ -84,6 +84,7 @@ struct Options {
     bool debugLayer = false;
     bool debugUtils = false;
     bool noImplicitLayers = false;
+    std::vector<std::string> disableLayers;
     bool requireVisible = false;
     uint32_t sessionTimeoutSec = 30;
     uint32_t printViewsEvery = 0;  // 0 = first frame and a few more
@@ -119,6 +120,7 @@ void PrintUsage() {
         "  --session-timeout SEC       give up if the OpenXR session does not start (default 30)\n"
         "  --require-visible           fail unless the runtime reached VISIBLE or FOCUSED\n"
         "  --no-implicit-layers        disable implicit OpenXR API layers for this process\n"
+        "  --disable-layer TEXT        disable the implicit layers whose name or manifest contains TEXT (repeatable)\n"
         "  --debug-utils               log XR_EXT_debug_utils messages\n"
         "  --d3d-debug                 create the D3D11 device with the debug layer\n"
         "  --print-views N             print views every N frames\n"
@@ -203,6 +205,8 @@ bool ParseArgs(int argc, char** argv, Options& o) {
             o.requireVisible = true;
         } else if (a == "--no-implicit-layers") {
             o.noImplicitLayers = true;
+        } else if (a == "--disable-layer") {
+            o.disableLayers.push_back(next());
         } else if (a == "--debug-utils") {
             o.debugUtils = true;
         } else if (a == "--d3d-debug") {
@@ -870,6 +874,7 @@ int main(int argc, char** argv) {
     desc.swapchainFormat = opt.swapchainFormat;
     desc.enableDebugUtils = opt.debugUtils;
     desc.disableImplicitApiLayers = opt.noImplicitLayers;
+    desc.disableImplicitApiLayersMatching = opt.disableLayers;
     desc.null.motion = opt.motion;
     desc.null.paceToRefresh = opt.pace;
     desc.gpuTiming = true;

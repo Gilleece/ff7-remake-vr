@@ -39,6 +39,13 @@
 //     presented for a while (game paused, minimised, loading without Present).
 //   * The texture given to SubmitStereoFrame must stay alive until the next
 //     Present on the RT returns (the module keeps a reference until then).
+//   * Images are kept per frame id (the four most recent ids). A second
+//     SubmitStereoFrame for the same id replaces the first, so one image may
+//     be offered for every frame the coming Present may end.
+//   * A frame without an image re-shows the previous stereo image if it is
+//     younger than 300 ms, otherwise shows the screen layer; when the game
+//     thread stops calling BeginGameFrame for 100 ms the module starts frames
+//     itself (docs/render.md, "Switching between stereo and the screen").
 //   * Mode changes take effect at frame boundaries; both directions are safe
 //     at any time (menus, movies and cutscenes switch back to Screen).
 // ===========================================================================

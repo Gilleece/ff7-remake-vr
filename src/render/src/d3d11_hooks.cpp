@@ -172,10 +172,9 @@ void LogSwapchainFacts(IDXGISwapChain* sc, const DXGI_SWAP_CHAIN_DESC& d, ID3D11
               tid, ptName, windowTid, wtName, g_deviceCreateTid.load(), dtName, tid == windowTid ? "the presenting thread" : "another thread",
               g_deferredContexts.load());
     std::lock_guard lk(g_factsMutex);
-    g_factsLine = std::format("backbuffer {}x{} {} buffers {} swapeffect {} {} adapter '{}' luid {:016X} present_tid {} ('{}') window_tid {} deferred_contexts {} resizes {}",
-                              d.BufferDesc.Width, d.BufferDesc.Height, xr::DxgiFormatName(d.BufferDesc.Format), d.BufferCount,
-                              static_cast<int>(d.SwapEffect), d.Windowed ? "windowed" : "fullscreen", adapter, luid, tid, ptName,
-                              windowTid, g_deferredContexts.load(), g_resizeCount.load());
+    g_factsLine = std::format("backbuffer {}x{} {} buffers {} swapeffect {} {} adapter '{}' luid {:016X} window_tid {}", d.BufferDesc.Width,
+                              d.BufferDesc.Height, xr::DxgiFormatName(d.BufferDesc.Format), d.BufferCount, static_cast<int>(d.SwapEffect),
+                              d.Windowed ? "windowed" : "fullscreen", adapter, luid, windowTid);
 }
 
 // Called on every Present before the real one. Returns the main-swapchain flag and fills `t`.
@@ -524,9 +523,11 @@ std::string ThreadReport() {
 }
 
 std::string D3D11Summary() {
+    const DWORD tid = g_presentTid.load();
+    const std::string name = ThreadName(tid);
     std::lock_guard lk(g_factsMutex);
-    return g_factsLine + std::format(" hooked_classes {} deferred_contexts {} resizes {}", g_vtCount.load(), g_deferredContexts.load(),
-                                     g_resizeCount.load());
+    return g_factsLine + std::format(" present_tid {} ('{}') hooked_classes {} deferred_contexts {} resizes {}", tid, name, g_vtCount.load(),
+                                     g_deferredContexts.load(), g_resizeCount.load());
 }
 
 bool InstallD3D11Hooks(const HookCallbacks& callbacks) {
