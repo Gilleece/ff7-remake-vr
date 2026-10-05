@@ -6,7 +6,10 @@
 .DESCRIPTION
   start (default)
     1. Finds the game through Steam.
-    2. Refuses if the game is already running.
+    2. If the game (or its crash reporter or root launcher) from an earlier
+       session is still running or closing, or another launcher window is still
+       finishing, waits for it (up to 90 s), then refuses. Two game processes
+       never run at the same time.
     3. Puts things back first if an earlier session did not finish (launcher
        window closed, crash, restart).
     4. Checks that Steam runs (starts it if not) and warns if Virtual Desktop's
@@ -14,14 +17,18 @@
     5. Sets ReShade/Luma's dxgi.dll aside as dxgi.dll.vr-disabled, copies the
        mod (xinput1_3.dll) and ff7vr.ini into End\Binaries\Win64, and records
        every change in End\Binaries\Win64\ff7vr.session.json.
-    6. Starts the game (-d3d11) and waits until it exits.
+    6. Starts the game (-d3d11) and waits until the game and its helper
+       processes have completely exited, however the game ended.
     7. Keeps the session's ff7vr.log in logs\<time>\ next to this script,
        removes the mod's files and puts dxgi.dll back.
+    8. Closes its window by itself after a 10-second countdown when all went
+       well; after any warning or error the window stays open until a key is
+       pressed. Nothing waits for that key: everything is put back before.
 
   restore
     Puts the game folder back to normal: removes the mod's files and puts
-    dxgi.dll back. Harmless when nothing needs doing. Refuses while the game
-    runs.
+    dxgi.dll back. Harmless when nothing needs doing. Waits like start for a
+    game or launcher that is still finishing, then refuses while the game runs.
 
   status
     Shows what is in place, changes nothing.
@@ -50,7 +57,7 @@
   Extra command-line arguments for the game.
 
 .PARAMETER NoPause
-  Do not wait for a key press before closing the window.
+  Close the window at once: no countdown, no key press, also after an error.
 
 .EXAMPLE
   start-vr.cmd
@@ -82,16 +89,57 @@ $LumaOff        = 'dxgi.dll.vr-disabled'
 $LogsDir        = Join-Path $Here 'logs'
 $script:LastLogDir = $null
 
+$AutoCloseSeconds = 10        # a session that ended without problems closes its window after this
+$StartWaitSeconds = 90        # how long start/restore wait for a previous game or launcher to finish
+$script:Warned     = $false   # set by Warn and Fail; a session with warnings keeps its window open
+$script:AutoClose  = $false   # set for a session that ended cleanly
+$script:Mutex      = $null
+$script:LockHeld   = $false
+
 function Say([string]$msg)  { Write-Host $msg }
 function Info([string]$msg) { Write-Host ("[{0}] {1}" -f (Get-Date).ToString('HH:mm:ss'), $msg) }
-function Warn([string]$msg) { Write-Host ("[{0}] WARNING: {1}" -f (Get-Date).ToString('HH:mm:ss'), $msg) -ForegroundColor Yellow }
-function Fail([string]$msg) { Write-Host ("[{0}] {1}" -f (Get-Date).ToString('HH:mm:ss'), $msg) -ForegroundColor Red }
+function Warn([string]$msg) { $script:Warned = $true; Write-Host ("[{0}] WARNING: {1}" -f (Get-Date).ToString('HH:mm:ss'), $msg) -ForegroundColor Yellow }
+function Fail([string]$msg) { $script:Warned = $true; Write-Host ("[{0}] {1}" -f (Get-Date).ToString('HH:mm:ss'), $msg) -ForegroundColor Red }
 
+function Release-LauncherLock {
+    if ($script:Mutex) {
+        try { $script:Mutex.ReleaseMutex() } catch { }
+        try { $script:Mutex.Dispose() } catch { }
+        $script:Mutex = $null
+    }
+}
+
+# Ends the script. Everything is already put back at this point; the window only
+# stays so the messages can be read. A session that ended without problems closes
+# after a short countdown; anything else waits for a key.
 function Finish([int]$code) {
+    Release-LauncherLock
     if (-not $NoPause) {
         Write-Host ''
-        Write-Host 'Press any key to close this window.'
-        try { [void]$Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown') } catch { }
+        $waitKey = $true
+        if ($script:AutoClose -and $code -eq 0 -and -not $script:Warned) {
+            $waitKey = $false
+            try {
+                while ($Host.UI.RawUI.KeyAvailable) { [void]$Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown') }
+                for ($s = $AutoCloseSeconds; $s -gt 0; $s--) {
+                    Write-Host ("`rAll done. This window closes in {0,2} s (press a key to keep it open)." -f $s) -NoNewline
+                    for ($i = 0; $i -lt 10; $i++) {
+                        if ($Host.UI.RawUI.KeyAvailable) {
+                            [void]$Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+                            $waitKey = $true
+                            break
+                        }
+                        Start-Sleep -Milliseconds 100
+                    }
+                    if ($waitKey) { break }
+                }
+            } catch { Start-Sleep -Seconds $AutoCloseSeconds }
+            Write-Host ''
+        }
+        if ($waitKey) {
+            Write-Host 'Press any key to close this window.'
+            try { [void]$Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown') } catch { }
+        }
     }
     exit $code
 }
@@ -145,7 +193,72 @@ function Find-GameRoot {
     return $null
 }
 
-function Get-GameProcs { return @(Get-Process -Name $GameProcess -ErrorAction SilentlyContinue) }
+# The game and its helpers: ff7remake_.exe, the small launcher ff7remake.exe in the
+# install root and the engine's crash reporter (only copies started from the game
+# folder count). Returns plain records, not Process objects: a Process object keeps
+# a handle to the process, and a handle kept to the exited game can make it look
+# still present to other programs (VR runtimes allow one application at a time).
+function Get-GameProcs {
+    $out = @()
+    foreach ($n in @($GameProcess, 'ff7remake', 'CrashReportClient')) {
+        foreach ($p in @(Get-Process -Name $n -ErrorAction SilentlyContinue)) {
+            try {
+                $ours = ($n -eq $GameProcess)
+                if (-not $ours -and $root) {
+                    $path = $null
+                    try { $path = $p.Path } catch { }
+                    $ours = ($path -and $path.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase))
+                }
+                if ($ours) { $out += [pscustomobject]@{ Name = $p.ProcessName; Id = $p.Id } }
+            } finally { $p.Dispose() }
+        }
+    }
+    return $out
+}
+
+function Format-Procs($procs) { return ((@($procs) | ForEach-Object { "$($_.Name).exe (pid $($_.Id))" }) -join ', ') }
+
+# Takes the launcher lock: only one launcher works on the game folder at a time.
+# Returns $true when taken, $false when another launcher still holds it.
+function Enter-LauncherLock([int]$timeoutMs) {
+    if (-not $script:Mutex) { $script:Mutex = New-Object System.Threading.Mutex($false, 'Local\ff7vr-launcher') }
+    try { return $script:Mutex.WaitOne($timeoutMs) }
+    catch [System.Threading.AbandonedMutexException] { return $true }   # its holder was closed or killed: ours now
+}
+
+# Waits until no other launcher is busy and no game process (or helper) is left,
+# up to $StartWaitSeconds. Returns $true when the way is clear; the lock is then held.
+function Wait-ClearToStart([string]$what) {
+    $deadline = (Get-Date).AddSeconds($StartWaitSeconds)
+    $said = ''
+    while ($true) {
+        if (-not $script:Mutex -or -not $script:LockHeld) {
+            $script:LockHeld = Enter-LauncherLock 0
+        }
+        $procs = @(Get-GameProcs)
+        if ($script:LockHeld -and $procs.Count -eq 0) {
+            if ($said) { Info 'Done waiting.' }
+            return $true
+        }
+        if (-not $script:LockHeld) { $msg = 'Another launcher window is still finishing a session. Waiting for it to finish ...' }
+        else { $msg = "The game from an earlier session is still running or closing ($(Format-Procs $procs)). Waiting for it to exit ..." }
+        if ($msg -ne $said) { Info $msg; $said = $msg }
+        if ((Get-Date) -ge $deadline) { break }
+        Start-Sleep -Milliseconds 500
+    }
+    if (-not $script:LockHeld) {
+        Fail "Another launcher window is still busy after $StartWaitSeconds s. Let it finish (or close it), then $what again."
+    } else {
+        $procs = @(Get-GameProcs)
+        Fail "The game is still running after $StartWaitSeconds s: $(Format-Procs $procs)."
+        if (@($procs | Where-Object { $_.Name -eq 'CrashReportClient' }).Count -gt 0) {
+            Say 'The game crashed and its crash report window is open: close that window, then try again.'
+        } else {
+            Say "Quit the game (or end it in Task Manager), then $what again."
+        }
+    }
+    return $false
+}
 
 function Test-SteamRunning {
     try {
@@ -392,14 +505,11 @@ $bin = Join-Path $root 'End\Binaries\Win64'
 
 if ($Action -eq 'status') { Show-Status $root $bin; Finish 0 }
 
-if (@(Get-GameProcs).Count -gt 0) {
-    if ($Action -eq 'restore') {
-        Fail 'The game is running. Close it first, then run restore again.'
-    } else {
-        Fail 'The game is already running. Close it first, then start the VR session again.'
-    }
-    Finish 2
-}
+# Never two game processes at once (a VR runtime serves one application at a time,
+# even while the previous one is still shutting down), and never two launchers
+# working on the game folder at once.
+if ($Action -eq 'restore') { $what = 'run restore' } else { $what = 'start the VR session'; Say 'ff7vr: VR session for FINAL FANTASY VII REMAKE INTERGRADE' }
+if (-not (Wait-ClearToStart $what)) { Finish 2 }
 
 if ($Action -eq 'restore') {
     $session = Read-Session $bin
@@ -419,7 +529,6 @@ if ($Action -eq 'restore') {
 
 # ---- start
 
-Say 'ff7vr: VR session for FINAL FANTASY VII REMAKE INTERGRADE'
 Info "Game folder: $root"
 
 # An earlier session that did not finish (window closed, crash, restart) is undone first.
@@ -512,22 +621,39 @@ try {
     $env:SteamAppId = "$AppId"
     $env:SteamGameId = "$AppId"
     Info "Starting the game ($gameArgs)"
+    # No handle to the game is kept (see Get-GameProcs).
     $proc = Start-Process -FilePath (Join-Path $bin 'ff7remake_.exe') -ArgumentList $gameArgs -WorkingDirectory $bin -PassThru
+    $gamePid = $proc.Id
+    $proc.Dispose(); $proc = $null
     $gameStarted = $true
-    Info 'Game running. Play, then quit the game as usual; this window tidies up afterwards.'
+    $script:Warned = $false   # from here on, any warning keeps the window open at the end
+    Info "Game running (pid $gamePid). Play, then quit the game as usual; this window tidies up and closes by itself."
     Info 'Do not close this window while the game runs (if it happens anyway, run restore.cmd afterwards).'
 
-    # Wait until no game process is left (5 s without one, in case it restarts itself).
+    # Wait until the game and its helpers are completely gone (5 s without any, in
+    # case the game restarts itself), however it ended: quit, Alt+F4, killed, crash.
     $goneSince = $null
     $t0 = Get-Date
+    $said = ''
     while ($true) {
-        Start-Sleep -Seconds 2
-        if (@(Get-GameProcs).Count -gt 0) { $goneSince = $null; continue }
+        Start-Sleep -Seconds 1
+        $procs = @(Get-GameProcs)
+        if ($procs.Count -gt 0) {
+            $goneSince = $null
+            if (@($procs | Where-Object { $_.Name -eq $GameProcess }).Count -eq 0) {
+                $msg = "The game has closed; waiting for $(Format-Procs $procs) to exit."
+                if (@($procs | Where-Object { $_.Name -eq 'CrashReportClient' }).Count -gt 0) {
+                    $msg += ' The game crashed: close the crash report window to finish.'
+                }
+                if ($msg -ne $said) { Info $msg; $said = $msg }
+            }
+            continue
+        }
         if (-not $goneSince) { $goneSince = Get-Date }
         if (((Get-Date) - $goneSince).TotalSeconds -ge 5) { break }
     }
     $mins = [math]::Round(((Get-Date) - $t0).TotalMinutes, 1)
-    Info "The game has exited (after $mins min)"
+    Info "The game has exited completely (after $mins min)"
     if ($mins -lt 0.5) { Warn 'The game exited very quickly. Check the log below and send it along if this was not you.' }
 } catch {
     Fail "$_"
@@ -553,4 +679,6 @@ try {
 }
 
 if ($script:LastLogDir -and $gameStarted) { Say ''; Say "Log of this session: $(Join-Path $script:LastLogDir 'ff7vr.log')" }
+if ($exitCode -eq 0 -and -not $script:Warned) { Info 'Session finished. You can start the next one now.' }
+$script:AutoClose = $gameStarted
 Finish $exitCode

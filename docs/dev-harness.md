@@ -502,7 +502,11 @@ powershell -NoProfile -Command ". .\tools\dev\common.ps1; Get-GameRoot; (Get-Scr
 user guide (`README.md`). The package does not use this repository or these
 scripts: the launcher finds the game itself, records its changes in
 `End\Binaries\Win64\ff7vr.session.json` and undoes them after the session or with
-`restore`. `collect-diagnostics.cmd` (`ff7vr-launcher.ps1 diagnostics`) zips
+`restore`. It waits until the game and its helpers (root launcher, crash
+reporter) have completely exited before tidying up, never starts a second game
+while one is still closing, and lets only one launcher instance work on the game
+folder at a time (named mutex `Local\ff7vr-launcher`). It keeps no handle to the
+game process once started. `collect-diagnostics.cmd` (`ff7vr-launcher.ps1 diagnostics`) zips
 the last session's log folder, the ini, `VERSION.txt` and a `system.txt`
 (Windows, GPU and driver, OpenXR runtimes, game folder state, the key lines of
 the log) into `diagnostics-<time>.zip` next to the launcher; it changes nothing.

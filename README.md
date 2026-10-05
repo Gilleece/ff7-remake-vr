@@ -52,7 +52,12 @@ desktop. It contains:
 **To play:** start Virtual Desktop's Streamer and connect the headset in Virtual
 Desktop (it can also be done later), then double-click `start-vr.cmd`. The launcher:
 
-1. finds the game through Steam and refuses politely if it is already running;
+1. finds the game through Steam. If the game of a previous session is still running
+   or still closing, or another launcher window is still tidying up, it waits for it
+   (up to 90 seconds, with a message saying what it waits for) instead of starting a
+   second copy, and gives up with a message only if it does not go away. Virtual
+   Desktop serves one game at a time, so two copies at once leave the headset
+   without a picture;
 2. puts things back first if an earlier session was interrupted;
 3. checks that Steam runs (it starts Steam if not) and warns if the Virtual Desktop
    Streamer does not seem to run. That is only a warning: the game then runs flat on
@@ -64,12 +69,21 @@ Desktop (it can also be done later), then double-click `start-vr.cmd`. The launc
 5. copies `xinput1_3.dll` and `ff7vr.ini` into that folder and records every change
    in `ff7vr.session.json` there;
 6. starts the game (with `-d3d11`) and waits;
-7. when you quit the game: keeps the session's log in `logs\<date-time>\`, removes
-   the mod's files and puts `dxgi.dll` back.
+7. when the game is gone, however it ended (quit, Alt+F4, ended in Task Manager,
+   crashed), and its helper programs have closed too (the game's crash report
+   window, if one opened, has to be closed first): keeps the session's log in
+   `logs\<date-time>\`, removes the mod's files and puts `dxgi.dll` back;
+8. closes its window by itself after a 10-second countdown when everything went
+   well (press a key during the countdown to keep it open). After a warning or an
+   error the window stays open with the message until you press a key. Either way
+   everything is already put back by then: nothing waits for that key press.
 
 Leave the launcher's window open while you play. If it gets closed anyway, or the PC
 restarts during a session, double-click `restore.cmd` (or just start the next session:
 it tidies up first). `restore.cmd` is harmless when nothing needs doing.
+
+To play again straight away, quit the game and start `start-vr.cmd` again; if the
+previous session is still closing, the new one waits for it by itself.
 
 Options, from a command prompt in the package folder:
 
@@ -80,6 +94,7 @@ start-vr.cmd -KeepInstalled     leave the mod installed after the game exits (Lu
 start-vr.cmd -KeepLuma          do not set ReShade/Luma aside. Does not work yet: with ReShade/Luma
                                 loaded the mod does not reach the headset and the game runs flat
 start-vr.cmd -ExtraArgs "..."   extra arguments for the game
+start-vr.cmd -NoPause           close the window at once at the end, also after an error
 powershell -NoProfile -ExecutionPolicy Bypass -File ff7vr-launcher.ps1 status
                                 show what is installed, change nothing
 ```
@@ -335,6 +350,7 @@ To narrow a problem down, change one setting at a time and start a new session:
 | first person at the wrong height or inside the head | `[first_person] eye = offset` (a fixed height above the character's position instead of its eyes) |
 | anything else in first person | `[first_person] enabled = 0` |
 | stutter or low frame rate | `[xr] resolution_scale = 0.8`, then `[foveation] preset = balanced` |
+| the headset stays on the Virtual Desktop view although the game runs | quit the game, wait for the launcher window to finish (it closes by itself), start again. If that does not help, restart the Virtual Desktop Streamer |
 | the game does not start or crashes at once | `restore.cmd`, then start the game from Steam without the mod to rule out the game itself |
 
 ## Building from source
