@@ -701,8 +701,15 @@ any change).
 ## Skin lighting fix
 
 Indoors, exposed skin on characters (faces, arms, legs: the subsurface materials) was covered
-in white, square blocks in the eye images. Outdoors it was not seen. With the light sort-key
-patch (`docs/re/engine.md` section 6) the blocks are gone in both eyes.
+in white, square blocks in the eye images. Outdoors it was not seen. The same pass also left
+the bottom third of every eye without some of the lights: below row 2160 (the height of a
+3840x2160 screen) the lamp light on the counter of the first room stopped at a hard
+horizontal line (`captures/skin/r3/row2160_L_off_on.png`; mean brightness step at that row
+-21 and -15 levels in the left and right eye with the fix off, -1 with it on, the same as
+between two neighbouring rows elsewhere). With the light sort-key patch
+(`docs/re/engine.md` section 6) both are gone in both eyes. At eyes 2064x2208, the size
+used in earlier tests, only the last 48 rows were affected, which is why the line was not
+noticed then.
 
 What happens (one-frame GPU traces of the first room, `gpu trace`): the lights that get
 Square Enix's sort-key bit `0x40` are rendered by a tiled lighting compute pass, one
@@ -714,10 +721,13 @@ from the frame and the same lights are drawn one at a time as light volumes per 
 (`DrawIndexed 2376` at each eye's viewport, 7 for the left eye and 8 for the right in the
 traced frame). The edges of the white
 blocks lie on a 16-pixel grid in eye coordinates (edge positions modulo 16 cluster at 0,
-15 and 1 in both eyes), the tile size of that pass. Which part of the tiled pass goes wrong
-for the eye views (the shader or its fixed-size buffers) was not established; the same
-patch is the community fix for screens that are not 16:9, which fits a 16:9 assumption in
-that pass. Why only indoors is inferred: the street outside had no fault in any capture,
+15 and 1 in both eyes), the tile size of that pass. The read-back of `SceneColorTiled` right
+after the tiled pass (`captures/skin/r1/tr1_02701.png`, taken after the next light's draw,
+event 2701; the dispatches are 2680 and 2682 and their own read-backs failed) already holds
+the white blocks on the right eye's characters, and both eyes are black from row 2160 down,
+although the dispatch covers 3264 rows. So the pass is limited to a 3840x2160 screen somewhere (its fixed-size
+buffers or the shader); which part produces the blocks on subsurface pixels was not
+established. The same patch is the community fix for screens that are not 16:9. Why only indoors is inferred: the street outside had no fault in any capture,
 presumably because no light there takes the tiled path.
 
 `src/engine/src/fixes.cpp` (`set_light_fix`, `light_fix_stereo`): with `[stereo] light_fix =
@@ -727,8 +737,11 @@ off), so the flat game runs the game's own code. `stereo lightfix 0|1` switches 
 setting; the log shows `fixes: light sort-key patch on` / `off (game default)` at every
 change.
 
-Cost: not measured; the per-light path draws one light volume per light and eye instead of
-one dispatch per eye.
+Cost: in the first room the fix makes the frame slightly faster. Null backend unpaced,
+`t.MaxFPS 0`, `r.BloomQuality 5`, first person facing the door, 6 s windows alternating:
+fix on 10.23, 9.90, 9.95 ms; fix off 10.49, 10.39 ms (average frame time from `stereo
+status` after `stereo frametime 6`). A scene with many lights of that group may behave
+differently; not measured.
 
 Evidence (Null backend, eyes 3072x3264 with the Quest 3 class asymmetric FOV, foveation
 `quality`, `r.BloomQuality 0`, the player's ini; first room of the latest save, Cloud and
@@ -742,11 +755,15 @@ Tifa in view; `captures/skin/`):
 | `r2/c01`-`c04` (third person), `c05`-`c07` (first person) | off, on, off, on / off, on, off | blocks with the fix off every time, none with it on; in first person both eyes have blocks with it off (`r2/sheet_third_lf.png`, `sheet_first_lf.png`) |
 | `r3/d01`-`d06` (the default build) | on by default, off, on; first person on, off, on after `stereo off` and `stereo on` | blocks only with `stereo lightfix 0` (`r3/sheet_third_fix_nofix_fix.png`, `sheet_first_fix_nofix_fix.png`); near-white pixels in Tifa's region: 83815 with the fix off, 3404 with it on (her white top) |
 | traces `r2/tr_lf0`, `r2/tr_lf1` | off / on | the tiled dispatches (events 2708, 2710) only with the fix off; per-light volumes (2702-2716 and later) only with it on |
+| row 2160 in `r1/a01`, `r3/d02` / `r3/d01`, `d04`, `r2/c06` | off / on | mean brightness step from row 2150-2159 to 2160-2169: -21 (left) and -15 (right) with the fix off, 81 to 91 % of the columns darker by more than 3 levels; -0.7 to -1.3 with it on (rows 2130-2149: -0.3 to -2.6). First person facing the floor (`r2/c05`, off): -3 and -4 |
 
 The occlusion fix kept working with the light fix on (`stereo aofix` in run `r3`: `applied`
 2670, then 3219 after a `stereo off` / `stereo on`, `failed 0`; whether it is still exactly
-once per frame was not counted in that run). The bloom fix was idle in these runs
-(`r.BloomQuality 0`), so switching it off in `b04` changed nothing either. The flat game (`stereo off`) with
+once per frame was not counted in that run). The bloom fix was idle in those runs
+(`r.BloomQuality 0`), so switching it off in `b04` changed nothing either. In a later run
+with `r.BloomQuality 5` both fixes applied once per stereo frame (to within one: the three
+counters are read one after the other) with the light fix on and off (three 5 s reads: bloom fix `applied` +557, +523, +546 and occlusion fix +556,
++523, +546 for +556, +523, +546 stereo frames; `missed 0`, `failed 0`). The flat game (`stereo off`) with
 the patch removed looks as before (`r3/flat_after_off.png`). Not confirmed in a headset yet.
 
 ## Movies
