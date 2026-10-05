@@ -352,6 +352,371 @@
       },
       "expect": "0x4e6d668",
       "desc": "ULocalPlayer vtable (no SE subclass seen at runtime yet)."
+    },
+    {
+      "name": "GUObjectArray",
+      "kind": "global",
+      "pattern": "48 8B 05 ?? ?? ?? ?? 48 8D 14 C8 EB 03 49 8B D4 81 4A 08 00 00 00 40",
+      "resolve": {
+        "type": "rip",
+        "insn": 0,
+        "disp": 3,
+        "len": 7,
+        "add": -16
+      },
+      "expect": "0x53bd470",
+      "desc": "FUObjectArray GUObjectArray. Not chunked: ObjObjects.Objects (FUObjectItem*, 0x18 bytes per item) at +0x10, MaxElements +0x18, NumElements +0x1C. The anchor reads GUObjectArray+0x10."
+    },
+    {
+      "name": "FNamePool",
+      "kind": "global",
+      "pattern": "48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B D0 C6 05 ?? ?? ?? ?? 01 48 8B 44 24 30 48 C1 E8 20 03 C0",
+      "resolve": {
+        "type": "rip",
+        "insn": 0,
+        "disp": 3,
+        "len": 7
+      },
+      "expect": "0x5981300",
+      "desc": "Static FNamePool object (newer name-pool layout backported into this engine): entry blocks at +0x10, entry = Blocks[id >> 16] + 2 * (id & 0xFFFF); entry header is a uint16 with Len = header >> 6, bIsWide = header & 1. Lazily constructed behind a bool guard."
+    },
+    {
+      "name": "FName::ToString",
+      "kind": "function",
+      "pattern": "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 20 48 8B DA 48 8B F1 E8 ?? ?? ?? ?? 44 8B 46 04",
+      "resolve": {
+        "type": "match",
+        "offset": 0
+      },
+      "expect": "0x1ce89a0",
+      "desc": "void FName::ToString(FString& Out) const. About 1000 callers."
+    },
+    {
+      "name": "GSystemResolution",
+      "kind": "global",
+      "pattern": "81 3D ?? ?? ?? ?? 80 07 00 00",
+      "resolve": {
+        "type": "rip",
+        "insn": 0,
+        "disp": 2,
+        "len": 10
+      },
+      "expect": "0x53e3ae0",
+      "desc": "FSystemResolution GSystemResolution {int32 ResX, ResY; EWindowMode WindowMode; ...}. Found by the only `cmp dword ptr [rip+x], 1920` in .text (method of the community UEVR plugin)."
+    },
+    {
+      "name": "r.EnableStereoEmulation data",
+      "kind": "global",
+      "pattern": "48 8B 05 ?? ?? ?? ?? BA 04 00 00 00 48 0F 44 CA 39 34 01 0F 85 ?? ?? ?? ??",
+      "resolve": {
+        "type": "rip",
+        "insn": 0,
+        "disp": 3,
+        "len": 7
+      },
+      "expect": "0x5a06970",
+      "desc": "TConsoleVariableData<int32>* of the static r.EnableStereoEmulation cvar (game-thread value at +0). Registered the first time InitializeHMDDevice runs."
+    },
+    {
+      "name": "FConsoleManager::vftable",
+      "kind": "vtable",
+      "pattern": "48 8D 05 ?? ?? ?? ?? 48 89 5C 24 40 48 89 07",
+      "resolve": {
+        "type": "rip",
+        "insn": 0,
+        "disp": 3,
+        "len": 7
+      },
+      "expect": "0x4d1de20",
+      "desc": "FConsoleManager vtable (object created by IConsoleManager::SetupSingleton, size 0xB8). Slot 18 (+0x90) FindConsoleVariable(const TCHAR*), slot 19 (+0x98) FindConsoleObject(const TCHAR*), slot 7 (+0x38) CallAllConsoleVariableSinks."
+    },
+    {
+      "name": "FDeferredShadingSceneRenderer::RenderLights",
+      "kind": "function",
+      "pattern": "4C 8B DC 55 56 41 54 41 55 41 57 48 8D 6C 24 90",
+      "resolve": {
+        "type": "match",
+        "offset": 0
+      },
+      "expect": "0x2234f50",
+      "desc": "Renderer: builds the sorted light list and renders lights. Found from L\"ScreenShadowMaskTexture\"."
+    },
+    {
+      "name": "RenderLights light sort-key patch site",
+      "kind": "patch",
+      "pattern": "BE 40 00 00 00 F3 0F 10 81 C0 00 00 00",
+      "resolve": {
+        "type": "match",
+        "offset": 0
+      },
+      "expect": "0x22351b0",
+      "desc": "`mov esi, 0x40` (BE 40 00 00 00) that sets SE's sort-key bit 0x40. The community fix writes 0x60 to the immediate (byte at +1) so these lights also get bit 0x20. Fixes lights rendering wrong (green) at non-16:9 view aspect ratios, which includes every VR eye view."
+    },
+    {
+      "name": "FPostProcessSettings::FPostProcessSettings",
+      "kind": "function",
+      "pattern": "48 89 5C 24 08 57 48 83 EC 30 C7 41 3C 00 00 80 3F",
+      "resolve": {
+        "type": "match",
+        "offset": 0
+      },
+      "expect": "0x32050f0",
+      "desc": "Default constructor of FPostProcessSettings. The vignette mod hooks its epilogue to override VignetteIntensity."
+    },
+    {
+      "name": "FSceneViewport::bForceSeparateRenderTarget",
+      "kind": "offset",
+      "pattern": "3A 9F ?? ?? ?? ?? 75 15",
+      "resolve": {
+        "type": "i32",
+        "offset": 2
+      },
+      "expect": "0x27c",
+      "desc": "Offset of bForceSeparateRenderTarget relative to the FViewport subobject (UGameViewportClient::Viewport). bUseSeparateRenderTarget is the byte before it. From FSceneViewport::EnqueueBeginRenderFrame."
+    },
+    {
+      "name": "UGameViewportClient::Viewport",
+      "kind": "offset",
+      "pattern": "4D 8B 80 ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 48 8D 54 24 78",
+      "resolve": {
+        "type": "i32",
+        "offset": 3
+      },
+      "expect": "0xa0",
+      "desc": "Offset of FViewport* Viewport in UGameViewportClient. From ULocalPlayer::GetProjectionData (mono branch)."
+    },
+    {
+      "name": "FSceneView::StereoPass",
+      "kind": "offset",
+      "pattern": "83 BF ?? ?? ?? ?? 00 74 0E 48 8B 01",
+      "resolve": {
+        "type": "i32",
+        "offset": 2
+      },
+      "expect": "0x970",
+      "desc": "Offset of EStereoscopicPass StereoPass in FSceneView. From the canvas setup that calls InitCanvasFromView."
+    },
+    {
+      "name": "ULocalPlayer::StereoViewState",
+      "kind": "offset",
+      "pattern": "48 8D 8B ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8D 8B E0 00 00 00 48 83 C4 30",
+      "resolve": {
+        "type": "i32",
+        "offset": 3
+      },
+      "expect": "0xb8",
+      "desc": "Offset of FSceneViewStateReference StereoViewState in ULocalPlayer (ViewState is 0x28 before it, MonoViewState 0x28 after). FSceneViewStateReference = {vptr, FSceneViewStateInterface* Reference, list link}."
+    },
+    {
+      "name": "AWorldSettings::WorldToMeters",
+      "kind": "offset",
+      "pattern": "F3 41 0F 10 9C 24 ?? ?? ?? ?? 4C 8D 85 DC 00 00 00",
+      "resolve": {
+        "type": "i32",
+        "offset": 6
+      },
+      "expect": "0x488",
+      "desc": "Offset of float WorldToMeters in AWorldSettings, read by GetProjectionData for CalculateStereoViewOffset."
+    },
+    {
+      "name": "IStereoRendering slot IsStereoEnabledOnNextFrame",
+      "kind": "slot",
+      "pattern": "FF 50 ?? 84 C0 74 49 48 8B 05 ?? ?? ?? ??",
+      "resolve": {
+        "type": "u8",
+        "offset": 2
+      },
+      "expect": "0x8",
+      "desc": "Call in FSceneViewport::InitDynamicRHI."
+    },
+    {
+      "name": "IStereoRendering slot AdjustViewRect",
+      "kind": "slot",
+      "pattern": "FF 50 ?? 0F B6 4C 24 30 48 8B 56 30",
+      "resolve": {
+        "type": "u8",
+        "offset": 2
+      },
+      "expect": "0x18",
+      "desc": "Call in ULocalPlayer::GetProjectionData."
+    },
+    {
+      "name": "IStereoRendering slot CalculateStereoViewOffset",
+      "kind": "slot",
+      "pattern": "FF 50 ?? 4D 85 F6 74 2E",
+      "resolve": {
+        "type": "u8",
+        "offset": 2
+      },
+      "expect": "0x28",
+      "desc": "Call in ULocalPlayer::GetProjectionData."
+    },
+    {
+      "name": "IStereoRendering slot GetStereoProjectionMatrix",
+      "kind": "slot",
+      "pattern": "FF 50 ?? 8B 4C 24 40 44 8B 44 24 38",
+      "resolve": {
+        "type": "u8",
+        "offset": 2
+      },
+      "expect": "0x30",
+      "desc": "Call in ULocalPlayer::GetProjectionData."
+    },
+    {
+      "name": "IStereoRendering slot InitCanvasFromView",
+      "kind": "slot",
+      "pattern": "FF 50 ?? EB 3C 0F 28 87 20 02 00 00",
+      "resolve": {
+        "type": "u8",
+        "offset": 2
+      },
+      "expect": "0x38",
+      "desc": "Call in the canvas setup (UCanvas update from a view)."
+    },
+    {
+      "name": "IStereoRendering slot RenderTexture_RenderThread",
+      "kind": "slot",
+      "pattern": "FF 50 ?? 48 8B 4C 24 60 48 85 C9 74 34",
+      "resolve": {
+        "type": "u8",
+        "offset": 2
+      },
+      "expect": "0x48",
+      "desc": "Call in FSlateRHIRenderer::DrawWindow_RenderThread."
+    },
+    {
+      "name": "IStereoRendering slot GetRenderTargetManager",
+      "kind": "slot",
+      "pattern": "FF 50 ?? 48 89 45 90 4C 8B F0",
+      "resolve": {
+        "type": "u8",
+        "offset": 2
+      },
+      "expect": "0x60",
+      "desc": "Call in FSceneViewport::InitDynamicRHI."
+    },
+    {
+      "name": "IStereoRenderTargetManager slot UpdateViewport",
+      "kind": "slot",
+      "pattern": "FF 50 ?? 48 85 DB 74 22 83 6B 08 01 75 1C 48 8B 03 48 8B CB FF 10 83 6B 0C 01 75 0E 48 8B 03 BA 01 00 00 00 48 8B CB FF 50 08 48 8B 8D A8 04 00 00",
+      "resolve": {
+        "type": "u8",
+        "offset": 2
+      },
+      "expect": "0x8",
+      "desc": "Call at the end of FSceneViewport::EnqueueBeginRenderFrame."
+    },
+    {
+      "name": "IStereoRenderTargetManager slot CalculateRenderTargetSize",
+      "kind": "slot",
+      "pattern": "41 FF 52 ?? 49 8B 16",
+      "resolve": {
+        "type": "u8",
+        "offset": 3
+      },
+      "expect": "0x10",
+      "desc": "Call in FSceneViewport::InitDynamicRHI."
+    },
+    {
+      "name": "IStereoRenderTargetManager slot NeedReAllocateViewportRenderTarget",
+      "kind": "slot",
+      "pattern": "FF 50 ?? 84 C0 74 31 8B 87 C4 00 00 00",
+      "resolve": {
+        "type": "u8",
+        "offset": 2
+      },
+      "expect": "0x18",
+      "desc": "Call in FSceneViewport::EnqueueBeginRenderFrame."
+    },
+    {
+      "name": "IStereoRenderTargetManager slot NeedReAllocateDepthTexture",
+      "kind": "slot",
+      "pattern": "FF 50 ?? 84 C0 74 13 48 8B 4F 68",
+      "resolve": {
+        "type": "u8",
+        "offset": 2
+      },
+      "expect": "0x20",
+      "desc": "Call in the renderer's scene depth allocation."
+    },
+    {
+      "name": "IStereoRenderTargetManager slot GetNumberOfBufferedFrames",
+      "kind": "slot",
+      "pattern": "FF 52 ?? 89 87 10 03 00 00",
+      "resolve": {
+        "type": "u8",
+        "offset": 2
+      },
+      "expect": "0x28",
+      "desc": "Call in FSceneViewport::InitDynamicRHI."
+    },
+    {
+      "name": "IStereoRenderTargetManager slot AllocateRenderTargetTexture",
+      "kind": "slot",
+      "pattern": "FF 50 ?? 84 C0 75 47 44 0F B6 05 ?? ?? ?? ??",
+      "resolve": {
+        "type": "u8",
+        "offset": 2
+      },
+      "expect": "0x30",
+      "desc": "Call in FSceneViewport::InitDynamicRHI."
+    },
+    {
+      "name": "FViewport slot IsStereoRenderingAllowed",
+      "kind": "slot",
+      "pattern": "FF 90 ?? ?? ?? ?? 84 C0 74 20 48 8B 05 ?? ?? ?? ??",
+      "resolve": {
+        "type": "i32",
+        "offset": 2
+      },
+      "expect": "0x180",
+      "desc": "Call in FSceneViewport::EnqueueBeginRenderFrame."
+    },
+    {
+      "name": "FViewport slot UpdateViewportRHI",
+      "kind": "slot",
+      "pattern": "41 FF 92 ?? ?? ?? ?? 48 8B 4F 50",
+      "resolve": {
+        "type": "i32",
+        "offset": 3
+      },
+      "expect": "0x190",
+      "desc": "Call in FSceneViewport::EnqueueBeginRenderFrame."
+    },
+    {
+      "name": "UEngine slot InitializeHMDDevice",
+      "kind": "slot",
+      "pattern": "FF 90 ?? ?? ?? ?? 44 38 25 ?? ?? ?? ?? 74 08",
+      "resolve": {
+        "type": "i32",
+        "offset": 2
+      },
+      "expect": "0x378",
+      "desc": "Call in UEngine::Init."
+    },
+    {
+      "name": "ULocalPlayer slot CalcSceneView",
+      "kind": "slot",
+      "pattern": "FF 90 ?? ?? ?? ?? 48 89 44 24 68 48 8B D0",
+      "resolve": {
+        "type": "i32",
+        "offset": 2
+      },
+      "expect": "0x248",
+      "desc": "Call in UGameViewportClient::Draw."
+    },
+    {
+      "name": "GNearClippingPlane",
+      "kind": "global",
+      "pattern": "F3 0F 10 05 ?? ?? ?? ?? EB 05 F3 0F 10 46 0C",
+      "resolve": {
+        "type": "rip",
+        "insn": 0,
+        "disp": 4,
+        "len": 8
+      },
+      "expect": "0x53a49e4",
+      "desc": "float GNearClippingPlane (engine near plane in cm). Read by the engine's own GetStereoProjectionMatrix and used as the Z term of the reversed-Z infinite projection."
     }
   ]
 }

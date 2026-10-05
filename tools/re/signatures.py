@@ -9,7 +9,8 @@ can apply them unchanged:
   "resolve": {"type": "rip",   "insn": 7, "disp": 3, "len": 7}
         value = RVA of (match + insn) + len + int32 at (match + insn + disp)
         Used for globals (mov reg,[rip+x]), vtables (lea reg,[rip+x]) and
-        call targets (E8 rel32: disp 1, len 5).
+        call targets (E8 rel32: disp 1, len 5). An optional "add" is added to
+        the result (when the code addresses a member of a global object).
   "resolve": {"type": "match", "offset": 0}
         value = RVA of (match + offset). Used when the pattern sits at a
         function start or at a patch site.
@@ -125,7 +126,7 @@ def apply_rule(img: Image, match: int, rule: dict):
     t = rule["type"]
     if t == "rip":
         insn = match + rule.get("insn", 0)
-        return insn + rule["len"] + img.i32(insn + rule["disp"])
+        return insn + rule["len"] + img.i32(insn + rule["disp"]) + rule.get("add", 0)
     if t == "match":
         return match + rule.get("offset", 0)
     if t == "i32":
