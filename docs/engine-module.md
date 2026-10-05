@@ -798,6 +798,16 @@ about 140 per minute); 20 recenters and 40 stereo switches were logged, `submit 
 the bloom fix `missed 0` for 75180 frames. Eye captures at the start, after the first
 loop, in the middle and at the end (`s00` to `s03`) show the scene correctly in both eyes.
 
+Private bytes in the samples taken while stereo rendered rose by about 28 MB per minute
+over that run (10.4-10.8 GB in the first third, 10.6-11.1 GB in the last) while the
+character went from the rooms to the slums outdoors. A second run of 7 minutes standing
+still (`captures/soak/runS`, 20 loops of Insert twice, End, Home twice, the command menu;
+samples every 20 s) shows no such rise: private bytes 10406 to 11023 MB with the last
+sample (10580) below the third (10508 at 1 minute was the lowest after start-up), handles
+2660 to 2673, GPU memory 7.5 to 7.6 GB, no warning or error. So the switches and keys do
+not leak; the rise while walking is most likely the game streaming the areas it reached,
+not proven either way.
+
 The same configuration on SteamVR's null driver (OpenXR, eyes 1512x1680, `captures/soak/runV`),
 4 minutes of the same loops with SteamVR closed in the middle the way a user quits it:
 the runtime moved the session through STOPPING to EXITING, the render module ended it in
