@@ -50,6 +50,10 @@ becomes a 1280x720 window for that session only.
 If a session was interrupted or anything looks wrong in the game folder, double-click
 `restore.cmd` (harmless when nothing needs doing). Save games are not touched.
 
+Without the launcher: unzip the `-dropin.zip` into the game's `End\Binaries\Win64`
+folder and start `ff7vr-start.cmd` there (a start from Steam crashes for now); see
+`GUIDE.md`, "Installing without the launcher".
+
 ## Controls
 
 The game's own controls are unchanged. The mod adds these; the keys work while the
