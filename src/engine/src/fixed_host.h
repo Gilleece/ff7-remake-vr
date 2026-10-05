@@ -29,6 +29,8 @@ public:
         HostFov fov_left{};      // right eye mirrors left/right
         float ipd_metres = 0.064f;
         HeadMotion motion = HeadMotion::Static;
+        float head_yaw_deg = 0.0f;    // fixed head rotation added to the motion script (positive = left, OpenXR)
+        float head_pitch_deg = 0.0f;  // positive = up
     };
 
     static Options from_config(const Config& cfg);

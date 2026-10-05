@@ -11,13 +11,15 @@ facts) and `docs/re/stereo-hook-plan.md` (the design this module implements).
 
 ## What it hooks
 
-Nothing in the game's code is patched for stereo. Two slots of the `UGameEngine` vtable
-are replaced, and one data member is written:
+Two slots of the `UGameEngine` vtable are replaced, one engine member and one engine
+global are written, and two single bytes of code can be changed:
 
 | What | Where | Why |
 |---|---|---|
 | `UEngine::InitializeHMDDevice` | `UGameEngine` vtable slot 111, swapped at process start | after the engine's own code has run, our device is stored in `GEngine->StereoRenderingDevice` (`+0xD50`, shared pointer with a static reference controller). This happens inside `UEngine::Init`, before the game viewport and the local player exist, so the engine allocates the per-eye view states itself (TAA, occlusion and eye adaptation history per eye) |
 | `UGameEngine::Tick` | `UGameEngine` vtable slot 78 | per-frame point on the game thread: fetches the frame's eye views from the host (for OpenXR this is where the frame wait happens), decides whether this frame is stereo, applies queued console variable writes |
+| `GSystemResolution` | engine global | only while stereo renders: set to the eye target size, because this build sizes its scene buffers from it (`docs/re/engine.md` section 8); the game's value is put back when stereo stops |
+| windowed-fullscreen view rect | the `jne` at RVA `0x3018fb8` in `ULocalPlayer::CalcSceneView` | only while stereo renders: made unconditional so that, in windowed fullscreen, the game does not replace the eye rects with the full screen |
 | light sort-key immediate | one byte in `FDeferredShadingSceneRenderer::RenderLights` | only when `[stereo] light_fix = 1` or the `stereo lightfix 1` command |
 
 Everything else goes through the device's own function tables, which the engine calls:
@@ -49,27 +51,36 @@ Signature names match `tools/re/signatures.json`; keep both in sync.
 ```
 game thread, UGameEngine::Tick (our hook)
     host.begin_game_frame(wanted, frame)     views, frame id, "can this frame be stereo"
-    stereo this frame = wanted && frame.stereo
-  ... UGameViewportClient::Draw
+    GSystemResolution = eye target size       (while stereo)
+  ... FSceneViewport::EnqueueBeginRenderFrame
+    ShouldUseSeparateRenderTarget / NeedReAllocateViewportRenderTarget / UpdateViewport
+  ... UGameViewportClient::Draw               (same Tick: both eyes use this frame's views)
     AdjustViewRect                            left eye [0, w) x [0, h), right eye [w, 2w)
     CalculateStereoViewOffset                 eye camera (below)
     GetStereoProjectionMatrix                 asymmetric projection from the eye's FOV
-  ... FSceneViewport::EnqueueBeginRenderFrame
-    ShouldUseSeparateRenderTarget / NeedReAllocateViewportRenderTarget
+  end of Tick: frame id and views queued for the render thread
 render thread
     FSceneViewport::InitDynamicRHI (on reallocation): CalculateRenderTargetSize = 2w x h
     scene renders both eyes into the separate target
     Slate DrawWindow_RenderThread -> RenderTexture_RenderThread
-        host.eye_texture_ready(texture, eye rects, frame id)
-        appends an RHI command that draws the desktop mirror into the back buffer
+        appends the frame-end command to the RHI command list
 RHI thread (this game runs D3D11 with one)
-    executes the recorded commands in order: scene, our mirror command, Slate UI, Present
-        (the render module copies the eye rects into the XR swapchains at Present)
+    executes the recorded commands in order: scene, frame-end command, Slate UI, Present
+    frame-end command: host.eye_texture_ready(texture, eye rects, frame id, views)
+                       desktop mirror blit into the back buffer
+    Present (the render module copies the eye rects into the XR swapchains)
 ```
 
-The engine renders in stereo only in frames the host confirms; in other frames the device
-reports stereo off and the engine renders the normal window (the separate target is
-released and reallocated at the next stereo frame).
+The eye texture is handed over on the presenting thread immediately before the Present
+that ends the frame, so its content is exactly that frame's image. The game thread can be
+two frames ahead of that Present; the frame id and the views travel with the frame through
+the render thread to the RHI thread (`docs/re/engine.md`, "Frame pipeline").
+
+The engine renders in stereo while stereo is wanted and the host provides frames. A frame
+for which the host has no XR frame (a late frame, a hitch) is still rendered in stereo with
+the last views, so the eye target is not released; after 45 such frames in a row, or when
+stereo is switched off, the engine renders the normal window (the separate target is
+released and reallocated when stereo resumes, which costs a short hitch).
 
 ## Hosts: where the eye size and views come from
 
@@ -82,6 +93,15 @@ released and reallocated at the next stereo frame).
 
 With the render host and no running XR session (no headset), every frame is mono: the
 game runs normally on the desktop.
+
+How the render host pairs images with XR frames: the render module ends its waited XR
+frames in order, one per Present, and the engine has up to two frames in flight between the
+wait (game thread) and Present, so the XR frame a Present ends is not always the one the
+image was rendered for (right after stereo starts, the Presents of the last mono frames
+end the first stereo frames). Since the image is handed over right before its own Present,
+the host offers it for every XR frame that Present may end (the open ones, at most four),
+each time with the views it was really rendered with (`StereoSubmit::renderedViews`), so the
+runtime re-projects it correctly whichever frame carries it.
 
 ## The eye camera
 
@@ -133,6 +153,13 @@ Choices for a seated player in a third-person game:
 | `ipd_mm` | `64` | fixed host |
 | `head_motion` | `static` | fixed host: `static`, `yaw`, `sway`, `yawsway` (same scripts as the XR Null backend) |
 
+Two more sections hold console variables (names are case-insensitive):
+
+| Section | Meaning |
+|---|---|
+| `[cvars]` | `name = value`, set once when the device is installed (inside `UEngine::Init`, before the game creates its viewport and UI) |
+| `[stereo_cvars]` | `name = value`, held only while the engine renders in stereo: each variable's value is saved when stereo starts and put back when it stops |
+
 ## Dev commands
 
 Through the dev pipe (`[dev] pipe = 1`, `tools\dev\send-input.ps1 -Pipe "<command>"`):
@@ -144,6 +171,7 @@ Through the dev pipe (`[dev] pipe = 1`, `tools\dev\send-input.ps1 -Pipe "<comman
 | `stereo on` / `stereo off` | switch stereo from the next frame |
 | `stereo mirror <crop\|left\|right\|both\|off>` | desktop mirror |
 | `stereo eye <w> <h>`, `stereo fov <l> <r> <u> <d>`, `stereo ipd <mm>`, `stereo motion <...>` | fixed host values |
+| `stereo head <yaw> [pitch]` | fixed host: a fixed head rotation in degrees (left and up positive), added to the motion script |
 | `stereo scale <f>`, `stereo pitch <0\|1>`, `stereo positional <0\|1>` | camera settings |
 | `stereo lightfix <0\|1>` | light sort-key patch |
 | `stereo log <n>` | log the eye cameras of the next n stereo frames |

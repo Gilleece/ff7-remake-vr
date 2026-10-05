@@ -8,6 +8,7 @@
 //   stereo fov <l> <r> <u> <d>    left eye FOV in degrees (built-in fixed host; right eye mirrored)
 //   stereo ipd <mm>               (built-in fixed host)
 //   stereo motion <static|yaw|sway|yawsway>   scripted head motion (built-in fixed host)
+//   stereo head <yaw> [pitch]     fixed head rotation in degrees, left / up positive (built-in fixed host)
 //   stereo scale <f>              world scale
 //   stereo pitch <0|1>            decoupled pitch
 //   stereo positional <0|1>
@@ -96,6 +97,13 @@ std::string stereo_command(const std::vector<std::string>& a) {
     if (c == "ipd" && a.size() == 3 && fixed && to_float(a[2], v[0])) {
         auto o = fixed->options();
         o.ipd_metres = static_cast<float>(v[0] / 1000.0);
+        fixed->set_options(o);
+        return "ok " + fixed->describe();
+    }
+    if (c == "head" && (a.size() == 3 || a.size() == 4) && fixed && to_float(a[2], v[0]) && (a.size() == 3 || to_float(a[3], v[1]))) {
+        auto o = fixed->options();
+        o.head_yaw_deg = static_cast<float>(v[0]);
+        o.head_pitch_deg = static_cast<float>(a.size() == 4 ? v[1] : 0.0);
         fixed->set_options(o);
         return "ok " + fixed->describe();
     }

@@ -73,10 +73,10 @@ void FixedStereoHost::set_options(const Options& o) {
 std::string FixedStereoHost::describe() const {
     std::lock_guard lock(mutex_);
     const double r2d = 180.0 / kPi;
-    return std::format("fixed host: {}x{} per eye, left eye FOV L{:.1f} R{:.1f} U{:.1f} D{:.1f} deg, IPD {:.1f} mm, motion {}",
-                       opt_.eye_width, opt_.eye_height, opt_.fov_left.angleLeft * r2d, opt_.fov_left.angleRight * r2d,
-                       opt_.fov_left.angleUp * r2d, opt_.fov_left.angleDown * r2d, opt_.ipd_metres * 1000.0,
-                       to_string(opt_.motion));
+    return std::format(
+        "fixed host: {}x{} per eye, left eye FOV L{:.1f} R{:.1f} U{:.1f} D{:.1f} deg, IPD {:.1f} mm, motion {}, head yaw {:.1f} pitch {:.1f} deg",
+        opt_.eye_width, opt_.eye_height, opt_.fov_left.angleLeft * r2d, opt_.fov_left.angleRight * r2d, opt_.fov_left.angleUp * r2d,
+        opt_.fov_left.angleDown * r2d, opt_.ipd_metres * 1000.0, to_string(opt_.motion), opt_.head_yaw_deg, opt_.head_pitch_deg);
 }
 
 bool FixedStereoHost::eye_render_size(std::uint32_t& width, std::uint32_t& height) {
@@ -93,7 +93,17 @@ void FixedStereoHost::begin_game_frame(bool stereo_wanted, GameFrame& out) {
     HostPose head;
     const bool yaw = opt_.motion == HeadMotion::YawSweep || opt_.motion == HeadMotion::YawAndSway;
     const bool sway = opt_.motion == HeadMotion::Sway || opt_.motion == HeadMotion::YawAndSway;
-    if (yaw) head.orientation = quat_about_y(30.0 * kDegToRad * std::sin(2 * kPi * t / 8.0));
+    double yaw_rad = opt_.head_yaw_deg * kDegToRad;
+    if (yaw) yaw_rad += 30.0 * kDegToRad * std::sin(2 * kPi * t / 8.0);
+    head.orientation = quat_about_y(yaw_rad);
+    if (opt_.head_pitch_deg != 0.0f) {
+        // Pitch about the head's own X axis after the yaw: q = yaw * pitch.
+        const double hp = opt_.head_pitch_deg * kDegToRad / 2;
+        const HostQuat p{static_cast<float>(std::sin(hp)), 0.0f, 0.0f, static_cast<float>(std::cos(hp))};
+        const HostQuat y = head.orientation;
+        head.orientation = HostQuat{y.w * p.x + y.x * p.w + y.y * p.z - y.z * p.y, y.w * p.y - y.x * p.z + y.y * p.w + y.z * p.x,
+                                    y.w * p.z + y.x * p.y - y.y * p.x + y.z * p.w, y.w * p.w - y.x * p.x - y.y * p.y - y.z * p.z};
+    }
     if (sway) {
         head.position.x = static_cast<float>(0.03 * std::sin(2 * kPi * t / 4.0));
         head.position.y = static_cast<float>(0.02 * std::sin(2 * kPi * t / 3.0));

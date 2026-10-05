@@ -538,6 +538,26 @@ allocates the separate target with `RHICreateTargetableShaderResource2D(..., For
   by C++ code. How that material maps view pixels to UI pixels decides what each eye
   shows (see section 6 and the measurements in `docs/re/stereo-hook-plan.md`).
 
+### What the UI composite does with an eye view (LIVE, per-eye captures)
+
+Measured with 2064x2208 eyes (Null backend captures, gameplay HUD: distance bar at the top,
+area name banner at the top left, "Commands Menu" prompt at the bottom left):
+
+- The composite always maps the full UI height to the view height and the UI width as if
+  the UI were 16:9 ("cover"): each eye shows the central `2064 / (2208 x 16/9) = 52.6 %` of
+  the UI width at the correct aspect. The distance bar is 2.04x its 1920x1080 size (2208 /
+  1080); the banner and the prompt are outside the visible part (only the end of the
+  prompt's line reaches the left edge). Same with the default size rule and with
+  `r.InGameUI.FixedWidth/Height = 1920x1080`.
+- With the fixed size at the eye's aspect (1032x1104, 1920x2054, 2064x2208, after a stereo
+  off/on cycle so that the pooled UI target is reallocated) the UI is laid out on the
+  narrow canvas, but the composite still treats it as 16:9: the central 52.6 % of the
+  canvas is stretched about 1.9x horizontally (text visibly widened), the banner is still
+  cut at the left edge and the prompt is not visible.
+- So no combination of the two size variables shows the whole UI undistorted in an eye;
+  the composite's mapping itself has to change (or the UI has to go to its own layer).
+- The UI is at zero parallax (identical position in both eyes), drawn over the scene.
+
 ## Tools
 
 All in `tools/re/`, run with the repo's `.venv` Python. The exe is found through Steam's

@@ -6,6 +6,7 @@
 
 #include <windows.h>
 
+#include <format>
 #include <mutex>
 #include <utility>
 #include <vector>
@@ -125,6 +126,37 @@ void apply_pending() {
         work.swap(g_pending);
     }
     for (auto& [n, v] : work) set_now(n, v);
+}
+
+namespace {
+std::vector<std::pair<std::wstring, std::wstring>> g_stereo_overrides;  // set before the engine starts
+std::vector<std::pair<std::wstring, std::wstring>> g_saved;             // game thread
+bool g_overrides_on = false;
+}  // namespace
+
+void set_stereo_overrides(std::vector<std::pair<std::wstring, std::wstring>> overrides) {
+    g_stereo_overrides = std::move(overrides);
+}
+
+void stereo_overrides(bool on) {
+    if (on == g_overrides_on) return;
+    g_overrides_on = on;
+    if (on) {
+        g_saved.clear();
+        for (const auto& [name, value] : g_stereo_overrides) {
+            const auto cur = get(name);
+            if (!cur) {
+                log::warn("cvar: {} not found ([stereo_cvars])", log::narrow(name));
+                continue;
+            }
+            // Integer variables accept the float text ("2" for 2.0).
+            g_saved.emplace_back(name, log::widen(std::format("{}", cur->f)));
+            set_now(name, value);
+        }
+    } else {
+        for (const auto& [name, value] : g_saved) set_now(name, value);
+        g_saved.clear();
+    }
 }
 
 }  // namespace ff7vr::engine::cvar

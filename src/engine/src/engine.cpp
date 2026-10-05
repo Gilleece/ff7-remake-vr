@@ -175,13 +175,21 @@ bool start(const StartupContext& ctx) {
         if (mirror::parse_mode(cfg.get_string("stereo", "mirror", "crop"), mode)) s.mirror = static_cast<int>(mode);
         s.log_frames = static_cast<int>(cfg.get_int("stereo", "log_frames", 0));
         fixed_options() = FixedStereoHost::from_config(cfg);
+        std::vector<std::pair<std::wstring, std::wstring>> stereo_cvars;
         for (const std::string& line : cfg.dump()) {
-            // "cvars.<name> = <value>"
+            // "cvars.<name> = <value>" (set once when the device is installed) and
+            // "stereo_cvars.<name> = <value>" (held only while stereo renders)
             constexpr std::string_view prefix = "cvars.";
+            constexpr std::string_view stereo_prefix = "stereo_cvars.";
             const std::size_t eq = line.find(" = ");
-            if (line.rfind(prefix, 0) != 0 || eq == std::string::npos) continue;
-            g_opt.cvars.emplace_back(line.substr(prefix.size(), eq - prefix.size()), line.substr(eq + 3));
+            if (eq == std::string::npos) continue;
+            if (line.rfind(prefix, 0) == 0)
+                g_opt.cvars.emplace_back(line.substr(prefix.size(), eq - prefix.size()), line.substr(eq + 3));
+            else if (line.rfind(stereo_prefix, 0) == 0)
+                stereo_cvars.emplace_back(log::widen(line.substr(stereo_prefix.size(), eq - stereo_prefix.size())),
+                                          log::widen(line.substr(eq + 3)));
         }
+        cvar::set_stereo_overrides(std::move(stereo_cvars));
 #if FF7VR_ENGINE_WITH_RENDER
         g_opt.host = cfg.get_string("stereo", "host", "render");
 #else

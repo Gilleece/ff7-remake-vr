@@ -15,6 +15,8 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace ff7vr::engine::cvar {
 
@@ -34,5 +36,12 @@ bool set(std::wstring_view name, std::wstring_view value);
 
 // Game thread, called once per frame by the engine module: applies queued writes.
 void apply_pending();
+
+// Values that hold only while the engine renders in stereo ([stereo_cvars] in ff7vr.ini).
+// set_stereo_overrides() before stereo starts; stereo_overrides(true) on the game thread
+// when stereo rendering starts saves each variable's current value and sets the override,
+// stereo_overrides(false) when it stops puts the saved values back.
+void set_stereo_overrides(std::vector<std::pair<std::wstring, std::wstring>> overrides);
+void stereo_overrides(bool on);
 
 }  // namespace ff7vr::engine::cvar

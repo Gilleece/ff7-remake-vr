@@ -7,6 +7,7 @@
 
 #include "ff7vr/core/log.h"
 #include "ff7vr/core/module.h"
+#include "ff7vr/engine/cvars.h"
 
 #include <d3d11.h>
 
@@ -573,9 +574,11 @@ void tick_begin() {
             g.eye_h = g.want_h;
             g_rt_size = pack(g.eye_w, g.eye_h);
             fixes::set_view_rect_patch(true);
+            cvar::stereo_overrides(true);
         } else {
             fixes::restore_system_resolution();
             fixes::set_view_rect_patch(false);
+            cvar::stereo_overrides(false);
             g.host_gap = 0;
         }
         g_active = frame_stereo;
