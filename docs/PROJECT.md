@@ -9,7 +9,7 @@ The game can already be played in VR through UEVR, but the result is visually po
 1. **Main goal:** native stereo VR camera for the normal third-person game, with performance clearly better than UEVR on the same machine and headset resolution. Input stays the normal gamepad/keyboard input. No motion controllers.
 2. **Stretch goal:** a first-person camera that can be toggled, on by default outside combat, switching automatically to third person in combat.
 
-"Better than UEVR" has to be shown with numbers, so a repeatable benchmark against UEVR is part of the project (milestone M4).
+A benchmark harness (`docs/benchmarking.md`) measures any configuration of the game the same way without a headset. Comparisons with UEVR are meant to be made on the real headset, where they count.
 
 ## Target
 
@@ -25,8 +25,9 @@ The game can already be played in VR through UEVR, but the result is visually po
 ### What UEVR's behaviour on this game tells us
 
 - UEVR runs this game on D3D11 with **Native Stereo** plus its native stereo fix. So the engine's own stereo path works in this build.
-- The usual UEVR profile sets `VR_DisableHZBOcclusion=true` and `VR_DisableInstanceCulling=true`. Both cost performance. Fixing the underlying stereo problem instead of disabling them is a candidate win.
-- The community UEVR plugin for this game logs `Found GSystemResolution` and `Found light flag bit manipulation ... Patched`. So lights break in stereo without a patch, and resolution handling needs help.
+- The usual UEVR profile sets `VR_DisableHZBOcclusion=true` and `VR_DisableInstanceCulling=true`. Measured on this game, neither costs anything: the game already runs with `r.HZBOcclusion=0`, and the instance culling variable does not exist in this engine version.
+- UEVR's native stereo fix renders the scene twice per frame, once per eye, into separate targets.
+- The community UEVR plugin for this game logs `Found GSystemResolution` and `Found light flag bit manipulation ... Patched`. This build sizes its scene buffers from `GSystemResolution`, so the stereo device sets it to the eye target size. The light patch made no visible difference in the scenes tested and is off.
 - A separate movie-fix plugin exists, so pre-rendered movies need handling. There is also a community "disable vignette" mod.
 - The game imports XInput 1.3.
 
@@ -41,26 +42,29 @@ Reasons for choosing this over alternate-eye rendering as the primary mode:
 - It gives correct stereo every frame with no temporal ghosting.
 - An alternate-eye ("sequential") mode can be added later on the same hooks as a performance option.
 
-Where the performance win over UEVR is expected to come from:
-- Keeping HZB occlusion and instance culling on by fixing them for stereo.
-- Fixed foveated rendering through NVAPI variable rate shading on D3D11.
-- A VR-specific preset of engine cvars, and removing passes that are wasted in VR.
-- Fewer frame copies and no generic framework overhead.
-- Later: DLSS through coexistence with the Luma mod.
+Where performance comes from, and what is left:
+- One scene render for both eyes, sharing game-thread work and shadow passes.
+- Fixed foveated rendering through NVAPI variable rate shading on D3D11 (implemented, `docs/render.md`).
+- A VR-specific preset of engine cvars (measured and documented in `docs/engine-module.md`, not applied by default).
+- Few frame copies and no generic framework overhead.
+- Later: DLSS through coexistence with the Luma mod. At headset resolutions the frame is dominated by per-pixel GPU work, so rendering fewer pixels is where the larger gains are.
 
 ### Modules
 
 ```
 src/loader/   the DLL the game loads (proxy DLL). Bootstraps everything else
 src/core/     logging, config, hook wrappers, pattern scanner, crash handler
-src/engine/   UE4.18/FF7R bindings: signatures, offsets, GEngine, stereo device, camera
-src/xr/       XR backend abstraction: OpenXR D3D11 backend and a Null backend
-src/render/   D3D11 hooks, engine render target to XR swapchain, capture to PNG
-src/dev/      debug command channel, scripted input, capture commands
+src/engine/   UE4.18/FF7R bindings: signatures, stereo device, camera modes (third and first person),
+              in-game UI layer hooks, player controls, console variables
+src/xr/       XR backend abstraction: OpenXR D3D11 backend and a Null backend, quad layers
+src/render/   D3D11 hooks, XR session inside the game, virtual screen, UI layer, foveated rendering, capture to PNG
+src/dev/      frame timer and benchmark commands
 tools/dev/    PowerShell: build, deploy, launch, kill, restore, SteamVR null setup
+tools/bench/  benchmark runner and comparison
+tools/package/  release package: launcher with restore, player ini
 tools/re/     Python reverse-engineering scripts
 tools/xr_smoke/  standalone D3D11 test app for the XR layer
-docs/         this file and findings (docs/re/)
+docs/         this file, module documentation and findings (docs/re/); the user guide is README.md
 third_party/  fetched dependencies
 _ref/         reference clones such as UEVR source (gitignored, read-only)
 ```
@@ -86,6 +90,10 @@ The XR layer has two backends behind one interface:
 | M1 | Stereo in the engine | Our stereo device is installed, the game renders side-by-side stereo in gameplay, and per-eye PNGs captured through the Null backend look correct. Scripted input can get from launch into a loaded save |
 | M2 | OpenXR end to end | Per-eye images go to the OpenXR runtime with correct poses, projection and frame pacing. Verified headless on SteamVR null. Recenter and world scale work |
 | M3 | Correctness | Known stereo bugs fixed (lights, vignette, movies). HUD and menus are readable (quad layer or equivalent). Cutscenes behave |
-| M4 | Performance | Benchmark harness compares the mod with UEVR at the same resolution and scene. Performance features land until we are clearly ahead |
+| M4 | Performance | Benchmark harness measures any configuration the same way. Performance features: one scene render for both eyes, foveated rendering, an optional cvar preset |
 | M5 | Stretch | First-person camera toggle, automatic third person in combat |
 | M6 | Packaging | Install and uninstall scripts, user README, Virtual Desktop defaults, a first-run test checklist |
+
+### State on 2026-10-05
+
+M0 to M2, M5 and M6 are done as far as they can be without a headset: everything was verified with the Null backend, with SteamVR's null driver and with per-eye captures, and nothing has been seen through a lens yet. M3: the in-game UI is on its own layer and the right-eye bloom fault is fixed; movies, cutscenes, conversations and combat have not been reached in testing. M4: foveated rendering is in and on by default; the cvar preset is documented but not applied. `README.md` lists what is untested and the known problems.
