@@ -64,6 +64,8 @@ bool Config::load_from_string(std::string_view text) {
         if (!value.empty() && value.front() == '"') {
             size_t close = value.find('"', 1);
             value = value.substr(1, close == std::string_view::npos ? value.size() - 1 : close - 1);
+        } else if (!value.empty() && (value.front() == ';' || value.front() == '#')) {
+            value = {};  // "key =   ; comment": an empty value followed by a comment
         } else {
             // Inline comment: " ;" or " #" after the value.
             for (size_t i = 1; i < value.size(); ++i) {

@@ -72,13 +72,14 @@ static const char* volatile g_keep = "ff7vr-unique-test-string-42";
 
 static void test_config() {
     Config cfg;
-    cfg.load_from_string("\xEF\xBB\xBFtop=1\n[Log]\nLevel = debug ; comment\n[xr]\nwidth=0x10\nscale=1.5\nname=\"a ; b\"\nenabled=on\n");
+    cfg.load_from_string("\xEF\xBB\xBFtop=1\n[Log]\nLevel = debug ; comment\n[xr]\nwidth=0x10\nscale=1.5\nname=\"a ; b\"\nenabled=on\nempty =   ; nothing\n");
     CHECK(cfg.get_int("", "top", 0) == 1);
     CHECK(cfg.get_string("log", "level", "") == "debug");
     CHECK(cfg.get_int("XR", "WIDTH", 0) == 16);
     CHECK(cfg.get_float("xr", "scale", 0) == 1.5);
     CHECK(cfg.get_string("xr", "name", "") == "a ; b");
     CHECK(cfg.get_bool("xr", "enabled", false));
+    CHECK(cfg.has("xr", "empty") && cfg.get_string("xr", "empty", "x").empty());
     CHECK(cfg.get_int("xr", "missing", 7) == 7);
     Config missing;
     CHECK(!missing.load(L"Z:\\does\\not\\exist.ini"));
