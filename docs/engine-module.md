@@ -138,7 +138,7 @@ Choices for a seated player in a third-person game:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `enabled` | `0` | `1`: install the stereo device; `0`: nothing is hooked, the game runs unmodified |
+| `enabled` | `1` | `1`: install the stereo device; `0`: nothing is hooked, the game runs unmodified |
 | `start_in_stereo` | `1` | stereo switched on from the start (frames are still mono until the host can show them) |
 | `host` | `render` | `render` or `fixed` (see above) |
 | `world_scale` | `1.0` | multiplies WorldToMeters for the head offset and IPD |
@@ -212,7 +212,39 @@ engine: build 1.0.0.7 (known), signatures resolved in ... ms, layout checks pass
 engine: stereo device installed at GEngine+0xd50 (stereo on at start)
 engine: local player view states ... (three distinct, per-eye history available)
 stereo: rendering STEREO from tick ... (eye WxH, ...)
-stereo: render target size 2Wx H (window ...)
+fixes: GSystemResolution 1280x720 -> 2WxH while stereo renders (scene buffers cover the eye target)
+stereo: render target size 2WxH (window ...)
 stereo: views built inside UGameEngine::Tick (...)
 frame time: ... frames, avg ... ms ... (stereo, eye WxH)
 ```
+
+With the render host, the render module's `status` command shows the stereo frames it
+ended (`submitted ... stereo N`, `submit errors 0`).
+
+`stereo head <yaw> [pitch]` with the fixed host checks that the world stays fixed when the
+head turns: with a 90 degree symmetric FOV (focal length = half the eye width in pixels)
+a 10 degree turn moves the image centre by `f * tan(10 deg)`.
+
+## Measured
+
+Gameplay, first room of the save used by the harness, 1280x720 window, no XR session
+(fixed host), the game's 120 fps cap lifted (`t.MaxFPS 0`), RTX 5080 / Ryzen 7 5800X3D:
+
+| Rendering | Frame time avg | p95 |
+|---|---|---|
+| mono, 1280x720 window (device installed, stereo off) | 2.24 ms | 2.52 ms |
+| stereo 2 x 2064x2208 | 7.0 ms | 7.4 ms |
+| stereo 2 x 2500x2600 | 8.6 ms | 9.0 ms |
+
+## Known problems
+
+- The right eye shows a faint ghost of the left eye's image on glossy surfaces and around
+  lamps, strong with asymmetric headset FOVs; it comes from the post-processing chain
+  (`docs/re/engine.md` section 6, "Evaluation").
+- The in-game UI is composited into each eye as a central crop of the 16:9 UI; the size
+  variables cannot fix that (`docs/re/engine.md`, "What the UI composite does with an eye
+  view").
+- With a real OpenXR runtime the render module must hand the frame its XR thread already
+  waited to the game thread at the start of stereo instead of waiting a second one
+  (`XrController::BeginGameFrame`); otherwise the game thread blocks in `xrWaitFrame`
+  forever when the pipeline is idle (seen with SteamVR's null driver).

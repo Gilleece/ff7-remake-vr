@@ -163,7 +163,7 @@ bool on_game_thread() { return GetCurrentThreadId() == g_game_thread.load(); }
 bool start(const StartupContext& ctx) {
     try {
         const Config& cfg = *ctx.config;
-        g_opt.enabled = cfg.get_bool("stereo", "enabled", false);
+        g_opt.enabled = cfg.get_bool("stereo", "enabled", true);
         g_opt.start_in_stereo = cfg.get_bool("stereo", "start_in_stereo", true);
         g_opt.allow_unknown_build = cfg.get_bool("stereo", "allow_unknown_build", false);
         g_opt.light_fix = cfg.get_bool("stereo", "light_fix", false);
