@@ -12,7 +12,7 @@
   -DelayMs is the pause between presses (default 400; menus ignore presses
   that come too fast).
 
-  -Pipe sends raw lines to \\.\pipe\ff7vr-dev, served by the mod when
+  -Pipe sends raw lines (separated by ';') to \\.\pipe\ff7vr-dev, served by the mod when
   ff7vr.ini has [dev] pipe=1 (see src\loader\dev_input.h): 'ping',
   'mark <text>' (writes a marker into ff7vr.log), and virtual XInput pad
   commands ('tap A', 'stick L 0 1 500', ...). Note: in the current game build
@@ -22,7 +22,7 @@
 .EXAMPLE
   powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev\send-input.ps1 -Keys enter
   powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev\send-input.ps1 -Keys "down*2,wait:500,enter"
-  powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev\send-input.ps1 -Pipe "ping","mark before-test"
+  powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev\send-input.ps1 -Pipe "ping;mark before-test"
 #>
 param(
     [string]$Keys = '',
@@ -51,6 +51,8 @@ if ($Keys) {
     }
 }
 
+# 'powershell -File' passes an array argument as one string, so ';' also separates commands.
+$Pipe = @($Pipe | ForEach-Object { $_ -split ';' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 if ($Pipe.Count -gt 0) {
     $replies = @(Send-DevCommand $Pipe)
     for ($i = 0; $i -lt $replies.Count; $i++) { Write-Output ("{0} -> {1}" -f $Pipe[$i], $replies[$i]) }

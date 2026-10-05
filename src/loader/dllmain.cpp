@@ -43,6 +43,12 @@ void log_identity(const std::filesystem::path& dll_dir) {
               module::timestamp(game.base));
     log::info("exe: module base 0x{:x} size 0x{:x} ({} MB)", game.base, game.size, game.size >> 20);
     log::info("process: pid {}, command line: {}", GetCurrentProcessId(), log::narrow(GetCommandLineW()));
+    // Variables that tell how the game was started and which XR runtime it will use.
+    for (const wchar_t* name : {L"XR_RUNTIME_JSON", L"SteamAppId", L"SteamGameId", L"SteamClientLaunch"}) {
+        wchar_t value[1024] = {};
+        DWORD n = GetEnvironmentVariableW(name, value, static_cast<DWORD>(std::size(value)));
+        log::info("env: {}={}", log::narrow(name), n > 0 && n < std::size(value) ? log::narrow(value) : "(unset)");
+    }
     log::info("config: {} ({})", log::narrow((dll_dir / L"ff7vr.ini").wstring()),
               g_config.loaded() ? "loaded" : "not found, using defaults");
     for (const auto& line : g_config.dump()) log::info("config:   {}", line);
@@ -85,6 +91,7 @@ DWORD WINAPI bootstrap(void*) {
     ctx.game_size = game.size;
     ctx.is_game = _wcsicmp(game.path.filename().c_str(), L"ff7remake_.exe") == 0;
     loader::start_modules(ctx);
+    log::info("ff7vr: initialised, idle");
 
     // Debug aid for testing the crash path in the real game: [debug] crash_after_seconds=N
     if (auto secs = g_config.get_int("debug", "crash_after_seconds", 0); secs > 0) {
@@ -94,8 +101,6 @@ DWORD WINAPI bootstrap(void*) {
         volatile int* p = nullptr;
         *p = 1;
     }
-
-    log::info("ff7vr: initialised, idle");
     return 0;
 }
 

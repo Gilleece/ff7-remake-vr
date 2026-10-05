@@ -224,6 +224,9 @@ public static class Native {
         }, IntPtr.Zero);
         return list.ToArray();
     }
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode)] static extern uint GetLongPathName(string shortPath, StringBuilder sb, uint max);
+    // Expands 8.3 short names (PROGRA~1 style) so paths compare reliably.
+    public static string LongPath(string p) { var sb = new StringBuilder(32768); uint n = GetLongPathName(p, sb, 32768); return (n > 0 && n < 32768) ? sb.ToString() : p; }
     public static string Title(IntPtr h) { var sb = new StringBuilder(512); GetWindowText(h, sb, 512); return sb.ToString(); }
     public static string ClassOf(IntPtr h) { var sb = new StringBuilder(256); GetClassName(h, sb, 256); return sb.ToString(); }
 
@@ -436,7 +439,8 @@ function Read-SharedText([string]$path) {
 $script:BackupScopes = @('Steam', 'Saved\Config')
 
 function Get-RelativePath([string]$base, [string]$full) {
-    $b = $base.TrimEnd('\') + '\'
+    $full = [FF7VR.Native]::LongPath($full)
+    $b = [FF7VR.Native]::LongPath($base).TrimEnd('\') + '\'
     if ($full.StartsWith($b, [System.StringComparison]::OrdinalIgnoreCase)) { return $full.Substring($b.Length) }
     throw "$full is not under $base"
 }

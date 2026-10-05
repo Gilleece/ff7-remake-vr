@@ -5,7 +5,7 @@
 .DESCRIPTION
   1. Takes the game lock (.locks\game), waiting up to -LockWaitSeconds.
   2. Backs up the save folder if no verified backup exists yet (backup-saves.ps1).
-  3. Renames Luma/ReShade's dxgi.dll to dxgi.dll.vr-disabled.
+  3. Renames Luma/ReShade's dxgi.dll to dxgi.dll.vr-disabled (not with -KeepLuma).
   4. Deploys the mod from the build directory (deploy.ps1), unless -NoMod.
   5. Starts End\Binaries\Win64\ff7remake_.exe directly with -d3d11, windowed
      at -Width x -Height unless -Fullscreen (see docs\dev-harness.md for why
@@ -19,7 +19,7 @@
      With -KeepRunning, run stop.ps1 when done.
 
   Exit code 0 when every requested step succeeded. Environment variables for
-  the game can be passed with -GameEnv NAME=value (they reach the game because
+  the game can be passed with -GameEnv NAME=value[;NAME2=value2] (they reach the game because
   it is started directly).
 
 .EXAMPLE
@@ -44,6 +44,7 @@ param(
     [string]$ScreenshotPath = '',
     [switch]$KeepRunning,
     [switch]$NoMod,
+    [switch]$KeepLuma,
     [switch]$Fullscreen,
     [int]$Width = 1280,
     [int]$Height = 720,
@@ -78,7 +79,8 @@ $startedLock = $true
 try {
     [void](Backup-Saves -ifMissing)
 
-    Write-Step ('Luma/ReShade dxgi.dll: ' + (Disable-Luma))
+    if ($KeepLuma) { Write-Step 'Luma/ReShade dxgi.dll left enabled (-KeepLuma)' }
+    else { Write-Step ('Luma/ReShade dxgi.dll: ' + (Disable-Luma)) }
     [void](Save-RuntimeFiles ($runStamp + '-stale'))
     if ($NoMod) {
         if (Read-DeployManifest) { [void](Invoke-Undeploy) }
@@ -88,7 +90,8 @@ try {
     }
 
     $envVars = @{}
-    foreach ($kv in $GameEnv) {
+    # 'powershell -File' passes an array argument as one string, so ';' also separates entries.
+    foreach ($kv in @($GameEnv | ForEach-Object { $_ -split ';' } | Where-Object { $_ })) {
         $i = $kv.IndexOf('=')
         if ($i -lt 1) { throw "Bad -GameEnv entry '$kv' (expected NAME=value)" }
         $envVars[$kv.Substring(0, $i)] = $kv.Substring($i + 1)
@@ -111,8 +114,8 @@ try {
 
     if (-not $NoMod) {
         $logPath = Get-GameLogPath
-        $loaded = Wait-Until { Test-LogContains $logPath 'ff7vr: initialised' } 60 500 'ff7vr.log to show the mod loaded'
-        if (-not $loaded) { throw "The mod did not report in $logPath" }
+        $loaded = Wait-Until { if (Test-LogContains $logPath 'ff7vr: initialised') { 'yes' } elseif (@(Get-GameProcesses).Count -eq 0) { 'exited' } } 60 500 'ff7vr.log to show the mod loaded'
+        if ($loaded -ne 'yes') { throw "The mod did not report in $logPath ($(if ($loaded) { 'game exited' } else { 'timeout' }))" }
         $first = @((Read-SharedText $logPath) -split "`r?`n" | Where-Object { $_ -match ' loaded \(commit ' })
         if ($first.Count -gt 0) { Write-Step ("Mod loaded: " + $first[0].Substring(24)) }
     }
@@ -132,9 +135,15 @@ try {
             $failures += "log pattern '$WaitLog' not seen"
         }
     }
-    if ($WaitSeconds -gt 0) { Write-Step "Waiting $WaitSeconds s"; Start-Sleep -Seconds $WaitSeconds }
+    if ($WaitSeconds -gt 0) {
+        Write-Step "Waiting $WaitSeconds s"
+        $end = (Get-Date).AddSeconds($WaitSeconds)
+        while ((Get-Date) -lt $end -and @(Get-GameProcesses).Count -gt 0) { Start-Sleep -Milliseconds 500 }
+    }
 
-    if ($Screenshot -or $ScreenshotPath) {
+    if (($Screenshot -or $ScreenshotPath) -and @(Get-GameProcesses).Count -eq 0) {
+        Write-Step 'No screenshot: the game is not running'
+    } elseif ($Screenshot -or $ScreenshotPath) {
         $path = $ScreenshotPath
         if (-not $path) { $path = New-CapturePath $Until }
         elseif (-not [System.IO.Path]::IsPathRooted($path)) { $path = Join-Path (Get-Location) $path }
