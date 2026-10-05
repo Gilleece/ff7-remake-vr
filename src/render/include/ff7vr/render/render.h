@@ -103,4 +103,36 @@ struct StereoSubmit {
 // RT, before the frame's Present. Records the image; the Present hook submits it.
 void SubmitStereoFrame(const StereoSubmit& submit);
 
+// ============================ UI LAYER =====================================
+// In stereo the game's in-game UI (HUD, command menu, menus, dialogue) is drawn
+// once into its own texture and shown on a quad layer floating in front of the
+// user, instead of being composited into each eye at zero parallax. The engine
+// module redirects it (src/engine/src/ui_layer.cpp) and reports each frame's UI
+// texture from the presenting thread, before that frame's Present:
+//
+//   if (UiLayerWanted()) { ...keep the UI out of the eye images... }
+//   presenting thread:  SubmitUiLayer({texture, ..., redirected = true});
+//   Present (this module): the frame's stereo image goes out as the projection
+//                          layer and the UI texture is copied into the UI quad.
+//
+// Frames ended with a stereo image and a redirected UI show the quad; frames
+// that re-show the last stereo image keep the quad's last image; frames shown on
+// the virtual screen never show it (their UI is in the game's own image).
+// ===========================================================================
+struct UiLayerSource {
+    ID3D11Texture2D* texture = nullptr;            // holds this frame's UI in (0,0,width,height)
+    DXGI_FORMAT viewFormat = DXGI_FORMAT_UNKNOWN;  // typed format to read it with (required for typeless textures)
+    xr::ColorEncoding encoding = xr::ColorEncoding::Linear;
+    uint32_t width = 0, height = 0;
+    xr::SourceAlpha alpha = xr::SourceAlpha::PremultipliedInverted;
+    bool redirected = true;  // false: the UI was composited into the frame as usual (reported only for diagnostics)
+};
+// Any thread. True while the UI should go to its own layer: stereo mode, an XR
+// session runs and the layer is switched on ([ui] layer, `ui on|off`).
+bool UiLayerWanted();
+// Any thread. True while a `ui dump` waits for the next UI texture.
+bool UiDumpRequested();
+// Presenting thread, before the frame's Present (after the frame's UI was drawn).
+void SubmitUiLayer(const UiLayerSource& source);
+
 }  // namespace ff7vr::render

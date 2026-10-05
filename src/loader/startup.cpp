@@ -34,6 +34,7 @@
 #endif
 #if FF7VR_HAVE_ENGINE
 #include "ff7vr/engine/engine.h"
+#include "ff7vr/engine/ui_layer.h"
 #endif
 #if FF7VR_HAVE_RENDER
 #include "ff7vr/render/render.h"
@@ -50,6 +51,7 @@ void start_modules(const StartupContext& ctx) {
 #if FF7VR_HAVE_ENGINE
     // Stereo device in the engine ([stereo] keys, gated by [stereo] enabled inside the module).
     ff7vr::engine::start(ctx);
+    ff7vr::engine::start_ui_layer(ctx);  // in-game UI on its own layer in stereo ([ui] keys)
 #endif
 #if FF7VR_HAVE_RENDER
     // D3D11 hooks and the XR session (src/xr is driven by the render module; [xr] keys configure it).

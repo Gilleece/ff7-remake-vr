@@ -51,6 +51,8 @@ void XrController::Start(const RenderConfig& cfg) {
     if (started_.exchange(true)) return;
     cfg_ = cfg;
     waitOnPresent_ = cfg_.waitOnPresentThread;
+    uiOn_ = cfg_.uiLayer;
+    uiMirror_ = cfg_.uiMirror;
     if (cfg_.stereoTest) mode_ = Mode::Stereo;
     lastStatsQpc_ = QpcNow();
     thread_ = std::thread([this] { ThreadMain(); });
@@ -219,6 +221,9 @@ void XrController::TryInit() {
         backend_ = std::move(be);
         screenLayer_ = 0;
         screenW_ = screenH_ = 0;
+        uiLayer_ = 0;
+        uiW_ = uiH_ = uiSrcW_ = uiSrcH_ = 0;
+        uiShownLast_ = false;
     }
     {
         std::lock_guard lk(queueMutex_);
@@ -320,6 +325,9 @@ void XrController::Teardown(TeardownReason why, const char* text) {
         }
         screenLayer_ = 0;
         screenW_ = screenH_ = 0;
+        uiLayer_ = 0;
+        uiW_ = uiH_ = uiSrcW_ = uiSrcH_ = 0;
+        uiShownLast_ = false;
         lastStereoQpc_ = 0;
     }
     {
@@ -351,10 +359,11 @@ void XrController::LogStats() {
     const double seconds = QpcToMs(QpcNow() - lastStatsQpc_) / 1000.0;
     const xr::SessionState st = ready_.load() ? backend_->GetState() : xr::SessionState::Uninitialized;
     if (frames == 0 && !ready_.load()) return;  // nothing happening, keep the log quiet
-    log::info("timing: last {:.1f} s, {:.1f} fps; xr {} ({}); mode {}; presents {} submitted screen {} stereo {} held {} without XR frame {} errors {}",
+    log::info("timing: last {:.1f} s, {:.1f} fps; xr {} ({}); mode {}; presents {} submitted screen {} stereo {} held {} without XR frame {} errors {}; "
+              "ui layer {} held {} dropped {}",
               seconds, seconds > 0 ? double(frames) / seconds : 0.0, ready_.load() ? BackendName(cfg_.backend) : "off", xr::ToString(st),
               ModeName(mode_.load()), presents_.load(), submittedScreen_.load(), submittedStereo_.load(), heldStereo_.load(),
-              presentsWithoutFrame_.load(), submitErrors_.load());
+              presentsWithoutFrame_.load(), submitErrors_.load(), uiSubmitted_.load(), uiHeld_.load(), uiDropped_.load());
     std::string runtimeCalls;
     if (ready_.load()) {
         std::lock_guard rl(rtMutex_);
@@ -436,9 +445,69 @@ bool XrController::EnsureScreenLayer(const PresentInfo& p) {
     return true;
 }
 
-void XrController::SubmitOne(const PresentInfo& p, const Waited& w) {
+bool XrController::EnsureUiLayer(const UiLayerSource& s) {
+    const DXGI_FORMAT fmt = TypedFormat(s.viewFormat);
+    if (uiLayer_ && uiSrcW_ == s.width && uiSrcH_ == s.height && uiFmt_ == fmt) return true;
+    if (uiLayer_) backend_->DestroyQuadLayer(uiLayer_);
+    uiLayer_ = 0;
+    uiShownLast_ = false;
+    // Layer image: [ui] layer_width wide (never wider than the game's UI texture), the UI's
+    // aspect ratio. A larger UI texture is scaled down when it is copied in.
+    uint32_t w = cfg_.uiLayerWidth ? std::min(cfg_.uiLayerWidth, s.width) : s.width;
+    uint32_t h = static_cast<uint32_t>(std::lround(double(w) * s.height / std::max(1u, s.width)));
+    w = std::max(1u, w);
+    h = std::max(1u, h);
+    const xr::QuadLayerCreateDesc qd{w, h, fmt};
+    const xr::Result r = backend_->CreateQuadLayer(qd, &uiLayer_);
+    if (r != xr::Result::Ok) {
+        static std::atomic<uint64_t> fails{0};
+        if (PowerOfTwo(++fails)) log::error("xr: UI layer {}x{} could not be created: {}", w, h, xr::ToString(r));
+        uiLayer_ = 0;
+        return false;
+    }
+    uiSrcW_ = s.width;
+    uiSrcH_ = s.height;
+    uiFmt_ = fmt;
+    xr::SwapchainInfo si;
+    backend_->GetQuadLayerInfo(uiLayer_, &si);
+    uiW_ = si.width;
+    uiH_ = si.height;
+    log::info("xr: UI layer {}x{} {} for the game's {}x{} {} UI texture", si.width, si.height, xr::DxgiFormatName(si.format), s.width,
+              s.height, xr::DxgiFormatName(s.viewFormat));
+    return true;
+}
+
+// The UI of a redirected frame is in neither eye image, so the desktop window (which shows
+// a crop of an eye in stereo) gets it drawn on top: the whole 16:9 UI over the whole window
+// (letterboxed if the window has another aspect), blended like the game draws its UI.
+void XrController::DrawUiOnWindow(const PresentInfo& p, const PendingUi& ui) {
+    if (!uiMirror_.load(std::memory_order_relaxed) || !ui.src.redirected || !ui.texture || !p.backBuffer) return;
+    const double sa = double(ui.src.width) / std::max(1u, ui.src.height), wa = double(p.width) / std::max(1u, p.height);
+    xr::Rect r{0, 0, p.width, p.height};
+    if (wa > sa) {
+        r.width = static_cast<uint32_t>(std::lround(p.height * sa));
+        r.x = static_cast<int32_t>((p.width - r.width) / 2);
+    } else if (wa < sa) {
+        r.height = static_cast<uint32_t>(std::lround(p.width / sa));
+        r.y = static_cast<int32_t>((p.height - r.height) / 2);
+    }
+    xr::QuadLayer q;
+    q.texture = ui.texture.Get();
+    q.viewFormat = ui.src.viewFormat;
+    q.encoding = ui.src.encoding;
+    q.rect = xr::Rect{0, 0, ui.src.width, ui.src.height};
+    q.sourceAlpha = ui.src.alpha;
+    const bool linear = p.format == DXGI_FORMAT_R16G16B16A16_FLOAT;
+    if (!backend_->DrawOverlay(q, p.backBuffer, TypedFormat(p.format), linear ? xr::ColorEncoding::Linear : xr::ColorEncoding::Srgb, r)) {
+        static std::atomic<uint64_t> fails{0};
+        if (PowerOfTwo(++fails)) log::warn("render: the UI could not be drawn over the desktop window ({} times)", fails.load());
+    }
+}
+
+void XrController::SubmitOne(const PresentInfo& p, const Waited& w, const PendingUi* ui) {
     xr::SubmitDesc d;
     xr::QuadLayer q;
+    xr::QuadLayer uq;
     StereoSubmit s;
     ComPtr<ID3D11Texture2D> stereoTex;
     bool stereo = false;
@@ -472,7 +541,43 @@ void XrController::SubmitOne(const PresentInfo& p, const Waited& w) {
         d.texture = p.backBuffer;
         d.viewFormat = TypedFormat(p.format);
         d.eyes[0].update = d.eyes[1].update = false;
-    } else {
+    }
+    bool uiShown = false;
+    if (stereo || hold) {
+        // The in-game UI on its own layer, over the eye images: new content when the
+        // engine redirected this frame's UI, the last image again when this frame
+        // re-shows the last stereo image.
+        const bool fresh = stereo && ui && ui->src.redirected && ui->texture;
+        if ((fresh && EnsureUiLayer(ui->src)) || (!fresh && hold && uiShownLast_ && uiLayer_)) {
+            float dist, size, ox, oy;
+            bool follow;
+            {
+                std::lock_guard lk(uiMutex_);
+                dist = cfg_.uiDistance;
+                size = cfg_.uiSize;
+                ox = cfg_.uiOffsetX;
+                oy = cfg_.uiOffsetY;
+                follow = cfg_.uiFollowHead;
+            }
+            uq.layer = uiLayer_;
+            if (fresh) {
+                uq.texture = ui->texture.Get();
+                uq.viewFormat = ui->src.viewFormat;
+                uq.encoding = ui->src.encoding;
+                uq.rect = xr::Rect{0, 0, ui->src.width, ui->src.height};
+                uq.sourceAlpha = ui->src.alpha;
+            }
+            uq.space = follow ? xr::LayerSpace::Head : xr::LayerSpace::World;
+            uq.pose.position = xr::Vec3{ox, oy, -dist};
+            uq.height = size;
+            uq.width = size * float(uiSrcW_) / float(std::max(1u, uiSrcH_));
+            uq.alphaBlend = true;
+            d.quads = &uq;
+            d.quadCount = 1;
+            uiShown = true;
+        }
+    }
+    if (!stereo && !hold) {
         if (!EnsureScreenLayer(p)) {
             backend_->SkipFrame(w.info.frameId);
             return;
@@ -489,12 +594,15 @@ void XrController::SubmitOne(const PresentInfo& p, const Waited& w) {
         d.quadCount = 1;
     }
     if (cfg_.gpuTiming) gpu_.Begin(p.device, p.context);
+    if (ui) DrawUiOnWindow(p, *ui);
     const int64_t t0 = QpcNow();
     const xr::Result r = backend_->SubmitFrame(w.info.frameId, d);
     GetTiming().submit.Add(QpcToMs(QpcNow() - t0));
     if (cfg_.gpuTiming) gpu_.End(p.context);
     if (r == xr::Result::Ok) {
+        if (uiShown) ++(uq.texture ? uiSubmitted_ : uiHeld_);
         if (stereo) {
+            uiShownLast_ = uiShown;
             ++submittedStereo_;
             lastStereoQpc_ = QpcNow();
         } else if (hold) {
@@ -510,6 +618,34 @@ void XrController::SubmitOne(const PresentInfo& p, const Waited& w) {
 
 void XrController::OnPresent(const PresentInfo& p) {
     ++presents_;
+    // The UI texture reported for this frame (before its Present) belongs to this Present only.
+    PendingUi ui;
+    bool haveUi = false;
+    {
+        std::lock_guard lk(uiMutex_);
+        if (havePendingUi_) {
+            ui = std::move(pendingUi_);
+            pendingUi_ = PendingUi{};
+            havePendingUi_ = false;
+            haveUi = true;
+        }
+    }
+    if (haveUi && uiDumpRequested_.load() && ui.texture) {
+        std::string path, err;
+        {
+            std::lock_guard lk(uiMutex_);
+            path = uiDumpPath_;
+        }
+        const bool ok = xr::WriteTexturePng(p.context, ui.texture.Get(), path, &err);
+        {
+            std::lock_guard lk(uiMutex_);
+            uiDumpResult_ = ok ? std::format("ok {} ({}x{} UI in a {} texture, {})", path, ui.src.width, ui.src.height,
+                                             xr::DxgiFormatName(ui.src.viewFormat), ui.src.redirected ? "redirected" : "composited")
+                               : "err " + err;
+            uiDumpRequested_ = false;
+        }
+        uiDumpCv_.notify_all();
+    }
     {
         std::lock_guard lk(devMutex_);
         if (seenDevice_.Get() != p.device) {
@@ -569,13 +705,17 @@ void XrController::OnPresent(const PresentInfo& p) {
         std::lock_guard lk(queueMutex_);
         if (queue_.empty()) {
             ++presentsWithoutFrame_;
+            if (haveUi && ui.src.redirected) {
+                ++uiDropped_;
+                DrawUiOnWindow(p, ui);
+            }
             return;
         }
         w = queue_.front();
         queue_.pop_front();
     }
     queueCv_.notify_all();
-    SubmitOne(p, w);
+    SubmitOne(p, w, haveUi ? &ui : nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -604,13 +744,22 @@ StereoFrame XrController::BeginGameFrame() {
     }
     std::lock_guard wl(waitMutex_);
     if (!ready_.load() || stopping_.load()) return f;
+    xr::FrameInfo fi;
+    bool adopted = false;
     {
         // The XR thread may have waited a frame while it still paced (hand-over): at most two ahead.
         std::lock_guard lk(queueMutex_);
         if (queue_.size() >= 2) return f;
+        if (queue_.size() == 1 && !queue_.front().fromGameThread) {
+            // Take that frame over instead of waiting another one: a runtime blocks a second
+            // xrWaitFrame until this frame is begun, which only a Present does, and when the
+            // game's pipeline is idle no Present comes until this game frame is rendered.
+            queue_.front().fromGameThread = true;
+            fi = queue_.front().info;
+            adopted = true;
+        }
     }
-    xr::FrameInfo fi;
-    if (!WaitOne(true, &fi)) return f;
+    if (!adopted && !WaitOne(true, &fi)) return f;
     f.stereo = true;
     f.frameId = fi.frameId;
     f.shouldRender = fi.shouldRender;
@@ -637,6 +786,83 @@ void XrController::SubmitStereoFrame(const StereoSubmit& s) {
     }
     stereoQueue_.push_back(std::move(ps));
     while (stereoQueue_.size() > 4) stereoQueue_.pop_front();
+}
+
+bool XrController::UiLayerWanted() const {
+    return uiOn_.load(std::memory_order_relaxed) && mode_.load(std::memory_order_relaxed) == Mode::Stereo &&
+           ready_.load(std::memory_order_acquire) && !stopping_.load(std::memory_order_relaxed);
+}
+
+void XrController::SubmitUiLayer(const UiLayerSource& s) {
+    if (!s.texture || !s.width || !s.height) return;
+    std::lock_guard lk(uiMutex_);
+    pendingUi_.src = s;
+    pendingUi_.src.texture = nullptr;
+    pendingUi_.texture = s.texture;  // until this frame's Present
+    havePendingUi_ = true;
+}
+
+std::string XrController::UiCommand(const std::string& args) {
+    const std::string verb = args.substr(0, args.find(' '));
+    std::string rest = verb.size() < args.size() ? args.substr(verb.size() + 1) : std::string();
+    auto number = [](const std::string& t, float* out) {
+        const char* b = t.data();
+        const char* e = t.data() + t.size();
+        while (b < e && *b == ' ') ++b;
+        const auto [ptr, ec] = std::from_chars(b, e, *out);
+        return ec == std::errc();
+    };
+    const char* usage =
+        "err usage: ui status | on | off | dump <png path> | distance <m> | size <m> | offset <x m> <y m> | follow <0|1> | mirror <0|1>";
+    if (verb.empty() || verb == "status") {
+        std::lock_guard lk(uiMutex_);
+        return std::format("ok ui layer {} ({}), {:.2f} m high at {:.2f} m, offset {:.2f} {:.2f}, {}, on the window {}; image {}x{} from {}x{}; "
+                           "frames {} held {} dropped {}",
+                           uiOn_.load() ? "on" : "off", UiLayerWanted() ? "active" : "inactive", cfg_.uiSize, cfg_.uiDistance, cfg_.uiOffsetX,
+                           cfg_.uiOffsetY, cfg_.uiFollowHead ? "head-locked" : "world-locked", uiMirror_.load() ? "too" : "no", uiW_, uiH_,
+                           uiSrcW_, uiSrcH_, uiSubmitted_.load(), uiHeld_.load(), uiDropped_.load());
+    }
+    if (verb == "on" || verb == "off") {
+        uiOn_ = verb == "on";
+        log::info("render: UI layer {}", verb);
+        return "ok ui " + verb;
+    }
+    if (verb == "dump") {
+        while (!rest.empty() && rest.back() == ' ') rest.pop_back();
+        if (rest.size() >= 2 && rest.front() == '"' && rest.back() == '"') rest = rest.substr(1, rest.size() - 2);
+        if (rest.empty()) return usage;
+        std::filesystem::path path = std::filesystem::path(log::widen(rest));
+        if (path.is_relative()) path = cfg_.captureDir / path;
+        std::unique_lock lk(uiMutex_);
+        uiDumpPath_ = log::narrow(path.wstring());
+        uiDumpResult_.clear();
+        uiDumpRequested_ = true;
+        if (!uiDumpCv_.wait_for(lk, std::chrono::seconds(5), [&] { return !uiDumpResult_.empty(); })) {
+            uiDumpRequested_ = false;
+            return "err no UI texture reported within 5 s";
+        }
+        return uiDumpResult_;
+    }
+    float v = 0, v2 = 0;
+    std::lock_guard lk(uiMutex_);
+    const size_t sp = rest.find(' ');
+    if (verb == "distance" && number(rest, &v)) {
+        cfg_.uiDistance = std::clamp(v, 0.3f, 50.0f);
+    } else if (verb == "size" && number(rest, &v)) {
+        cfg_.uiSize = std::clamp(v, 0.05f, 50.0f);
+    } else if (verb == "offset" && sp != std::string::npos && number(rest, &v) && number(rest.substr(sp + 1), &v2)) {
+        cfg_.uiOffsetX = std::clamp(v, -20.0f, 20.0f);
+        cfg_.uiOffsetY = std::clamp(v2, -20.0f, 20.0f);
+    } else if (verb == "follow" && number(rest, &v)) {
+        cfg_.uiFollowHead = v != 0.0f;
+    } else if (verb == "mirror" && number(rest, &v)) {
+        uiMirror_ = v != 0.0f;
+    } else {
+        return usage;
+    }
+    log::info("render: UI layer {:.2f} m high at {:.2f} m, offset {:.2f} {:.2f}, {}", cfg_.uiSize, cfg_.uiDistance, cfg_.uiOffsetX,
+              cfg_.uiOffsetY, cfg_.uiFollowHead ? "head-locked" : "world-locked");
+    return "ok";
 }
 
 // ---------------------------------------------------------------------------
@@ -670,6 +896,7 @@ std::string XrController::Status() {
     log::info("status: {}", xrLine);
     log::info("status: {}", counters);
     if (ready) log::info("status: screen layer for a {}x{} {} back buffer", screenW_, screenH_, xr::DxgiFormatName(screenFmt_));
+    log::info("status: {}", UiCommand("status").substr(3));
     Timing& t = GetTiming();
     if (ready)
         for (float ms : backend_->TakeGpuCopyTimes()) t.gpuCopy.Add(ms);

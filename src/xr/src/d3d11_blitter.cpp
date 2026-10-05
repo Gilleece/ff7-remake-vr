@@ -174,7 +174,8 @@ struct BlitConstants {
     float uvScale[2];
     uint32_t decodeSrgb;
     uint32_t alphaMode;  // BlitAlpha
-    uint32_t pad[2];
+    uint32_t encodeSrgb;  // 1: store gamma-encoded values (non-sRGB view of a gamma-encoded target)
+    uint32_t pad;
 };
 
 bool Blitter::Init(ID3D11Device* device, const Logger* log) {
@@ -209,6 +210,14 @@ bool Blitter::Init(ID3D11Device* device, const Logger* log) {
     bld.RenderTarget[0].BlendEnable = FALSE;
     bld.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
     if (SUCCEEDED(hr)) hr = device->CreateBlendState(&bld, &blend_);
+    bld.RenderTarget[0].BlendEnable = TRUE;
+    bld.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
+    bld.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+    bld.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    bld.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ZERO;
+    bld.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
+    bld.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    if (SUCCEEDED(hr)) hr = device->CreateBlendState(&bld, &blendOver_);
     D3D11_DEPTH_STENCIL_DESC dsd{};
     dsd.DepthEnable = FALSE;
     dsd.StencilEnable = FALSE;
@@ -230,6 +239,7 @@ void Blitter::Shutdown() {
     linearSampler_.Reset();
     rs_.Reset();
     blend_.Reset();
+    blendOver_.Reset();
     dss_.Reset();
     device_.Reset();
 }
@@ -464,6 +474,70 @@ bool Blitter::Transfer(ID3D11DeviceContext* ctx, const BlitSource& src, const Re
     if (usedPath) *usedPath = Path::Blit;
     if (outW) *outW = w;
     if (outH) *outH = h;
+    return true;
+}
+
+
+bool Blitter::BlendOver(ID3D11DeviceContext* ctx, const BlitSource& src, const Rect& rect, const BlitDest& dst) {
+    if (!src.texture || !dst.texture || dst.width == 0 || dst.height == 0) return false;
+    D3D11_TEXTURE2D_DESC sd{}, dd{};
+    src.texture->GetDesc(&sd);
+    dst.texture->GetDesc(&dd);
+    if (sd.SampleDesc.Count != 1 || !(sd.BindFlags & D3D11_BIND_SHADER_RESOURCE) || !(dd.BindFlags & D3D11_BIND_RENDER_TARGET)) {
+        if (!warnedOnce_) log_->Warn("blitter: overlay needs a sampleable source and a render-target destination");
+        warnedOnce_ = true;
+        return false;
+    }
+    DXGI_FORMAT srcFmt = src.viewFormat != DXGI_FORMAT_UNKNOWN ? src.viewFormat : sd.Format;
+    if (IsTypelessFormat(srcFmt)) srcFmt = DefaultTypedFormat(srcFmt);
+    if (!IsTypelessFormat(sd.Format) && TypelessFamily(srcFmt) == TypelessFamily(sd.Format)) srcFmt = sd.Format;
+    DXGI_FORMAT dstFmt = dst.viewFormat != DXGI_FORMAT_UNKNOWN ? dst.viewFormat : dd.Format;
+    if (IsTypelessFormat(dstFmt)) dstFmt = DefaultTypedFormat(dstFmt);
+    if (!IsTypelessFormat(dd.Format)) dstFmt = dd.Format;
+    const uint32_t mipW = std::max(1u, sd.Width >> src.mipLevel), mipH = std::max(1u, sd.Height >> src.mipLevel);
+    Rect r = rect;
+    if (r.width == 0 || r.height == 0) r = Rect{0, 0, mipW, mipH};
+    const ComPtr<ID3D11ShaderResourceView> srvRef = CreateSrv(src.texture, srcFmt, src.arraySlice, src.mipLevel);
+    ID3D11ShaderResourceView* srv = srvRef.Get();
+    ID3D11RenderTargetView* rtv = GetRtv(dst.texture, dstFmt, dst.arraySlice);
+    if (!srv || !rtv) return false;
+
+    D3D11_MAPPED_SUBRESOURCE m{};
+    if (FAILED(ctx->Map(cb_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return false;
+    BlitConstants c{};
+    c.uvOffset[0] = float(r.x) / mipW;
+    c.uvOffset[1] = float(r.y) / mipH;
+    c.uvScale[0] = float(r.width) / mipW;
+    c.uvScale[1] = float(r.height) / mipH;
+    c.decodeSrgb = (src.encoding == ColorEncoding::Srgb && !IsSrgbFormat(srcFmt)) ? 1u : 0u;
+    c.alphaMode = static_cast<uint32_t>(src.alpha == BlitAlpha::Opaque ? BlitAlpha::Premultiplied : src.alpha);
+    c.encodeSrgb = (dst.encoding == ColorEncoding::Srgb && !IsSrgbFormat(dstFmt)) ? 1u : 0u;
+    memcpy(m.pData, &c, sizeof(c));
+    ctx->Unmap(cb_.Get(), 0);
+
+    ctx->SetPredication(nullptr, FALSE);
+    ctx->IASetInputLayout(nullptr);
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx->VSSetShader(vs_.Get(), nullptr, 0);
+    ctx->GSSetShader(nullptr, nullptr, 0);
+    ctx->HSSetShader(nullptr, nullptr, 0);
+    ctx->DSSetShader(nullptr, nullptr, 0);
+    ctx->PSSetShader(ps_.Get(), nullptr, 0);
+    ctx->RSSetState(rs_.Get());
+    D3D11_VIEWPORT vp{float(dst.x), float(dst.y), float(dst.width), float(dst.height), 0, 1};
+    ctx->RSSetViewports(1, &vp);
+    ctx->OMSetRenderTargets(1, &rtv, nullptr);
+    const float bf[4] = {0, 0, 0, 0};
+    ctx->OMSetBlendState(blendOver_.Get(), bf, 0xFFFFFFFFu);
+    ctx->OMSetDepthStencilState(dss_.Get(), 0);
+    ID3D11Buffer* cbs[1] = {cb_.Get()};
+    ctx->PSSetConstantBuffers(0, 1, cbs);
+    ctx->PSSetShaderResources(0, 1, &srv);
+    ID3D11SamplerState* smp = linearSampler_.Get();
+    ctx->PSSetSamplers(0, 1, &smp);
+    ctx->Draw(3, 0);
+    ID3D11ShaderResourceView* nullSrv = nullptr;
+    ctx->PSSetShaderResources(0, 1, &nullSrv);
     return true;
 }
 

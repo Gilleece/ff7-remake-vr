@@ -81,6 +81,12 @@ struct BlitDest {
     DXGI_FORMAT viewFormat = DXGI_FORMAT_UNKNOWN;  // format the runtime interprets the image as
     uint32_t width = 0, height = 0;                // usable size of the destination
     uint32_t arraySlice = 0;
+    // Overlay drawing (BlendOver): the destination rectangle starts at (x, y) and is
+    // exactly width x height (the source is stretched to it).
+    int32_t x = 0, y = 0;
+    // How the destination stores colour when its view is not an _SRGB format: Linear
+    // (OpenXR swapchains) or Srgb (a game back buffer holding gamma-encoded values).
+    ColorEncoding encoding = ColorEncoding::Linear;
 };
 
 class Blitter {
@@ -104,6 +110,12 @@ public:
     // while any reference to a back buffer is alive).
     void Forget(ID3D11Texture2D* tex);
     void ClearCache();
+
+    // Draws src rect over dst's rectangle (x, y, width, height), stretched, blended as
+    // premultiplied alpha (dst = src + dst * (1 - src.a)). With dst.encoding Srgb and a
+    // non-sRGB view the blend happens on gamma-encoded values, like a game's own UI.
+    // Caller must have saved the context state.
+    bool BlendOver(ID3D11DeviceContext* ctx, const BlitSource& src, const Rect& rect, const BlitDest& dst);
 
 private:
     struct RtvEntry {
@@ -129,7 +141,7 @@ private:
     ComPtr<ID3D11Buffer> cb_;
     ComPtr<ID3D11SamplerState> pointSampler_, linearSampler_;
     ComPtr<ID3D11RasterizerState> rs_;
-    ComPtr<ID3D11BlendState> blend_;
+    ComPtr<ID3D11BlendState> blend_, blendOver_;
     ComPtr<ID3D11DepthStencilState> dss_;
     std::vector<RtvEntry> rtvs_;
     std::vector<TempEntry> temps_;

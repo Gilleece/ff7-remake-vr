@@ -394,6 +394,15 @@ public:
     // Any thread. Size and format of a layer's image; false if the handle is not valid.
     virtual bool GetQuadLayerInfo(LayerHandle layer, SwapchainInfo* out) const = 0;
 
+    // RT (same thread rules as SubmitFrame). Draws q.texture's q.rect over `target` at
+    // `targetRect`, stretched, blended with its alpha (q.sourceAlpha) the way a game draws
+    // its UI: for a desktop mirror of what the headset shows. targetEncoding: how the
+    // target stores colour when targetFormat is not an _SRGB format (a game back buffer:
+    // Srgb). Saves and restores the context state. Only q.texture, viewFormat, encoding,
+    // rect and sourceAlpha are used.
+    virtual bool DrawOverlay(const QuadLayer& q, ID3D11Texture2D* target, DXGI_FORMAT targetFormat, ColorEncoding targetEncoding,
+                             const Rect& targetRect) = 0;
+
     // Any thread. Recenter: make the current head yaw and position the new
     // origin (pitch/roll untouched). Applied from the next WaitFrame.
     virtual void Recenter() = 0;

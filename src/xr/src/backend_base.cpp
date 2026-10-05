@@ -355,6 +355,35 @@ BackendBase::QuadSlot* BackendBase::FindQuad(LayerHandle h) {
 
 const BackendBase::QuadSlot* BackendBase::FindQuad(LayerHandle h) const { return const_cast<BackendBase*>(this)->FindQuad(h); }
 
+bool BackendBase::DrawOverlay(const QuadLayer& q, ID3D11Texture2D* target, DXGI_FORMAT targetFormat, ColorEncoding targetEncoding,
+                              const Rect& targetRect) {
+    if (!context_ || !q.texture || !target || targetRect.width == 0 || targetRect.height == 0) return false;
+    BlitSource src;
+    src.texture = q.texture;
+    src.viewFormat = q.viewFormat;
+    src.encoding = q.encoding;
+    src.arraySlice = q.arraySlice;
+    src.mipLevel = q.mipLevel;
+    src.alpha = q.sourceAlpha == SourceAlpha::Straight              ? BlitAlpha::Straight
+                : q.sourceAlpha == SourceAlpha::PremultipliedInverted ? BlitAlpha::PremultipliedInverted
+                                                                      : BlitAlpha::Premultiplied;
+    BlitDest dst;
+    dst.texture = target;
+    dst.viewFormat = targetFormat;
+    dst.x = targetRect.x;
+    dst.y = targetRect.y;
+    dst.width = targetRect.width;
+    dst.height = targetRect.height;
+    dst.encoding = targetEncoding;
+    D3D11StateBackup state;
+    state.Save(context_.Get());
+    const bool ok = blitter_.BlendOver(context_.Get(), src, q.rect, dst);
+    state.Restore(context_.Get());
+    // Views of the target are cached by the blitter; a swap chain's back buffer must not stay referenced.
+    blitter_.Forget(target);
+    return ok;
+}
+
 bool BackendBase::GetQuadLayerInfo(LayerHandle layer, SwapchainInfo* out) const {
     std::lock_guard lk(quadMutex_);
     const QuadSlot* s = FindQuad(layer);

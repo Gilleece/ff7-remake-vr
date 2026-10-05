@@ -64,6 +64,16 @@ struct RenderConfig {
     float screenOffsetY = 0.0f;
     bool screenFollowHead = false;
     bool recenterOnStart = true;
+    // [ui] The in-game UI's own layer in stereo (docs/render.md, "UI layer"). Defaults
+    // follow the community UEVR profile for this game (UI_Distance 3.0, UI_Size 2.0,
+    // UI_FollowView false): a 16:9 UI 3.56 x 2 m at 3 m covers about 61 x 37 degrees.
+    bool uiLayer = true;
+    float uiDistance = 3.0f;
+    float uiSize = 2.0f;  // height in metres; the width follows the UI's aspect ratio
+    float uiOffsetX = 0.0f, uiOffsetY = 0.0f;
+    bool uiFollowHead = false;
+    uint32_t uiLayerWidth = 1920;  // width of the layer image; 0 = the game's UI texture width
+    bool uiMirror = true;          // draw the UI over the desktop window too (it is not in the eye images)
 };
 
 class XrController {
@@ -95,8 +105,17 @@ public:
     bool GetEyeSetup(EyeSetup* out);
     StereoFrame BeginGameFrame();
     void SubmitStereoFrame(const StereoSubmit& s);
+    bool UiLayerWanted() const;
+    bool UiDumpRequested() const { return uiDumpRequested_.load(); }
+    void SubmitUiLayer(const UiLayerSource& s);
+    std::string UiCommand(const std::string& args);
 
 private:
+    // UI texture reported for the coming Present (presenting thread).
+    struct PendingUi {
+        UiLayerSource src;
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+    };
     struct Waited {
         xr::FrameInfo info;
         bool fromGameThread = false;
@@ -114,7 +133,9 @@ private:
 
     // RT helpers (caller holds rtMutex_).
     bool EnsureScreenLayer(const PresentInfo& p);
-    void SubmitOne(const PresentInfo& p, const Waited& w);
+    bool EnsureUiLayer(const UiLayerSource& s);
+    void SubmitOne(const PresentInfo& p, const Waited& w, const PendingUi* ui);
+    void DrawUiOnWindow(const PresentInfo& p, const PendingUi& ui);
     void ParkPoint();
 
     RenderConfig cfg_;
@@ -191,6 +212,23 @@ private:
     xr::LayerHandle screenLayer_ = 0;
     uint32_t screenW_ = 0, screenH_ = 0;
     DXGI_FORMAT screenFmt_ = DXGI_FORMAT_UNKNOWN;
+
+    // UI layer. Placement may change at run time (`ui` command): read under uiMutex_.
+    std::mutex uiMutex_;
+    std::atomic<bool> uiOn_{true};
+    std::atomic<bool> uiMirror_{true};
+    std::atomic<bool> uiDumpRequested_{false};
+    std::string uiDumpPath_;      // under uiMutex_
+    std::string uiDumpResult_;    // under uiMutex_
+    std::condition_variable uiDumpCv_;
+    bool havePendingUi_ = false;  // presenting thread, under uiMutex_
+    PendingUi pendingUi_;         // presenting thread, under uiMutex_
+    xr::LayerHandle uiLayer_ = 0;  // RT
+    uint32_t uiW_ = 0, uiH_ = 0, uiSrcW_ = 0, uiSrcH_ = 0;
+    DXGI_FORMAT uiFmt_ = DXGI_FORMAT_UNKNOWN;
+    bool uiShownLast_ = false;  // RT: the last stereo frame showed the UI quad
+    std::atomic<uint64_t> uiSubmitted_{0}, uiHeld_{0}, uiDropped_{0};
+    std::string uiLastSource_;  // RT, for status
 
     // Eye setup snapshot for the engine.
     std::mutex eyeMutex_;

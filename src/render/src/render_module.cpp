@@ -83,6 +83,15 @@ RenderConfig LoadConfig(const StartupContext& ctx) {
     r.screenOffsetY = static_cast<float>(std::clamp(c.get_float("screen", "offset_y", r.screenOffsetY), -10.0, 10.0));
     r.screenFollowHead = c.get_bool("screen", "follow_head", r.screenFollowHead);
     r.recenterOnStart = c.get_bool("screen", "recenter_on_start", r.recenterOnStart);
+
+    r.uiLayer = c.get_bool("ui", "layer", r.uiLayer);
+    r.uiDistance = static_cast<float>(std::clamp(c.get_float("ui", "distance", r.uiDistance), 0.3, 50.0));
+    r.uiSize = static_cast<float>(std::clamp(c.get_float("ui", "size", r.uiSize), 0.05, 50.0));
+    r.uiOffsetX = static_cast<float>(std::clamp(c.get_float("ui", "offset_x", r.uiOffsetX), -20.0, 20.0));
+    r.uiOffsetY = static_cast<float>(std::clamp(c.get_float("ui", "offset_y", r.uiOffsetY), -20.0, 20.0));
+    r.uiFollowHead = c.get_bool("ui", "follow_head", r.uiFollowHead);
+    r.uiLayerWidth = static_cast<uint32_t>(std::clamp<long long>(c.get_int("ui", "layer_width", r.uiLayerWidth), 0, 8192));
+    r.uiMirror = c.get_bool("ui", "mirror", r.uiMirror);
     return r;
 }
 
@@ -166,6 +175,17 @@ void RegisterCommands() {
                       "stereo-test pause <ms> | drop <n>: in mode stereo-test, stop starting frames for <ms> (like a game thread "
                       "blocked by a load) or leave every n-th frame without a stereo image (0 = off)",
                       [](std::string_view args) { return XrController::Get().StereoTestCommand(Lower(std::string(args))); });
+    dev_commands::add("ui",
+                      "ui status | on | off | dump <png path> | distance <m> | size <m> | offset <x m> <y m> | follow <0|1> | mirror <0|1>: the in-game "
+                      "UI's own layer in stereo",
+                      [](std::string_view args) {
+                          std::string a(args);
+                          while (!a.empty() && a.back() == ' ') a.pop_back();
+                          const size_t sp = a.find(' ');
+                          // Lower-case the verb only: a dump path keeps its case.
+                          const std::string verb = Lower(a.substr(0, sp));
+                          return XrController::Get().UiCommand(sp == std::string::npos ? verb : verb + a.substr(sp));
+                      });
 }
 
 }  // namespace
@@ -176,6 +196,8 @@ bool start(const StartupContext& ctx) {
     log::info("render: xr {} (backend {}, runtime '{}', frame wait on the {} thread), screen {:.2f} m wide at {:.2f} m, captures in {}",
               cfg.xrEnabled ? "enabled" : "disabled", cfg.backend == xr::BackendType::Null ? "null" : "openxr", cfg.runtime,
               cfg.waitOnPresentThread ? "present" : "xr", cfg.screenWidth, cfg.screenDistance, log::narrow(cfg.captureDir.wstring()));
+    log::info("render: UI layer in stereo {}: {:.2f} m high at {:.2f} m, offset {:.2f} {:.2f}, {}, image width {}", cfg.uiLayer ? "on" : "off",
+              cfg.uiSize, cfg.uiDistance, cfg.uiOffsetX, cfg.uiOffsetY, cfg.uiFollowHead ? "head-locked" : "world-locked", cfg.uiLayerWidth);
     HookCallbacks cb;
     cb.onPresent = &OnPresentCb;
     cb.onResize = &OnResizeCb;
@@ -202,5 +224,8 @@ Mode GetMode() { return XrController::Get().GetMode(); }
 bool GetEyeSetup(EyeSetup* out) { return XrController::Get().GetEyeSetup(out); }
 StereoFrame BeginGameFrame() { return XrController::Get().BeginGameFrame(); }
 void SubmitStereoFrame(const StereoSubmit& submit) { XrController::Get().SubmitStereoFrame(submit); }
+bool UiLayerWanted() { return g_started.load(std::memory_order_relaxed) && XrController::Get().UiLayerWanted(); }
+bool UiDumpRequested() { return g_started.load(std::memory_order_relaxed) && XrController::Get().UiDumpRequested(); }
+void SubmitUiLayer(const UiLayerSource& source) { XrController::Get().SubmitUiLayer(source); }
 
 }  // namespace ff7vr::render

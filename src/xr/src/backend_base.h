@@ -44,6 +44,8 @@ public:
     FrameStats GetStats() const override;
     std::vector<float> TakeGpuCopyTimes() override { return gpuCopy_.Take(); }
     bool GetQuadLayerInfo(LayerHandle layer, SwapchainInfo* out) const override;
+    bool DrawOverlay(const QuadLayer& q, ID3D11Texture2D* target, DXGI_FORMAT targetFormat, ColorEncoding targetEncoding,
+                     const Rect& targetRect) override;
 
 protected:
     struct FrameRecord {
