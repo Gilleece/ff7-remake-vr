@@ -12,7 +12,7 @@
 //   stereo scale <f>              world scale
 //   stereo pitch <0|1>            decoupled pitch
 //   stereo positional <0|1>
-//   stereo lightfix <0|1>         light sort-key patch
+//   stereo lightfix <0|1>         light sort-key fix (patch applied while stereo renders)
 //   stereo log <n>                log the eye cameras of the next n stereo frames
 //   stereo host <render|fixed>    switch where eye size and views come from
 //   stereo bloomfix [0|1]         right-eye bloom fix (bloom_fix.h), with its counters
@@ -197,8 +197,9 @@ std::string stereo_command(const std::vector<std::string>& a) {
         return std::format("ok positional {}", s.positional.load() ? 1 : 0);
     }
     if (c == "lightfix" && a.size() == 3) {
-        if (!fixes::set_light_patch(a[2] == "1")) return "err light patch not available";
-        return std::format("ok lightfix {}", fixes::light_patch().value_or(false) ? 1 : 0);
+        if (!fixes::set_light_fix(a[2] == "1")) return "err light patch not available";
+        return std::format("ok lightfix {} (patch {} now; applied while stereo renders)", fixes::light_fix_wanted() ? 1 : 0,
+                           fixes::light_patch().value_or(false) ? "in place" : "not in place");
     }
     if (c == "host" && a.size() == 3) {
         if (a[2] == "fixed") {

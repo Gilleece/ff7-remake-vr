@@ -14,6 +14,16 @@ namespace ff7vr::engine::fixes {
 bool set_light_patch(bool on);
 std::optional<bool> light_patch();  // nullopt: site not found or holds an unexpected value
 
+// The patch as a stereo fix ([stereo] light_fix, `stereo lightfix`): applied while the
+// engine renders in stereo and the fix is wanted, removed otherwise, so the flat game keeps
+// the game's code. Without it the tiled lighting pass that renders the lights with bit
+// 0x40 leaves white, tile-shaped blocks on skin in the eye views (docs/engine-module.md,
+// "Skin lighting fix"). set_light_fix: any thread; light_fix_stereo: called at every
+// stereo/mono transition (game thread). False if the patch site is not available.
+bool set_light_fix(bool wanted);
+bool light_fix_wanted();
+void light_fix_stereo(bool stereo_active);
+
 // Square Enix's ULocalPlayer::CalcSceneView replaces the view rect with
 // (0, 0, GSystemResolution) when the viewport's window mode is windowed fullscreen, after
 // the stereo device has set the eye rects. While stereo renders, the `jne` that skips

@@ -39,7 +39,7 @@ struct Options {
     bool enabled = true;
     bool start_in_stereo = true;
     bool allow_unknown_build = false;
-    bool light_fix = false;
+    bool light_fix = true;
     bool movie_screen = false;
     bool bloom_fix = true;
     bool ao_fix = true;
@@ -127,7 +127,9 @@ bool __fastcall initialize_hmd_device_detour(void* engine) {
     if (g_addr.GEngine && *g_addr.GEngine != engine)
         log::warn("engine: InitializeHMDDevice called on {} but GEngine is {}", engine, *g_addr.GEngine);
     install_device(engine);
-    if (g_opt.light_fix) fixes::set_light_patch(true);
+    // Applied while stereo renders (stereo_device.cpp, transitions).
+    fixes::set_light_fix(g_opt.light_fix);
+    log::info("light sort-key fix: {}", g_opt.light_fix ? "on while stereo renders" : "off ([stereo] light_fix = 0)");
     for (const auto& [name, value] : g_opt.cvars) cvar::set(log::widen(name), log::widen(value));
     return true;
 }
@@ -227,7 +229,7 @@ bool start(const StartupContext& ctx) {
         g_opt.enabled = cfg.get_bool("stereo", "enabled", true);
         g_opt.start_in_stereo = cfg.get_bool("stereo", "start_in_stereo", true);
         g_opt.allow_unknown_build = cfg.get_bool("stereo", "allow_unknown_build", false);
-        g_opt.light_fix = cfg.get_bool("stereo", "light_fix", false);
+        g_opt.light_fix = cfg.get_bool("stereo", "light_fix", true);
         g_opt.movie_screen = cfg.get_bool("stereo", "movie_screen", false);
         g_opt.bloom_fix = cfg.get_bool("stereo", "bloom_fix", true);
         g_opt.ao_fix = cfg.get_bool("stereo", "ao_fix", true);

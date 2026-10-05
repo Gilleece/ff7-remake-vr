@@ -624,11 +624,13 @@ void tick_begin() {
             g.eye_h = g.want_h;
             g_rt_size = pack(g.eye_w, g.eye_h);
             fixes::set_view_rect_patch(true);
+            fixes::light_fix_stereo(true);
             fixes::vr_window_enter();
             cvar::stereo_overrides(true);
         } else {
             fixes::restore_system_resolution();
             fixes::set_view_rect_patch(false);
+            fixes::light_fix_stereo(false);
             cvar::stereo_overrides(false);
             g.host_gap = 0;
         }

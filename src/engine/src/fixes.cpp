@@ -45,6 +45,32 @@ std::int32_t g_sysres_written[2]{};  // what we wrote last
 std::optional<bool> light_patch() { return read_patch(addresses().LightSortKeyImm, 0x40, 0x60); }
 bool set_light_patch(bool on) { return write_patch(addresses().LightSortKeyImm, 0x40, 0x60, on, "light sort-key"); }
 
+namespace {
+std::mutex g_light_mutex;
+bool g_light_wanted = true;
+bool g_light_stereo = false;
+bool update_light_patch() {  // g_light_mutex held
+    return set_light_patch(g_light_wanted && g_light_stereo);
+}
+}  // namespace
+
+bool set_light_fix(bool wanted) {
+    std::lock_guard lock(g_light_mutex);
+    g_light_wanted = wanted;
+    return update_light_patch();
+}
+
+bool light_fix_wanted() {
+    std::lock_guard lock(g_light_mutex);
+    return g_light_wanted;
+}
+
+void light_fix_stereo(bool stereo_active) {
+    std::lock_guard lock(g_light_mutex);
+    g_light_stereo = stereo_active;
+    if (g_light_wanted || light_patch().value_or(false)) update_light_patch();
+}
+
 // 0x75 = jne rel8, 0xEB = jmp rel8 (same displacement).
 std::optional<bool> view_rect_patch() { return read_patch(addresses().ViewRectOverrideJump, 0x75, 0xEB); }
 bool set_view_rect_patch(bool on) {
