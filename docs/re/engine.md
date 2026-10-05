@@ -460,6 +460,63 @@ the back buffer's size, nothing else. With a separate render target the window t
 shows only what the device draws plus Slate. The engine has no spectator screen of its own
 in this build.
 
+### Slate clears the back buffer only on request (STATIC, LIVE)
+
+`DrawWindow_RenderThread` calls `RenderTexture_RenderThread` (two call sites, `0x287dd3b`
+and `0x287e372`), then binds the back buffer for Slate's own elements through `0x26e2be0`
+with a clear flag computed as `Slate.ShowWireFrame != 0 ? 1 : bClear` (the global at RVA
+`0x583073c` is the data of `Slate.ShowWireFrame`, registered at `0x51fde0`). With the
+defaults nothing is cleared after the device's command, so whatever the device draws into
+the back buffer stays under the UI. LIVE: the mod's desktop mirror is visible in window
+screenshots in stereo (it had been black only while the blit bound the eye texture as a
+shader input while it was still bound as the scene's render target; D3D11 then silently
+binds null).
+
+### Scene buffers are sized from GSystemResolution (STATIC, LIVE)
+
+Square Enix's `FSceneRenderTargets::Allocate` (`0x2540c10`, render thread) does not use
+the view family size: the scene buffer size is the larger of this frame's and the last
+frame's `GSystemResolution.ResX/ResY x r.ScreenPercentage / 100`, rounded up to a multiple
+of 4 (signature `FSceneRenderTargets::Allocate size from GSystemResolution`).
+`r.SceneRenderTargetResizeMethod` is registered but its data is never read. With a
+2560x1440 eye target and a 1280x720 window the GBuffer and the other scene textures stay
+1280x720, so the left eye is correct only in its top-left 1280x720 and everything else is
+smeared edge pixels (LIVE, window mirror of both eyes in the first stereo run). The
+community UEVR plugin for this game writes `GSystemResolution` before every viewport draw
+for this reason. The mod sets it to the eye target size (2 x eye width by eye height)
+while stereo renders and puts the game's value back afterwards.
+
+Other readers of `GSystemResolution` (STATIC): the UI canvas preset (`0x1508810`,
+`0x2541670`: 1920x1080 or 3840x2160 when `ResX > 1920`, unless
+`r.InGameUI.FixedWidth/Height` are set), `ULocalPlayer::CalcSceneView` (next section),
+`FSlateRHIRenderer::UpdateFullscreenState` (`0x287d750`, window mode changes) and
+`RestoreSystemResolution` (`0x287d8e0`, which re-requests the resolution when the window is
+activated in exclusive fullscreen), `UGameEngine` window creation (`0x2f2d360`), and two
+functions in game code (`0x12d6880`, `0x16bea10`, purpose unknown).
+
+### Windowed fullscreen replaces the view rect (STATIC)
+
+In `ULocalPlayer::CalcSceneView`, after `GetProjectionData` (which applied the device's
+`AdjustViewRect`), Square Enix added: if `Viewport->GetWindowMode()` (FViewport slot 30,
+returns the field at `+0xC4`) is 1 (windowed fullscreen), `ViewRect` and
+`ConstrainedViewRect` become `(0, 0, GSystemResolution.ResX, ResY)`. In that window mode
+both eyes would render the full target. The mod makes the `jne` at RVA `0x3018fb8`
+unconditional while stereo renders (signature `CalcSceneView windowed-fullscreen view
+rect`). Not exercised live: the test harness runs windowed (mode 2).
+
+### Frame pipeline (LIVE)
+
+The game thread can be up to two engine frames ahead of the Present that shows a frame:
+the rendering thread runs one frame behind the game thread, and the RHI thread, which
+executes the recorded commands and presents, up to one more (UE 4.18 waits on the previous
+frame's RHI fence in `EndDrawingViewport`). Anything paired per frame between the game
+thread and Present therefore has to carry the frame's identity along the command stream
+rather than rely on counting Presents. Switching the eye target on or off
+(`bForceSeparateRenderTarget`) makes `FSceneViewport::UpdateViewportRHI` suspend and
+restart the rendering thread (LIVE: `RenderTexture_RenderThread` comes from a new thread id
+after every stereo on/off), which costs a hitch; the device keeps rendering stereo with the
+last views when the XR session misses a frame instead of flipping to mono.
+
 ### Separate render target format (STATIC)
 
 When `AllocateRenderTargetTexture` returns false, `FSceneViewport::InitDynamicRHI`

@@ -53,10 +53,21 @@ public:
         }
     }
 
+    // Called on the presenting thread right before this frame's Present (see stereo_host.h).
+    //
+    // The render module ends its waited XR frames in order, one per Present. The engine
+    // keeps up to two frames in flight between the game thread (where frames are waited)
+    // and the RHI thread (where they are presented), so the frame ended at a given Present
+    // is not always the one this image was rendered for: right after stereo starts, the
+    // Presents of the last mono frames already end the first stereo frames, and the
+    // offset can change after a hitch. Because this call happens immediately before the
+    // Present that will show the image, the image is offered for each frame id that
+    // Present may end (the waited frames that are still open), always with the views it
+    // was actually rendered with, so the runtime re-projects it correctly whichever frame
+    // carries it. Entries for ids that are ended later are replaced by the next frame's.
     void eye_texture_ready(const EyeTexture& eyes) override {
-        if (!eyes.frame_id || !eyes.texture) return;
+        if (!eyes.texture || !eyes.latest_frame_id) return;
         render::StereoSubmit s;
-        s.frameId = eyes.frame_id;
         s.texture = eyes.texture;
         s.viewFormat = eyes.view_format;
         s.encoding = eyes.srgb_encoded ? xr::ColorEncoding::Srgb : xr::ColorEncoding::Linear;
@@ -66,7 +77,22 @@ public:
             s.eyeRects[e].width = eyes.eyes[e].width;
             s.eyeRects[e].height = eyes.eyes[e].height;
         }
-        render::SubmitStereoFrame(s);
+        if (eyes.views_valid) {
+            s.haveRenderedViews = true;
+            std::memcpy(&s.renderedViews[0], &eyes.views[0], sizeof(xr::View));
+            std::memcpy(&s.renderedViews[1], &eyes.views[1], sizeof(xr::View));
+        }
+        // Open frames at this point: from one before the image's own frame (its
+        // predecessor may still be open after a frame without a Present) up to the newest
+        // waited frame, at most four (the module keeps four images).
+        const std::uint64_t hi = eyes.latest_frame_id;
+        std::uint64_t lo = eyes.frame_id ? eyes.frame_id : hi;
+        if (lo > 1) --lo;
+        if (hi >= 3 && lo + 3 < hi) lo = hi - 3;
+        for (std::uint64_t id = lo; id <= hi; ++id) {
+            s.frameId = id;
+            render::SubmitStereoFrame(s);
+        }
     }
 
 private:

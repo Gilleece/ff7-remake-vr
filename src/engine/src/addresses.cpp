@@ -62,6 +62,15 @@ constexpr Sig kConsoleManagerVtable{"FConsoleManager::vftable", "48 8D 05 ?? ?? 
 constexpr Sig kLightPatch{"RenderLights light sort-key patch site", "BE 40 00 00 00 F3 0F 10 81 C0 00 00 00", Rule::Match, 0, 0,
                           0, 0x22351b0};
 constexpr Sig kGSystemResolution{"GSystemResolution", "81 3D ?? ?? ?? ?? 80 07 00 00", Rule::Rip, 0, 2, 10, 0x53e3ae0};
+// FSceneRenderTargets::Allocate (Square Enix version) reads GSystemResolution to size the
+// scene buffers; checked so that a build where this changed is noticed.
+constexpr Sig kSceneSizeFromSystemResolution{"FSceneRenderTargets::Allocate size from GSystemResolution",
+                                             "66 0F 6E 0D ?? ?? ?? ?? 66 0F 6E 05 ?? ?? ?? ??", Rule::Rip, 0, 4, 8,
+                                             0x53e3ae0};
+// ULocalPlayer::CalcSceneView: `call [rax+0xF0]` (FViewport::GetWindowMode); `cmp eax, 1`
+// (windowed fullscreen); `jne` over the code that replaces the view rect.
+constexpr Sig kViewRectOverride{"CalcSceneView windowed-fullscreen view rect", "FF 90 F0 00 00 00 83 F8 01 75 38", Rule::Match,
+                                9, 0, 0, 0x3018fb8};
 // The movzx after the AllocateRenderTargetTexture call in FSceneViewport::InitDynamicRHI
 // loads the pixel format the engine falls back to for the separate render target.
 constexpr Sig kSceneTargetFormat{"FSceneViewport separate target format",
@@ -246,6 +255,9 @@ Addresses resolve_addresses(bool allow_unknown_build, const void* hmd_detour) {
     const std::int64_t slot_hmd = num(kSlotInitializeHMDDevice, true);
     const std::int64_t off_dev = num(kStereoRenderingDevice, true);
     a.GNearClippingPlane = reinterpret_cast<float*>(addr(kGNearClippingPlane, true));
+    a.GSystemResolution = reinterpret_cast<std::int32_t*>(addr(kGSystemResolution, true));
+    if (addr(kSceneSizeFromSystemResolution, true) != reinterpret_cast<std::uintptr_t>(a.GSystemResolution))
+        fail("the scene buffers are not sized from GSystemResolution as expected");
     if (slot_hmd > 0) a.slot_InitializeHMDDevice = static_cast<std::size_t>(slot_hmd);
     if (off_dev > 0) a.off_StereoRenderingDevice = static_cast<std::size_t>(off_dev);
     a.slot_Tick = kTickSlotIndex * sizeof(void*);
@@ -289,7 +301,8 @@ Addresses resolve_addresses(bool allow_unknown_build, const void* hmd_detour) {
     a.ConsoleManager = reinterpret_cast<void**>(addr(kConsoleManager, false));
     a.ConsoleManagerVtable = addr(kConsoleManagerVtable, false);
     if (std::uintptr_t p = addr(kLightPatch, false)) a.LightSortKeyImm = reinterpret_cast<std::uint8_t*>(p + 1);
-    a.GSystemResolution = reinterpret_cast<std::int32_t*>(addr(kGSystemResolution, false));
+    a.ViewRectOverrideJump = reinterpret_cast<std::uint8_t*>(addr(kViewRectOverride, false));
+    if (!a.ViewRectOverrideJump) log::warn("engine: stereo in windowed fullscreen will show wrong eye rects (patch site not found)");
     a.SceneTargetFormat = reinterpret_cast<std::uint8_t*>(addr(kSceneTargetFormat, false));
 
     a.stereo_ok = a.failure.empty();

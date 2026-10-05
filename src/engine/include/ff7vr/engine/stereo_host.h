@@ -15,12 +15,15 @@
 //       eye_render_size(w, h)
 //           Wanted per-eye render size. A change reallocates the engine's eye target on
 //           the next frame.
-//   render thread, once per rendered stereo frame, after the scene has been rendered:
+//   thread that owns the D3D11 immediate context, once per rendered stereo frame:
 //       eye_texture_ready(eyes)
-//           The engine's side-by-side eye texture and the frame id of the views it was
-//           rendered with. The texture is the engine's own render target: read it on the
-//           render thread before the next frame starts (for example at Present) and do
-//           not keep references beyond that.
+//           The engine's side-by-side eye texture, the frame id and the views it was
+//           rendered with. Called from a command the engine module appends to the
+//           engine's RHI command list after the frame's scene, so it runs on the thread
+//           that presents (the RHI thread in this game), right before that frame's
+//           Slate UI and Present: the texture holds exactly this frame's image now and
+//           until the next frame's commands run. Do not keep references beyond the
+//           frame's Present.
 //
 // Conventions: poses and FOV use OpenXR conventions (right-handed, +X right, +Y up,
 // -Z forward, metres; FOV angles in radians, left/down negative). The structures have
@@ -73,7 +76,10 @@ struct EyeTexture {
     DXGI_FORMAT view_format = DXGI_FORMAT_UNKNOWN;  // typed format to read the (typeless) texture with
     bool srgb_encoded = true;                       // values are gamma encoded (what the tonemapper writes)
     EyeRect eyes[2]{};
-    std::uint64_t frame_id = 0;                     // GameFrame::frame_id of the views used, 0 = unknown
+    std::uint64_t frame_id = 0;                     // GameFrame::frame_id of the views used, 0 = none (views held from an earlier frame)
+    bool views_valid = false;                       // views[] are the views the image was rendered with
+    HostView views[2]{};
+    std::uint64_t latest_frame_id = 0;              // newest frame id begin_game_frame has returned so far
 };
 
 class StereoHost {
@@ -88,8 +94,7 @@ public:
     // host answers with out.stereo whether this particular frame can be stereo.
     virtual void begin_game_frame(bool stereo_wanted, GameFrame& out) = 0;
 
-    // Render thread, once per rendered stereo frame (see above). frame_id 0 means the
-    // engine could not tell which frame's views the image was rendered with.
+    // Presenting thread, once per rendered stereo frame, before its Present (see above).
     virtual void eye_texture_ready(const EyeTexture& eyes) = 0;
 };
 

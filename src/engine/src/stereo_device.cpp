@@ -1,6 +1,8 @@
 #include "stereo_device.h"
 
 #include "fixed_host.h"
+#include "fixes.h"
+#include "rhi_command.h"
 #include "ue_math.h"
 
 #include "ff7vr/core/log.h"
@@ -30,6 +32,12 @@ std::atomic<bool> g_wanted{false};             // stereo switched on (ini, dev c
 std::atomic<std::uint64_t> g_rt_size{0};       // committed eye size: width | height << 32
 std::atomic<StereoHost*> g_host{nullptr};
 FixedStereoHost* g_fixed = nullptr;            // created in init(), never freed
+std::atomic<std::uint64_t> g_latest_frame_id{0};  // newest frame id the host returned
+
+// Frames the device keeps rendering in stereo (with the last views) while the host has no
+// frame for it, before it switches the engine to mono. Switching reallocates the eye
+// target and suspends the rendering thread, so a single late XR frame must not do that.
+constexpr int kHoldFrames = 45;
 
 std::uint64_t pack(std::uint32_t w, std::uint32_t h) { return w | (static_cast<std::uint64_t>(h) << 32); }
 std::uint32_t unpack_w(std::uint64_t v) { return static_cast<std::uint32_t>(v); }
@@ -47,6 +55,9 @@ struct GameState {
     std::uint64_t transitions = 0;
     bool in_tick = false;
     bool views_built = false;  // stereo views were built during this Tick
+    bool frame_has_views = false;  // this Tick got fresh views from the host
+    int host_gap = 0;          // consecutive stereo frames without a host frame
+    std::uint64_t held_frames = 0;
     int logged_order = 0;
     // last eye cameras, for diagnostics
     FRotator cam_rot{};
@@ -67,8 +78,9 @@ std::mutex g_diag_mutex;  // guards the diagnostic copies read by status()/last_
 // queued; older ones belong to iterations whose window draw never happened (window not
 // drawn, viewport drawn outside Tick) and are dropped, which re-synchronises the pairing.
 struct FrameEntry {
-    std::uint64_t frame_id = 0;
-    bool stereo = false;
+    std::uint64_t frame_id = 0;  // 0: rendered with views held from an earlier frame
+    bool stereo = false;         // the views were built (the frame was drawn in stereo)
+    HostView views[2]{};
 };
 std::mutex g_fifo_mutex;
 std::array<FrameEntry, 8> g_fifo{};
@@ -102,7 +114,7 @@ FrameEntry fifo_pop() {
 // Counters (any thread).
 struct Counters {
     std::atomic<std::uint64_t> view_offset{0}, projection{0}, adjust_rect{0}, render_texture{0}, calc_rt_size{0},
-        realloc_yes{0}, mirror_queued{0}, mirror_failed{0}, host_frames{0};
+        realloc_yes{0}, frame_end_queued{0}, frame_end_failed{0}, frame_end_run{0}, host_frames{0};
     std::atomic<std::uint32_t> rt_tex_w{0}, rt_tex_h{0};  // size of the eye texture the render thread last saw
     std::atomic<int> rt_tex_format{0};
 };
@@ -272,6 +284,33 @@ FMatrix* GetStereoProjectionMatrix(const void*, FMatrix* out, EStereoscopicPass 
 void InitCanvasFromView(void*, FSceneView*, UCanvas*) {}
 bool Unknown8(void*) { return false; }
 
+// The end of a stereo frame on the thread that owns the immediate context: hand the eye
+// texture to the host and draw the desktop mirror. Appended to the engine's RHI command
+// list from RenderTexture_RenderThread, so it runs after the frame's scene and before
+// its Slate UI and Present (rhi_command.h). Static ring: the RHI thread is at most one
+// frame behind the render thread, four slots leave ample room.
+struct FrameEndCommand {
+    rhi::Command base;
+    EyeTexture eyes{};
+    ID3D11Texture2D* back_buffer = nullptr;
+    mirror::Mode mirror = mirror::Mode::Off;
+    std::atomic<bool> pending{false};
+};
+FrameEndCommand g_frame_end[4];
+unsigned g_frame_end_next = 0;  // render thread only
+
+void frame_end_execute(void*, rhi::Command* self) {
+    auto* c = reinterpret_cast<FrameEndCommand*>(self);
+    try {
+        if (StereoHost* h = g_host.load()) h->eye_texture_ready(c->eyes);
+        if (c->mirror != mirror::Mode::Off)
+            mirror::draw(c->eyes.texture, c->back_buffer, c->eyes.eyes[0], c->eyes.eyes[1], c->mirror);
+    } catch (...) {
+    }
+    ++g_count.frame_end_run;
+    c->pending.store(false, std::memory_order_release);
+}
+
 void RenderTexture_RenderThread(const void*, FRHICommandListImmediate* cmd_list, FRHITexture2D* back_buffer,
                                 FRHITexture2D* src, FVector2D /*window_size*/) {
     ++g_count.render_texture;
@@ -311,12 +350,28 @@ void RenderTexture_RenderThread(const void*, FRHICommandListImmediate* cmd_list,
     out.eyes[1] = EyeRect{static_cast<std::int32_t>(ew), 0, ew, th};
     const FrameEntry fe = fifo_pop();
     out.frame_id = fe.stereo ? fe.frame_id : 0;
-    if (StereoHost* h = g_host.load()) h->eye_texture_ready(out);
+    out.views_valid = fe.stereo;
+    out.views[0] = fe.views[0];
+    out.views[1] = fe.views[1];
+    out.latest_frame_id = g_latest_frame_id.load();
 
+    FrameEndCommand& c = g_frame_end[g_frame_end_next];
+    if (c.pending.load(std::memory_order_acquire)) {
+        ++g_count.frame_end_failed;  // the RHI thread is far behind: skip this frame's hand-over
+        return;
+    }
+    c.base.execute = &frame_end_execute;
+    c.eyes = out;
     const auto mode = static_cast<mirror::Mode>(g_settings.mirror.load());
-    if (mode != mirror::Mode::Off && plausible_d3d_object(bb)) {
-        if (mirror::enqueue(cmd_list, eye, bb, out.eyes[0], out.eyes[1], mode)) ++g_count.mirror_queued;
-        else ++g_count.mirror_failed;
+    c.mirror = plausible_d3d_object(bb) ? mode : mirror::Mode::Off;
+    c.back_buffer = bb;
+    c.pending.store(true, std::memory_order_release);
+    if (rhi::enqueue(cmd_list, &c.base)) {
+        ++g_count.frame_end_queued;
+        g_frame_end_next = (g_frame_end_next + 1) % (sizeof(g_frame_end) / sizeof(g_frame_end[0]));
+    } else {
+        c.pending.store(false, std::memory_order_release);
+        ++g_count.frame_end_failed;
     }
 }
 
@@ -354,7 +409,13 @@ const StereoDeviceVtbl kDeviceVtbl{
 
 // ------------------------------------------------------------------ IStereoRenderTargetManager
 bool ShouldUseSeparateRenderTarget(const void*) { return g_active.load(std::memory_order_acquire); }
-void UpdateViewport(void*, bool, const FViewport*, void*) {}
+
+// Game thread, every stereo frame, right before the views are drawn: the scene buffers of
+// the frame about to be enqueued are sized from GSystemResolution (fixes.h).
+void UpdateViewport(void*, bool, const FViewport*, void*) {
+    if (g_active.load() && g.eye_w && g.eye_h)
+        fixes::apply_system_resolution(static_cast<std::int32_t>(2 * g.eye_w), static_cast<std::int32_t>(g.eye_h));
+}
 
 void CalculateRenderTargetSize(void*, const FViewport*, std::uint32_t* sx, std::uint32_t* sy) {
     ++g_count.calc_rt_size;
@@ -477,7 +538,8 @@ void tick_begin() {
     g.views_built = false;
     ++g.ticks;
     const bool wanted = g_wanted.load();
-    bool frame_stereo = false;
+    bool host_stereo = false;
+    g.frame_has_views = false;
     update_wanted_size();
     if (StereoHost* h = g_host.load()) {
         GameFrame f;
@@ -488,8 +550,20 @@ void tick_begin() {
             g.views[0] = f.views[0];
             g.views[1] = f.views[1];
             g.views_frame_id = f.frame_id;
+            g.frame_has_views = true;
+            if (f.frame_id) g_latest_frame_id = f.frame_id;
         }
-        frame_stereo = wanted && f.stereo;
+        host_stereo = f.stereo;
+    }
+    bool frame_stereo = false;
+    if (wanted && host_stereo) {
+        frame_stereo = true;
+        g.host_gap = 0;
+    } else if (wanted && g_active.load() && ++g.host_gap <= kHoldFrames) {
+        // No frame from the host this time (a late XR frame, a hitch): keep the eye target
+        // and render with the last views instead of flipping the engine to mono and back.
+        frame_stereo = true;
+        ++g.held_frames;
     }
     if (frame_stereo != g_active.load()) {
         if (frame_stereo) {
@@ -498,6 +572,11 @@ void tick_begin() {
             g.eye_w = g.want_w;
             g.eye_h = g.want_h;
             g_rt_size = pack(g.eye_w, g.eye_h);
+            fixes::set_view_rect_patch(true);
+        } else {
+            fixes::restore_system_resolution();
+            fixes::set_view_rect_patch(false);
+            g.host_gap = 0;
         }
         g_active = frame_stereo;
         ++g.transitions;
@@ -505,13 +584,22 @@ void tick_begin() {
             log::info("stereo: rendering {} from tick {} (eye {}x{}, transition {})", frame_stereo ? "STEREO" : "mono", g.ticks,
                       g.eye_w, g.eye_h, g.transitions);
     }
+    if (frame_stereo)
+        fixes::apply_system_resolution(static_cast<std::int32_t>(2 * g.eye_w), static_cast<std::int32_t>(g.eye_h));
     g_timer.tick(frame_stereo);
 }
 
 void tick_end() {
     g.in_tick = false;
     // Mono frames have no separate target, so the render thread consumes nothing for them.
-    if (g_active.load()) fifo_push(FrameEntry{g.views_frame_id, g.views_built});
+    if (g_active.load()) {
+        FrameEntry e;
+        e.frame_id = g.frame_has_views ? g.views_frame_id : 0;
+        e.stereo = g.views_built;
+        e.views[0] = g.views[0];
+        e.views[1] = g.views[1];
+        fifo_push(e);
+    }
 }
 
 std::string status() {
@@ -520,15 +608,16 @@ std::string status() {
     return std::format(
         "wanted={} active={} eye={}x{} want={}x{} rt_texture={}x{} fmt={} mirror={} scale={:.2f} decouple_pitch={} positional={} "
         "ticks={} stereo_draws={} transitions={} view_offset_calls={} proj_calls={} rect_calls={} render_texture_calls={} "
-        "rt_size_calls={} reallocs={} mirror_queued={} mirror_failed={} fifo_dropped={} frame_ms_avg={:.2f} p50={:.2f} "
-        "p95={:.2f} max={:.2f} (n={}, {}) | {}",
+        "rt_size_calls={} reallocs={} frame_end_queued={} frame_end_run={} frame_end_failed={} fifo_dropped={} held_frames={} "
+        "sysres={} latest_frame={} frame_ms_avg={:.2f} p50={:.2f} p95={:.2f} max={:.2f} (n={}, {}) | {}",
         g_wanted.load() ? 1 : 0, g_active.load() ? 1 : 0, unpack_w(v), unpack_h(v), g.want_w, g.want_h, g_count.rt_tex_w.load(),
         g_count.rt_tex_h.load(),
         g_count.rt_tex_format.load(), mirror::to_string(static_cast<mirror::Mode>(g_settings.mirror.load())),
         g_settings.world_scale.load(), g_settings.decouple_pitch.load() ? 1 : 0, g_settings.positional.load() ? 1 : 0, g.ticks,
         g.stereo_draws, g.transitions, g_count.view_offset.load(), g_count.projection.load(), g_count.adjust_rect.load(),
-        g_count.render_texture.load(), g_count.calc_rt_size.load(), g_count.realloc_yes.load(), g_count.mirror_queued.load(),
-        g_count.mirror_failed.load(), g_fifo_dropped.load(), g_timer.last_avg, g_timer.last_p50, g_timer.last_p95,
+        g_count.render_texture.load(), g_count.calc_rt_size.load(), g_count.realloc_yes.load(), g_count.frame_end_queued.load(),
+        g_count.frame_end_run.load(), g_count.frame_end_failed.load(), g_fifo_dropped.load(), g.held_frames,
+        fixes::system_resolution_overridden() ? 1 : 0, g_latest_frame_id.load(), g_timer.last_avg, g_timer.last_p50, g_timer.last_p95,
         g_timer.last_max, g_timer.last_n, g_timer.last_window_stereo ? "stereo" : "mixed/mono", host_desc);
 }
 

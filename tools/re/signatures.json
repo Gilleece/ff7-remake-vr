@@ -453,6 +453,30 @@
       "desc": "`mov esi, 0x40` (BE 40 00 00 00) that sets SE's sort-key bit 0x40. The community fix writes 0x60 to the immediate (byte at +1) so these lights also get bit 0x20. Fixes lights rendering wrong (green) at non-16:9 view aspect ratios, which includes every VR eye view."
     },
     {
+      "name": "CalcSceneView windowed-fullscreen view rect",
+      "kind": "patch",
+      "pattern": "FF 90 F0 00 00 00 83 F8 01 75 38",
+      "resolve": {
+        "type": "match",
+        "offset": 9
+      },
+      "expect": "0x3018fb8",
+      "desc": "In ULocalPlayer::CalcSceneView (0x3018da0): `call [rax+0xF0]` (FViewport::GetWindowMode, returns the field at +0xC4), `cmp eax, 1` (windowed fullscreen), `jne +0x38` over code that replaces ViewRect and ConstrainedViewRect with (0, 0, GSystemResolution.ResX, ResY). That runs after GetProjectionData applied the stereo device's AdjustViewRect, so in windowed fullscreen both eyes would get the full rect. The mod turns the jne (0x75) into jmp (0xEB) while stereo renders."
+    },
+    {
+      "name": "FSceneRenderTargets::Allocate size from GSystemResolution",
+      "kind": "global",
+      "pattern": "66 0F 6E 0D ?? ?? ?? ?? 66 0F 6E 05 ?? ?? ?? ??",
+      "resolve": {
+        "type": "rip",
+        "insn": 0,
+        "disp": 4,
+        "len": 8
+      },
+      "expect": "0x53e3ae0",
+      "desc": "movd xmm1,[GSystemResolution.ResX]; movd xmm0,[ResY] in Square Enix's FSceneRenderTargets::Allocate (0x2540c10). The scene buffer size is max(this frame, last frame) of GSystemResolution x r.ScreenPercentage / 100, rounded up to a multiple of 4; the view family size is not used (r.SceneRenderTargetResizeMethod is registered but never read). A stereo eye target larger than the window therefore needs GSystemResolution raised to the target size while stereo renders."
+    },
+    {
       "name": "FPostProcessSettings::FPostProcessSettings",
       "kind": "function",
       "pattern": "48 89 5C 24 08 57 48 83 EC 30 C7 41 3C 00 00 80 3F",

@@ -61,15 +61,11 @@ struct Resources {
 Resources* g_res_ptr = new Resources();
 
 struct MirrorCommand {
-    rhi::Command base;
     ID3D11Texture2D* eye = nullptr;
     ID3D11Texture2D* back_buffer = nullptr;
     EyeRect left{}, right{};
     Mode mode = Mode::Off;
-    std::atomic<bool> pending{false};
 };
-MirrorCommand g_ring[4];
-unsigned g_ring_next = 0;
 
 using D3DCompileFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, LPCSTR, const D3D_SHADER_MACRO*, ID3DInclude*, LPCSTR, LPCSTR, UINT,
                                       UINT, ID3DBlob**, ID3DBlob**);
@@ -327,12 +323,6 @@ void blit(const MirrorCommand& cmd) {
     saved.restore(ctx.Get());
 }
 
-void execute(void*, rhi::Command* self) {
-    auto* cmd = reinterpret_cast<MirrorCommand*>(self);
-    blit(*cmd);
-    cmd->pending = false;
-}
-
 }  // namespace
 
 const char* to_string(Mode m) {
@@ -372,24 +362,16 @@ DXGI_FORMAT typed_view_format(DXGI_FORMAT f) {
     }
 }
 
-bool enqueue(void* cmd_list, ID3D11Texture2D* eye_texture, ID3D11Texture2D* back_buffer, const EyeRect& left,
-             const EyeRect& right, Mode mode) {
-    if (mode == Mode::Off || !eye_texture || !back_buffer) return false;
-    MirrorCommand& cmd = g_ring[g_ring_next];
-    if (cmd.pending) return false;  // the previous use of this slot has not executed yet
-    cmd.base.execute = &execute;
+void draw(ID3D11Texture2D* eye_texture, ID3D11Texture2D* back_buffer, const EyeRect& left, const EyeRect& right,
+          Mode mode) {
+    if (mode == Mode::Off || !eye_texture || !back_buffer) return;
+    MirrorCommand cmd;
     cmd.eye = eye_texture;
     cmd.back_buffer = back_buffer;
     cmd.left = left;
     cmd.right = right;
     cmd.mode = mode;
-    cmd.pending = true;
-    if (!rhi::enqueue(cmd_list, &cmd.base)) {
-        cmd.pending = false;
-        return false;
-    }
-    g_ring_next = (g_ring_next + 1) % (sizeof(g_ring) / sizeof(g_ring[0]));
-    return true;
+    blit(cmd);
 }
 
 }  // namespace ff7vr::engine::mirror

@@ -26,6 +26,7 @@ struct Addresses {
     std::size_t slot_Tick = 0;                     // byte offset in the vtable (78 * 8)
     std::size_t off_StereoRenderingDevice = 0;     // UEngine member (0xD50)
     float* GNearClippingPlane = nullptr;
+    std::int32_t* GSystemResolution = nullptr;     // {ResX, ResY, ...}; sizes the scene buffers in this build
 
     // ---- diagnostics (not required)
     std::size_t off_GameViewport = 0;              // UEngine member (0x980)
@@ -37,7 +38,7 @@ struct Addresses {
     void** ConsoleManager = nullptr;               // IConsoleManager** (null until set up)
     std::uintptr_t ConsoleManagerVtable = 0;       // FConsoleManager::vftable, checked before use
     std::uint8_t* LightSortKeyImm = nullptr;       // immediate byte of `mov esi, 0x40` in RenderLights
-    std::int32_t* GSystemResolution = nullptr;     // {ResX, ResY, ...}
+    std::uint8_t* ViewRectOverrideJump = nullptr;  // `jne` opcode in CalcSceneView that skips the windowed-fullscreen rect
     std::uint8_t* SceneTargetFormat = nullptr;     // EPixelFormat the engine uses for the separate target
 
     bool stereo_ok = false;      // every required entry resolved and every layout check passed
