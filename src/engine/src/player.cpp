@@ -1,5 +1,7 @@
 #include "player.h"
 
+#include "controls.h"
+
 #include "ue_math.h"
 #include "uobj.h"
 
@@ -75,7 +77,7 @@ std::vector<std::function<void()>> g_work;
 std::atomic<int> g_toggle_requests{0};
 std::atomic<int> g_mode_request{-1};
 std::atomic<int> g_combat_override{-1};
-std::atomic<std::uint64_t> g_pad_polls{0}, g_pad_toggles{0};
+std::atomic<std::uint64_t> g_pad_toggles{0};
 
 // Game thread state.
 struct State {
@@ -89,6 +91,8 @@ struct State {
     int orbit_frames = 0;       // consecutive frames the camera looked at the pivot (negative: away)
     double aim_miss = 0.0;      // last distance of the pivot from the camera's line of sight (cm)
     bool follow_camera = false; // the game uses its follow camera
+    bool fresh = false;         // stereo just started: no follow-camera history yet
+    bool snap_first = false;    // start straight in first person at the next frame (no blend)
     float blend = 0.0f;         // 0 third person .. 1 first person
     std::uint64_t frame = 0;
     std::uint64_t loc_frame = ~0ull;
@@ -366,19 +370,25 @@ bool head_location(FVector& out) {
 
 // Mesh components of other actors attached to the character's meshes (the sword on the
 // back): SceneComponent.GetChildrenComponents(true, Children) on each mesh. Params: bool at
-// +0, TArray<USceneComponent*> at +8 (filled by the engine; its small allocation is not
-// freed, once per first-person start).
+// +0, TArray<USceneComponent*> at +8, filled by the engine (it resets the array and adds to
+// it). The same array header is passed in every call, so the engine reuses or reallocates
+// its one allocation instead of a new one being left behind at every first-person start.
+std::uint8_t g_children_array[16]{};  // TArray: data pointer, Num, Max
 std::vector<void*> attached_meshes(void* pawn, const std::vector<void*>& meshes) {
     std::vector<void*> out;
     for (void* m : meshes) {
         alignas(16) std::uint8_t params[32]{};
         params[0] = 1;
+        std::memcpy(params + 8, g_children_array, sizeof(g_children_array));
+        std::memset(params + 16, 0, 4);  // Num = 0, the allocation (Max) is kept
         if (!g_child_lookup || !g_child_lookup->ready()) break;
         ++g.calls;
         if (!uobj::call(m, g_child_lookup->get(0), params)) {
             ++g.call_failures;
+            std::memset(g_children_array, 0, sizeof(g_children_array));  // state unknown: start a new array next time
             continue;
         }
+        std::memcpy(g_children_array, params + 8, sizeof(g_children_array));
         void** data = nullptr;
         std::int32_t num = 0;
         std::memcpy(&data, params + 8, sizeof(data));
@@ -594,6 +604,14 @@ void tick(bool stereo, float delta_seconds) {
                   g_lookup->get(kGetViewTarget));
     }
     const Settings& s = g_settings;
+    if (stereo && !g.stereo) {
+        // Stereo (re)starts: the follow-camera test has no history, so its first result is
+        // taken at once instead of after the hysteresis (no game-camera frames at the start).
+        g.follow_camera = false;
+        g.orbit_frames = 0;
+        g.fresh = true;
+        g.snap_first = false;
+    }
     g.stereo = stereo;
     g.pc = local_player_controller();
     void* pawn = g.pc ? get_ptr(kGetPawn, g.pc) : nullptr;
@@ -645,7 +663,9 @@ void tick(bool stereo, float delta_seconds) {
     const bool fp_target = stereo && s.fp_available.load() && g.first_person && g.follow_camera;
     const float step = s.blend_seconds.load() > 0.0f ? delta_seconds / s.blend_seconds.load() : 1.0f;
     if (!g.follow_camera || !stereo) g.blend = 0.0f;  // authored camera: cut, no blend
+    else if (g.snap_first && fp_target) g.blend = 1.0f;  // stereo starts in first person
     else g.blend = std::clamp(g.blend + (fp_target ? step : -step), 0.0f, 1.0f);
+    g.snap_first = false;
 
     const bool hide = stereo && s.hide.load() == 1 && g.blend > 0.5f && g.pawn;
     if (hide) hide_meshes(g.pawn);
@@ -658,7 +678,7 @@ void tick(bool stereo, float delta_seconds) {
         "battle_signal {} raw {} value {:#x} reads {} changes {} mode {}",
         g.pc, g.pawn, g.pawn ? uobj::object_name(uobj::class_of(g.pawn)) : "", g.view_target,
         g.view_target ? uobj::object_name(g.view_target) : "", g.target_ok ? 1 : 0, g.aim_miss, g.orbit_frames, g.follow_camera ? 1 : 0, stereo ? 1 : 0, g.first_person ? 1 : 0,
-        g.combat ? 1 : 0, g.blend, g.hidden.size(), g.toggles, g_pad_toggles.load(), g_pad_polls.load(), g.auto_switches, g.calls, g.call_failures, g.pawn_loc.X,
+        g.combat ? 1 : 0, g.blend, g.hidden.size(), g.toggles, g_pad_toggles.load(), controls::pad_polls(), g.auto_switches, g.calls, g.call_failures, g.pawn_loc.X,
         g.pawn_loc.Y, g.pawn_loc.Z, g.head_bone.empty() ? "-" : g.head_bone, g.head_ok ? "ok" : "no", g.head_loc.X, g.head_loc.Y,
         g.head_loc.Z, g.head_failures, g_battle_class.empty() ? std::string("none") : g_battle_class + "." + g_battle_function, g.battle_raw,
         g.battle_value, g.battle_reads, g.battle_changes, g.last_mode);
@@ -703,7 +723,11 @@ bool adjust_camera(FRotator& rotation, FVector& location, bool decoupled, bool& 
         else g.orbit_frames = std::min(-1, g.orbit_frames - 1);
         const bool was = g.follow_camera;
         if (g.follow_camera && g.orbit_frames <= -kOrbitFramesOut) g.follow_camera = false;
-        else if (!g.follow_camera && g.orbit_frames >= kOrbitFramesIn) g.follow_camera = true;
+        else if (!g.follow_camera && (g.orbit_frames >= kOrbitFramesIn || (g.fresh && orbit))) {
+            g.follow_camera = true;
+            g.snap_first = g.fresh;
+        }
+        g.fresh = false;
         if (!g.target_ok) g.follow_camera = false;
         if (was != g.follow_camera)
             log::info("player: follow camera {} (view target {} class {}, pivot {:.0f} cm from the line of sight, {:.0f} cm away, {})",
@@ -753,22 +777,9 @@ bool adjust_camera(FRotator& rotation, FVector& location, bool decoupled, bool& 
 
 void request_toggle() { ++g_toggle_requests; }
 
-void filter_pad(unsigned long user, unsigned short* buttons) {
-    constexpr unsigned short kBack = 0x0020, kRightThumb = 0x0080, kCombo = kBack | kRightThumb;
-    static std::atomic<bool> s_latched{false};
-    static std::atomic<std::uint64_t> s_seen{0};
-    if (user != 0 || !buttons || !g_settings.pad_toggle.load() || !g_settings.fp_available.load()) return;
-    s_seen.fetch_add(1, std::memory_order_relaxed);
-    const unsigned short b = *buttons;
-    if ((b & kCombo) == kCombo && !s_latched.exchange(true)) {
-        request_toggle();
-        g_pad_toggles.fetch_add(1);
-    }
-    if (s_latched.load()) {
-        if ((b & kCombo) == 0) s_latched = false;  // both released
-        *buttons = static_cast<unsigned short>(b & ~kCombo);
-    }
-    g_pad_polls = s_seen.load(std::memory_order_relaxed);
+void request_pad_toggle() {
+    g_pad_toggles.fetch_add(1);
+    request_toggle();
 }
 void request_mode(bool first_person) { g_mode_request = first_person ? 1 : 0; }
 void set_combat_override(int v) { g_combat_override = v; }
@@ -799,7 +810,7 @@ std::string command(const std::string& args) {
     if (a[0] == "pad" && a.size() == 2) {
         // Test of the gamepad filter without a pad: feed one XInput button state through it.
         unsigned short b = static_cast<unsigned short>(std::strtoul(a[1].c_str(), nullptr, 16));
-        filter_pad(0, &b);
+        controls::filter_pad(0, &b);
         return std::format("ok buttons after filter {:#06x}", b);
     }
     if (a[0] == "combat" && a.size() == 2) {

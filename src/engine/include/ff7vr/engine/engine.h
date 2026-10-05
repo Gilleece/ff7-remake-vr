@@ -40,9 +40,11 @@ bool stereo_active();
 void request_stereo(bool on);
 
 // Gamepad filter, called by the XInput proxy with every successful XInputGetState result of
-// any thread. View/Back together with the right stick click toggles first person
-// ([first_person] pad_toggle); both buttons are removed from the state from the moment the
-// combination is held until both are released, so the game never acts on them.
+// any thread. Combinations with View/Back held (first person, recenter, stereo on/off, UI
+// panel distance; [controls] and [first_person] pad_toggle) trigger their action and are
+// removed from the state until released, so the game never acts on them; View alone is
+// held back while down and handed to the game as a short press on release
+// ([controls] pad_hold_view). See docs/engine-module.md, "Player controls".
 void filter_pad(unsigned long user, unsigned short* buttons);
 
 }  // namespace ff7vr::engine

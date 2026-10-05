@@ -29,7 +29,8 @@ global are written, and two single bytes of code can be changed:
 | the controlled pawn, its location and the view target | reflected functions called through `ProcessEvent`, game thread, every frame | camera modes: level boom and first person (see "Camera modes") |
 | the pawn's skeletal mesh components and the mesh components attached to them | `SetVisibility` through `ProcessEvent` | only while first person applies; put back afterwards |
 | the battle signal | a reflected function called through `ProcessEvent` every frame (`[first_person] battle_signal`) | automatic third person in battles |
-| XInput state | a filter in the loader's XInput proxy | only with stereo enabled: View/Back + right stick click toggles first person and is removed from the state |
+| XInput state | a filter in the loader's XInput proxy | only with stereo enabled: the View/Back combinations of "Player controls" trigger their action and are removed from the state; View alone reaches the game as a short press on release |
+| keyboard state | `GetAsyncKeyState`, game thread, once per frame, only while the game window has the focus | the keys of "Player controls" |
 
 Everything else goes through the device's own function tables, which the engine calls:
 view rects, per-eye view offset and projection, the size of the separate render target,
@@ -141,7 +142,8 @@ Choices for a seated player in a third-person game:
 - **World scale 1.0**: the IPD and head motion are at real-world scale. Larger values make
   the world look smaller (the player becomes a giant), smaller values the opposite.
 - The yaw from the right stick is applied as the game does it (smooth turning); recenter
-  is the XR host's (`recenter` dev command of the render module).
+  is the XR host's (`recenter` command of the render module), triggered by the player with
+  End or View/Back + left stick click (see "Player controls").
 
 ## Camera modes
 
@@ -278,11 +280,12 @@ captures after the toggles (`h05_third_toggled`, `h08_third_after_toggles`,
 
 The loader's XInput proxy passes every successful `XInputGetState` / `XInputGetStateEx`
 result through `ff7vr::engine::filter_pad` (registered only when the stereo device is
-enabled). When View/Back (`0x0020`) and the right stick click (`0x0080`) are both held, a
-toggle is requested once, and both bits are removed from the state from that moment until
-both buttons are released, so the game never sees either of them as part of the
-combination. The game polls XInput only while a pad is connected; `fp pad <hex buttons>`
-feeds a button state through the same filter for a test without a pad.
+enabled). View/Back (`0x0020`) held and the right stick click (`0x0080`) pressed requests a
+toggle; the filter is shared with the other combinations of "Player controls", which
+describes how the buttons are hidden from the game. The game polls XInput only while a pad
+is connected; `fp pad <hex buttons>` feeds a button state through the same filter for a
+test without a pad. The test below was made with the earlier filter (View passed through
+until the combination formed); the current one is tested in "Player controls: tests".
 
 Tested without a pad (`fp pad`, `captures/camera/runE`): `0x0020` (View alone) passes
 unchanged; `0x00a0` (both) toggles once and reaches the game as `0x0000`; `0x00a1` while
@@ -293,6 +296,82 @@ machine, and without one the game never calls XInput), so that the game's own us
 and the stick click is fully suppressed while the combination is held is inferred from the
 filter's output, not seen in the game. The keyboard toggle (Home) was tested in the game:
 every press toggles once.
+
+## Player controls
+
+`src/engine/src/controls.cpp`. What a seated player can do without leaving the game:
+
+| Action | Keyboard (default) | Gamepad (hold View/Back, then press) | What it does |
+|---|---|---|---|
+| first / third person | Home (`[first_person] toggle_key`) | right stick click | switches the camera mode (see "First person") |
+| recenter | End (`[controls] recenter_key`) | left stick click | the direction the head faces now becomes forward, and the head's position the origin, for the view and for the floating panels: the UI panel and the virtual screen are placed in front of the head again |
+| stereo off / on | Insert (`[controls] stereo_key`) | Menu/Start | stereo off: the game is shown on the virtual screen (the same fallback as for menus and loading screens); on again: back to 3D. The game window keeps its size and mode either way |
+| UI panel nearer | Page Down (`[controls] ui_nearer_key`) | D-pad down | the HUD/menu panel `ui_step` (0.25 m) nearer, down to `ui_min` (0.75 m); its size in metres stays, so it looks larger |
+| UI panel farther | Page Up (`[controls] ui_farther_key`) | D-pad up | `ui_step` farther, up to `ui_max` (8 m) |
+
+Keys are virtual-key codes (35 End, 36 Home, 45 Insert, 33 Page Up, 34 Page Down; `0` = no
+key), read once per engine frame with `GetAsyncKeyState` and acted on when pressed, only
+while a window of the game has the focus. The game itself does not see them differently
+(they are not removed from its input); the defaults are keys the game does not use in
+exploration or in its menus as far as tested (Space, m, F1, Escape, W/A/S/D, the mouse,
+Enter and Backspace are the game's).
+
+Gamepad combinations: while View/Back is held, pressing one of the buttons above triggers
+its action, once per press (holding View and pressing D-pad up three times moves the panel
+three steps). From the first combination until View and every combination button are
+released, all of them are removed from the state the game receives. View alone is held
+back from the game while it is down and handed to it as a press of about 120 ms when it is
+released without a combination (`[controls] pad_hold_view = 1`), so the game's own View
+action (the map) does not open on the way to a combination; it then happens on release
+instead of on press. `pad_hold_view = 0` passes View through until a combination is
+pressed (the game then sees View go down). `[controls] pad = 0` switches the recenter,
+stereo and panel combinations off; `[first_person] pad_toggle = 0` the first-person one.
+
+Every trigger is logged with its source (`controls: recenter (keyboard): ok recenter
+requested ...`, `controls: stereo on/off (gamepad): stereo off ...`, `controls: UI nearer
+(keyboard): UI panel 3.00 m -> 2.75 m`), and the render module logs the recenter itself
+when it is applied (`xr: recentered: yaw ... deg, position ...`). Recenter and the panel
+distance go through the render module's registered commands (`recenter`, `ui status`,
+`ui distance`) on a short-lived worker thread, so a slow command never stalls the game
+thread. `controls status` on the dev pipe shows the keys and counters, `controls pad <hex>`
+feeds a button state through the gamepad filter, `controls recenter|stereo|nearer|farther`
+triggers an action.
+
+### Player controls: tests
+
+In the game (first room of the Sector 7 slums save, Null backend, the player ini with the
+dev pipe on, `captures/controls/runA`): End logged `controls: recenter (keyboard): ok
+recenter requested` followed 11 ms later by the render module's `xr: recentered`; Insert
+switched stereo off (`stereo status`: `wanted=0 active=0`, the eye capture `p02_stereo_off`
+shows the game on the virtual screen) and on again (back to first person within 30 ms,
+meshes hidden again); four Page Down presses moved the panel from 3.00 to 2.00 m and six
+Page Up presses to 3.50 m (`ui status`, captures `p04_ui_default`, `p05_ui_nearer`,
+`p06_ui_farther`); Home toggled twice. In the game's main menu Page Up, Page Down and End
+changed nothing on screen (`p08` to `p11`; the menu footer shows that F2 is the game's
+photo mode key).
+
+Gamepad, without a pad (`controls pad`): `0x0020` (View down) gives `0x0000`, then
+`0x0000` (released) gives `0x0020` twice within 120 ms and `0x0000` after 300 ms (the View
+press handed to the game on release); `0x0020`, `0x0060` (View + left stick click) gives
+`0x0000` and logs `controls: recenter (gamepad)` and `xr: recentered`, the following
+`0x0020` and `0x0000` stay `0x0000` (no View press after a combination); `0x0030` (View +
+Start) switched stereo off, the next `0x0030` on again; View held with D-pad up, up, down
+moved the panel 3.00 -> 3.25 -> 3.50 -> 3.25 m; `0x00a0` toggled first person;
+`0x0001` (D-pad up alone) and `0x0080` (stick click alone) pass unchanged. **Not tested**:
+a real pad (none is connected to the test machine, and without one the game never calls
+XInput), so what the game does with the delayed View press, and that it never sees the
+hidden buttons, is inferred from the filter's output.
+
+`[controls]` keys:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `recenter_key` | `35` (End) | recenter |
+| `stereo_key` | `45` (Insert) | stereo off / on |
+| `ui_nearer_key`, `ui_farther_key` | `34` (Page Down), `33` (Page Up) | UI panel distance |
+| `ui_step`, `ui_min`, `ui_max` | `0.25`, `0.75`, `8` | metres per press and the limits |
+| `pad` | `1` | the gamepad combinations for recenter, stereo and the panel |
+| `pad_hold_view` | `1` | View alone reaches the game on release (see above) |
 
 ## ini keys (`[stereo]` in `ff7vr.ini`)
 
@@ -380,7 +459,8 @@ Through the dev pipe (`[dev] pipe = 1`, `tools\dev\send-input.ps1 -Pipe "<comman
 | `fp call <object address \| class name> <Class.Function> [hex parameters]` | reverse engineering: calls a reflected function on the game thread and prints the first 48 bytes of its parameter block afterwards (return values follow the arguments) |
 | `fp combat <1\|0\|auto>` | test: pretend a battle is or is not in progress |
 | `fp signal <Class.Function> [world] [result=<offset>:<size>] \| none` | switch the battle signal while the game runs (same form as `battle_signal`); `fp status` shows its raw value |
-| `fp pad <hex buttons>` | test: feed an XInput button state through the gamepad filter, prints what the game would get |
+| `fp pad <hex buttons>`, `controls pad <hex buttons>` | test: feed an XInput button state through the gamepad filter, prints what the game would get |
+| `controls status`, `controls recenter\|stereo\|nearer\|farther` | player controls: keys, counters; trigger an action as its key would (see "Player controls") |
 | `fp boom <level\|game>`, `fp pivot <cm>` | third-person camera settings |
 | `fp find <name> [outer] [class]`, `fp classes <text>`, `fp chain <hex address \| pawn \| view \| pc>` | reverse engineering: objects by name, objects whose class name contains a text, the class chain of an object |
 | `cvar get <name>` | integer and float value and set-by priority of a console variable |

@@ -65,8 +65,8 @@ bool adjust_camera(ue::FRotator& rotation, ue::FVector& location, bool decoupled
 // Manual toggle (any thread; applied at the next frame).
 void request_toggle();
 void request_mode(bool first_person);
-// XInput buttons (any thread): the toggle combination, removed from the state while held.
-void filter_pad(unsigned long user, unsigned short* buttons);
+// The gamepad combination for the toggle was pressed (any thread; controls.cpp).
+void request_pad_toggle();
 // Test: pretend a battle is in progress (-1 = use the real signal).
 void set_combat_override(int v);
 

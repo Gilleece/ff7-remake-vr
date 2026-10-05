@@ -6,6 +6,7 @@
 #include "gpu_trace.h"
 #include "rhi_command.h"
 #include "bloom_fix.h"
+#include "controls.h"
 #include "movie_watch.h"
 #include "player.h"
 #include "stereo_device.h"
@@ -138,6 +139,7 @@ void __fastcall tick_detour(void* engine, float delta_seconds, bool idle) {
         movie::tick();
         device::tick_begin();
         player::tick(device::active(), delta_seconds);
+        controls::tick();
         if (!g_view_states_logged) log_view_states(engine);
     }
     g_tick_hook->original<TickFn>()(engine, delta_seconds, idle);
@@ -237,6 +239,7 @@ bool start(const StartupContext& ctx) {
         s.log_frames = static_cast<int>(cfg.get_int("stereo", "log_frames", 0));
         fixed_options() = FixedStereoHost::from_config(cfg);
         read_camera_settings(cfg);
+        controls::read_config(cfg);
         std::vector<std::pair<std::wstring, std::wstring>> stereo_cvars;
         if (cfg.get_bool("stereo", "comfort_cvars", true))
             for (const auto& [name, value] : kComfortCvars) stereo_cvars.emplace_back(name, value);
@@ -275,6 +278,8 @@ bool start(const StartupContext& ctx) {
         });
         dev_commands::add("fp", "fp status|toggle|first|third|combat <0|1|auto>|offset|eye|hide|boom|pivot|bones|funcs|call (fp help): camera modes",
                           [](std::string_view args) { return player::command(std::string(args)); });
+        dev_commands::add("controls", "controls status | pad <hex buttons> | recenter | stereo | nearer | farther: the player's keys and gamepad combinations",
+                          [](std::string_view args) { return controls::command(std::string(args)); });
         dev_commands::add("gpu", "gpu status | gpu names on | gpu trace <prefix> [dump <from> <to>] [scale <n>]: one-frame GPU trace",
                           [](std::string_view args) { return gpu_trace::command(std::string(args)); });
         dev_commands::add("re", "re peek <rva> <n> | re poke <rva> <hex bytes>: read or patch the game image",
@@ -319,6 +324,6 @@ void set_stereo_host(StereoHost* host) { device::set_host(host); }
 bool stereo_installed() { return g_installed.load(); }
 bool stereo_active() { return g_installed.load() && device::active(); }
 void request_stereo(bool on) { device::request_active(on); }
-void filter_pad(unsigned long user, unsigned short* buttons) { player::filter_pad(user, buttons); }
+void filter_pad(unsigned long user, unsigned short* buttons) { controls::filter_pad(user, buttons); }
 
 }  // namespace ff7vr::engine
