@@ -12,6 +12,7 @@
        collect-diagnostics.cmd  zips the last session's log, the settings and system facts
        ff7vr-launcher.ps1   what the .cmd files run
        README.md            the user guide
+       GUIDE.md             the detailed player guide (from docs\guide.md)
        LICENSE              the mod's licence
        THIRD-PARTY-NOTICES.md  the licences of the components built into the mod
        VERSION.txt          commit and build time
@@ -82,6 +83,7 @@ $items = [ordered]@{
     'restore.cmd'        = (Join-Path $PSScriptRoot 'launcher\restore.cmd')
     'collect-diagnostics.cmd' = (Join-Path $PSScriptRoot 'launcher\collect-diagnostics.cmd')
     'README.md'          = (Join-Path $repo 'README.md')
+    'GUIDE.md'           = (Join-Path $repo 'docs\guide.md')
     'LICENSE'            = (Join-Path $repo 'LICENSE')
     'THIRD-PARTY-NOTICES.md' = (Join-Path $repo 'THIRD-PARTY-NOTICES.md')
 }

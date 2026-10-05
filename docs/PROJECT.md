@@ -64,7 +64,7 @@ tools/bench/  benchmark runner and comparison
 tools/package/  release package: launcher with restore, player ini
 tools/re/     Python reverse-engineering scripts
 tools/xr_smoke/  standalone D3D11 test app for the XR layer
-docs/         this file, module documentation and findings (docs/re/); the user guide is README.md
+docs/         this file, module documentation and findings (docs/re/); the user guide is README.md, with the details in docs/guide.md
 third_party/  fetched dependencies
 _ref/         reference clones such as UEVR source (gitignored, read-only)
 ```
@@ -96,4 +96,4 @@ The XR layer has two backends behind one interface:
 
 ### State on 2026-10-05
 
-M0 to M2, M5 and M6 are done as far as they can be without a headset: everything was verified with the Null backend, with SteamVR's null driver and with per-eye captures. Since then the mod has been played on a Quest 3 through Virtual Desktop (3072x3264 per eye): the 3D rendering works there, a right-eye ghost from the ambient occlusion pass was fixed and confirmed in the headset, and a washed-out picture and a white pattern on skin indoors are open. M3: the in-game UI is on its own layer and the right-eye bloom fault is fixed; movies, cutscenes, conversations and combat have not been reached in testing. M4: foveated rendering is in and on by default; the cvar preset is documented but not applied. `README.md` lists what is untested and the known problems.
+M0 to M2, M5 and M6 are done as far as they can be without a headset: everything was verified with the Null backend, with SteamVR's null driver and with per-eye captures. Since then the mod has been played on a Quest 3 through Virtual Desktop (3072x3264 per eye): the 3D rendering works there, a right-eye ghost from the ambient occlusion pass was fixed and confirmed in the headset, and a washed-out picture and a white pattern on skin indoors are open. M3: the in-game UI is on its own layer and the right-eye bloom fault is fixed; movies, cutscenes, conversations and combat have not been reached in testing. M4: foveated rendering is in and on by default; the cvar preset is documented but not applied. `docs/guide.md` lists what is untested and the known problems in full; `README.md` has the short version.

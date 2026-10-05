@@ -507,7 +507,7 @@ powershell -NoProfile -Command ". .\tools\dev\common.ps1; Get-GameRoot; (Get-Scr
 `package.ps1` makes a Release build (`build\release`) and assembles
 `dist\ff7vr-<date>-<commit>\` (plus a zip): the DLL, the player's ini
 (`tools\package\ff7vr.ini`), the launcher (`tools\package\launcher\`) and the
-user guide (`README.md`). The package does not use this repository or these
+user guide (`README.md`, and `docs/guide.md` as `GUIDE.md`). The package does not use this repository or these
 scripts: the launcher finds the game itself, records its changes in
 `End\Binaries\Win64\ff7vr.session.json` and undoes them after the session or with
 `restore`. It waits until the game and its helpers (root launcher, crash
