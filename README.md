@@ -76,7 +76,8 @@ Options, from a command prompt in the package folder:
 start-vr.cmd -KeepInstalled     leave the mod installed after the game exits (Luma stays set aside),
                                 so the game can also be started from Steam with the mod.
                                 restore.cmd removes it again.
-start-vr.cmd -KeepLuma          do not set ReShade/Luma aside (untested combination)
+start-vr.cmd -KeepLuma          do not set ReShade/Luma aside. Does not work yet: with ReShade/Luma
+                                loaded the mod does not reach the headset and the game runs flat
 start-vr.cmd -ExtraArgs "..."   extra arguments for the game
 powershell -NoProfile -ExecutionPolicy Bypass -File ff7vr-launcher.ps1 status
                                 show what is installed, change nothing

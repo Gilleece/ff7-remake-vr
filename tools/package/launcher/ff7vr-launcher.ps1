@@ -38,8 +38,9 @@
   exits, so the game can be started from Steam with the mod. Undo with restore.
 
 .PARAMETER KeepLuma
-  Do not set Luma's dxgi.dll aside (runs the mod together with ReShade/Luma,
-  which has not been tested).
+  Do not set Luma's dxgi.dll aside. With ReShade/Luma loaded the mod
+  currently does not reach the headset (its D3D11 hooks are not installed,
+  the game runs flat); for testing only.
 
 .PARAMETER GameDir
   The game's install folder (the one containing End\). Found through Steam when
@@ -489,7 +490,10 @@ try {
         Info 'Set ReShade/Luma (dxgi.dll) aside for this session'
     } else {
         Write-Session $bin $session
-        if ($KeepLuma) { Warn 'Leaving ReShade/Luma in place (-KeepLuma). The mod has not been tested together with it.' }
+        if ($KeepLuma) {
+            Warn 'Leaving ReShade/Luma in place (-KeepLuma). With it loaded the mod currently does not reach'
+            Warn 'the headset: the game runs flat on the monitor. Kept for testing only.'
+        }
     }
     # Leftover log of an earlier kept install goes to logs\ first.
     $old = Save-Logs $bin ($stamp + '-before')
