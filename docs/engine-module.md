@@ -23,7 +23,7 @@ global are written, and two single bytes of code can be changed:
 | the game window's mode | `r.SetRes` | the first time stereo becomes active in exclusive or windowed fullscreen: switched to a normal window (`[stereo] vr_window`), back when stereo is switched off (see "Window modes") |
 | light sort-key immediate | one byte in `FDeferredShadingSceneRenderer::RenderLights` | only when `[stereo] light_fix = 1` or the `stereo lightfix 1` command |
 | Square Enix's bloom reduce pass (`Process`) | inline hook, render thread | `[stereo] bloom_fix` (default on): for the first level of a view that does not start at the origin, an RHI command arms the right-eye bloom fix (below) |
-| D3D11 immediate context draw/dispatch/clear/copy functions | inline hooks, RHI thread | installed at the first stereo frame when the bloom fix is on (it needs to act on one DrawIndexed), or by the first GPU trace; otherwise not installed |
+| D3D11 immediate context draw/dispatch/clear/copy functions | inline hooks, RHI thread | installed at the first stereo frame when the bloom fix or the ambient occlusion fix is on (they act on single DrawIndexed calls), or by the first GPU trace; otherwise not installed |
 | `FRenderTargetPool::FindFreeElement` | inline hook, render thread | only after `gpu names on` (GPU trace labels) |
 | the object array and name pool | read on the game thread | only with `[stereo] movie_screen = 1`: movie detection (below) |
 | the controlled pawn, its location and the view target | reflected functions called through `ProcessEvent`, game thread, every frame | camera modes: level boom and first person (see "Camera modes") |
@@ -391,6 +391,7 @@ hidden buttons, is inferred from the filter's output.
 | `mirror` | `crop` | desktop window in stereo: `crop` (left eye, centre crop at the window's aspect), `left`, `right`, `both` (side by side, letterboxed), `off` |
 | `light_fix` | `0` | light sort-key patch (see `docs/re/engine.md` section 6) |
 | `bloom_fix` | `1` | right-eye bloom fix (below) |
+| `ao_fix` | `1` | right-eye ambient occlusion fix (below) |
 | `vr_window` | `1280x720` | window size the game is switched to while VR renders in a fullscreen mode; `0` keeps the mode (see "Window modes") |
 | `movie_screen` | `0` | movie detection: stereo is held off while a pre-rendered movie plays, so the virtual screen shows it (below) |
 | `allow_unknown_build` | `0` | try a game build other than 1.0.0.7 if every signature and layout check passes |
@@ -449,6 +450,7 @@ Through the dev pipe (`[dev] pipe = 1`, `tools\dev\send-input.ps1 -Pipe "<comman
 | `stereo lightfix <0\|1>` | light sort-key patch |
 | `stereo log <n>` | log the eye cameras of the next n stereo frames |
 | `stereo bloomfix [0\|1]` | right-eye bloom fix on/off, with its counters (reduce passes seen, commands queued, draws fixed, misses) |
+| `stereo aofix [0\|1]` | right-eye ambient occlusion fix on/off, with its counters (draws fixed, failures); one per stereo frame |
 | `stereo movie [on\|off]`, `stereo movie menu <0\|1>` | movie detection on/off and its state; `menu 1` counts the menu background players too (test) |
 | `stereo window [<w>x<h>\|0]` | window size while VR renders in a fullscreen mode, and the state |
 | `stereo frametime <s>` | frame time window length in seconds; restarts the window (for A/B measurements) |
@@ -645,6 +647,56 @@ on in the same session): `captures/stereo/runL/crop_room_R_before_after.png` (fi
 `runL/l_nofix_*.png`, `l_fix2_*.png`, `runM/m09_*`, `n03_*`. The left eye is the same with the
 fix on and off (mean pixel difference 0.6, the same as between two captures without any
 change).
+
+At 3072x3264 per eye (Null backend, street, fix off and on with `r.BloomQuality 5`): the fix
+is applied once per stereo frame (`applied` = `queued`, `missed 0`), and switching it off adds
+a blend of the left eye's image to the right eye (correlation of the right eye's change with
+the left image 0.51, estimated blend weight 0.12; the left eye changes by capture noise only):
+`captures/stereo/runZ/c06_bloom_fix_*.png`, `c07_bloom_nofix_*.png`.
+
+## Right-eye ambient occlusion fix
+
+Square Enix's screen-space ambient occlusion has the same fault as its bloom. Per view it runs
+a full-size setup pass at the view's rectangle, then three half-size passes with the view at
+the origin of their targets, then a full-size resolve back at the view's rectangle. The first
+half-size pass reads the setup texture relative to the origin, so for the right view it
+computed the occlusion from the left view's setup; the resolve then combined that with the
+right view's own depth and normals. The right eye's occlusion buffer was a double image: its
+own objects plus a dark copy of everything near the camera at the left eye's image positions
+(with the Quest 3 projection the two eyes' images are about 750 px apart at 3072 px width, so
+the copy sits "about a metre" to the side of a nearby object). The occlusion darkens the
+ambient and reflected light, so the copy is strongest in shade, where that light is all there
+is; in direct sunlight it is faint. `ShowFlag.AmbientOcclusion 0` does not switch this
+occlusion off. Details: `docs/re/engine.md`, section 10.
+
+`src/engine/src/bloom_fix.cpp` (`ao_fix`): the pass is recognised on the RHI thread from the
+draw sequence, without an address: a full-screen draw (one triangle) at the origin, at most
+half as wide as the previous full-screen draw, whose shader resource 0 is the target that
+previous draw wrote at a rectangle not starting at the origin. That draw runs with a scratch
+copy of the rectangle at the origin, the same mechanism as the bloom fix (the two share the
+scratch textures). Stock Unreal passes keep each view at its own rectangle in every
+intermediate target, so they never match. `stereo aofix` shows `applied` growing by one per
+stereo frame and `failed 0`.
+
+Cost: one copy of the eye's rectangle of the setup texture per frame (3072x3264 RGBA16F at the
+Quest 3 size, about 80 MB of copy traffic); no extra video memory when the bloom fix's scratch
+texture has the same size and format (it does in the scenes tested), otherwise one more
+texture of the scene buffer's size.
+
+Evidence (Null backend, eyes 3072x3264, street next to the sandwich board, one-frame GPU
+traces): before, the right view's first half-size pass was numerically the left view's (mean
+difference 0.33 of 255, `captures/stereo/runX/tr1` events 2700 and 2705) and its occlusion
+buffer showed both eyes' objects (`captures/stereo/runX/tr1_02708.rgba`, right half); with the
+fix the two views' first passes differ by the eyes' parallax (mean difference 8.3,
+`captures/stereo/runZ/tr2` events 2969 and 2974) and the right half of the occlusion buffer
+holds only the right eye's objects (`tr2_02977.rgba`). Final images with the fix on and off:
+`captures/stereo/runZ/c01_fix_*`, `c02_nofix_*` (board ahead), `c04_off_fix_*`,
+`c05_off_nofix_*` (board off-centre), `d01_fix_*`, `d02_nofix_*`, `d03_fix_*` (camera turned
+towards the stall, roughly the direction of the headset session). These spots are sunlit, and
+there the difference the fix makes in the final image is small, at the level of the
+animation between two captures; the ghost in the headset session was seen in shade. The left
+eye is the same with the fix on and off (differences at the level of two captures without
+any change).
 
 ## Movies
 
@@ -900,20 +952,27 @@ Ordered by how much they would bother a player in the headset:
 7. Square Enix's custom glare (`docs/re/engine.md`, section 10) puts both views' glare at the
    same place of one target; in a scene with glare primitives the left eye would get the
    right eye's glare. Not seen yet (no glare primitives in the scenes tested).
-8. Without the UI layer (`[ui] layer = 0`, or no XR session) the in-game UI is composited
+8. **Posters on the sandwich board** outside the first room looked different between the
+   eyes in a headset session (missing in the left eye with the board off-centre, a
+   translucent offset copy in the right eye). With the Null backend at 3072x3264 the posters
+   were in place in both eyes, centred and off-centre, before and after the ambient
+   occlusion fix; only the right eye's framed notice looked paler than the left's. The
+   occlusion ghost (fixed) is the likely cause, since that session's image was much darker
+   (shade, where occlusion dominates); not confirmed in a headset.
+9. Without the UI layer (`[ui] layer = 0`, or no XR session) the in-game UI is composited
    into each eye as a central crop of the 16:9 UI; the size variables cannot fix that
    (`docs/re/engine.md`, "What the UI composite does with an eye view"). With it the UI is on
    its own layer (section "UI layer").
-9. **The headset's own recenter** (holding the Meta button on a Quest) is logged by the XR
+10. **The headset's own recenter** (holding the Meta button on a Quest) is logged by the XR
    layer (`runtime reference space change pending`) but the recenter offset stored at the
    session start or by the recenter key stays applied on top of the runtime's new origin
    (`src/xr/src/openxr_backend.cpp`, the `XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING`
    case), so after it the view can be off by the yaw and position stored before. The
    recenter key (End, View/Back + left stick click) puts it right.
-10. **Gamepad View/Back alone** reaches the game on release, about 120 ms long, instead of
+11. **Gamepad View/Back alone** reaches the game on release, about 120 ms long, instead of
    while held (`[controls] pad_hold_view`). A game action that needs View held would not
    work; none is known in exploration (View opens the map).
-11. With a real OpenXR runtime the render module must hand the frame its XR thread already
+12. With a real OpenXR runtime the render module must hand the frame its XR thread already
    waited to the game thread at the start of stereo instead of waiting a second one
    (`XrController::BeginGameFrame`, in place); otherwise the game thread blocks in
    `xrWaitFrame` forever when the pipeline is idle (seen with SteamVR's null driver).

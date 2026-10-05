@@ -362,7 +362,11 @@ Square Enix change found: `FSceneViewProjectionData` has an extra 64-byte matrix
 `ConstrainedViewRect` +0xE0. The mono path fills +0x90 with an aspect-dependent scale
 matrix; the stereo path never writes it, so stereo views keep whatever the caller
 initialised (STATIC; consequence unknown, nothing visibly wrong in the `-emulatestereo`
-run).
+run). The writer is the end of `CalculateProjectionMatrixGivenView` (`0x2dce12f`-`0x2dce1cf`):
+row +0xA0 is `(0, w/h, 0, 0)` with `w/h` the view rectangle's aspect (from +0xD0..+0xDC); rows
++0x90, +0xB0, +0xC0 are constants loaded from `.rdata` (`0x4f92e30`, `0x4f933b0`, `0x4f947b0`),
+presumably the identity rows, so the matrix is a vertical scale by the aspect (INFERRED from
+the code, constants not read). Not involved in the right-eye ghosts of section 10.
 
 `FSceneView::StereoPass` is at +0x970 (STATIC). `ULocalPlayer`: `PlayerController` +0x30,
 `ViewportClient` +0x58, `Origin` +0x60, `Size` +0x68, `AspectRatioAxisConstraint` +0x7C,
@@ -729,6 +733,9 @@ of Square Enix's passes do not: they put every view's data at the origin of thei
 | Subsurface scattering (`SubsurfaceSetup` / `SubsurfaceBlurX/Y`, half size) | each view at the origin `0 0 1032 1104`; the combine (`SubsurfaceColor`) writes back at the view's own rectangle | yes: the right view's blur holds the right eye's skin (read-backs differ by the eyes' parallax) |
 | Bloom (`BloomReduce`, 10 levels, target size = scene buffer >> (level + 1); `BloomBlur`, 9 upsample/combine passes) | each view at the origin; the tonemapper reads the result at the origin | **no** (fixed by the mod), see below |
 | Custom glare (`CustomGlare`, `CombinedExtraGlare`) | each view at the origin of one shared target | not exercised: no glare primitives in the scenes tested; see below |
+| Ambient occlusion (full-size setup at the view's rectangle; three half-size passes, pooled under names shared with the subsurface targets, `SubsurfaceBlurY` / `SubsurfaceBlurX` / `AmbientOcclusionDownsample`; resolve into `ScreenSpaceAO` + `AmbientOcclusionResolve` at the view's rectangle) | half-size passes at the origin | **no** (fixed by the mod), see below |
+| Ray-traced shadows (compute, `RayTracedShadows`, 3072x1632 at eyes 3072x3264, one 192x204-group dispatch per view, consumed by a per-view instanced draw into `CapsuleShadow`) | each view at the origin quarter | yes as far as checked: the two views' results differ (mean difference 3.3 of 255) |
+| Screen-space reflections (Square Enix's, before the reflection composite) | each view's draw covers the whole double-wide target and writes its result at the origin; the right view's draw leaves the right half at 0 | consistent per view as far as checked (the right view's result holds the right eye's objects); the left view's draw also writes meaningless values into the right half, which the right view's draw then overwrites |
 
 ### The right-eye ghost: the bloom's first pass (LIVE, fixed)
 
@@ -758,6 +765,30 @@ of Square Enix's passes do not: they put every view's data at the origin of thei
   0 differ by the eyes' parallax (mean difference 20.9) and the right eye shows no ghost in
   the room, the street and the shop (captures in section "Evidence" of
   `docs/engine-module.md`).
+
+### The right-eye ambient occlusion ghost (LIVE, fixed)
+
+Found at eyes 3072x3264 in the street next to the sandwich board outside the first room
+(`captures/stereo/runX/tr1`, a frame with `r.BloomQuality 0`, so the bloom fix was idle).
+
+- Sequence per view (event numbers of `tr1`): setup at the view's rectangle into a full-size
+  RGBA16F target (2699 left, 2704 right, `vp 3072 0 3072 3264`), three half-size passes at
+  `vp 0 0 1536 1632` (2700-2702, 2705-2707; shader resource 0 of the first is the setup
+  target), resolve at the view's rectangle (2703, 2708) into `ScreenSpaceAO` (R8) and a
+  per-view `AmbientOcclusionResolve` history.
+- The right view's first half-size pass produced the left view's result: mean difference 0.33
+  of 255 between 2700 and 2705 at the origin, while the two setups differ by 5.5. The resolve
+  combines it with the right view's full-size data, so the right half of `ScreenSpaceAO` is a
+  double image (the right eye's objects plus the left eye's at identical pixel positions):
+  `tr1_02708.rgba`. The reflection environment composite (2761) multiplies it into the ambient
+  and reflected light.
+- Same fault as the bloom reduce pass: the shader samples its full-size input relative to the
+  origin, whatever rectangle the C++ side passes.
+- Fix: `bloom_fix.cpp` `ao_fix` (`docs/engine-module.md`, "Right-eye ambient occlusion fix").
+  With it 2969 / 2974 of `captures/stereo/runZ/tr2` differ by 8.3 and the right half of
+  `ScreenSpaceAO` (`tr2_02977.rgba`) holds only the right eye's objects.
+- `ShowFlag.AmbientOcclusion 0` does not switch this pass off (captures with and without it
+  differ only by animation).
 
 ### Custom glare (STATIC + LIVE, not exercised)
 
