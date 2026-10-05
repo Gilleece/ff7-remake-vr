@@ -17,6 +17,13 @@
        THIRD-PARTY-NOTICES.md  the licences of the components built into the mod
        VERSION.txt          commit and build time
      and a .zip of that folder next to it.
+  3. A drop-in zip next to it, ff7vr-<date>-<commit>-dropin.zip, for installing
+     the mod by hand without the launcher. It holds only what goes into the
+     game's End\Binaries\Win64 folder:
+       xinput1_3.dll, ff7vr.ini, ff7vr-start.cmd (starts the game directly)
+       ff7vr-docs\README.md, GUIDE.md, LICENSE, THIRD-PARTY-NOTICES.md, VERSION.txt
+     Installing = unzipping it into End\Binaries\Win64; see GUIDE.md,
+     "Installing without the launcher".
   An existing folder of the same name is refreshed; its logs\ folder is kept.
 
   The package does not need this repository: copy the folder anywhere.
@@ -105,6 +112,30 @@ if (-not $NoZip) {
     $files = @(Get-ChildItem -LiteralPath $pkg -File | ForEach-Object { $_.FullName })
     Compress-Archive -LiteralPath $files -DestinationPath $zip
     Step "Zip: $zip"
+
+    # Drop-in zip: entries written one by one with '/' separators (Compress-Archive
+    # in Windows PowerShell 5.1 writes backslashes into the names of files in sub-folders).
+    $dropin = "$pkg-dropin.zip"
+    if (Test-Path -LiteralPath $dropin) { Remove-Item -LiteralPath $dropin -Force }
+    $entries = [ordered]@{
+        'xinput1_3.dll'                    = (Join-Path $pkg 'xinput1_3.dll')
+        'ff7vr.ini'                        = (Join-Path $pkg 'ff7vr.ini')
+        'ff7vr-start.cmd'                  = (Join-Path $PSScriptRoot 'dropin\ff7vr-start.cmd')
+        'ff7vr-docs/README.md'             = (Join-Path $pkg 'README.md')
+        'ff7vr-docs/GUIDE.md'              = (Join-Path $pkg 'GUIDE.md')
+        'ff7vr-docs/LICENSE'               = (Join-Path $pkg 'LICENSE')
+        'ff7vr-docs/THIRD-PARTY-NOTICES.md' = (Join-Path $pkg 'THIRD-PARTY-NOTICES.md')
+        'ff7vr-docs/VERSION.txt'           = (Join-Path $pkg 'VERSION.txt')
+    }
+    Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+    $za = [System.IO.Compression.ZipFile]::Open($dropin, [System.IO.Compression.ZipArchiveMode]::Create)
+    try {
+        foreach ($k in $entries.Keys) {
+            [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($za, $entries[$k], $k,
+                [System.IO.Compression.CompressionLevel]::Optimal)
+        }
+    } finally { $za.Dispose() }
+    Step "Drop-in zip: $dropin"
 }
 
 Step "Package ready: $pkg"
@@ -113,3 +144,4 @@ Write-Host ''
 Write-Host "Start a session:  $pkg\start-vr.cmd"
 Write-Host "Back to normal:   $pkg\restore.cmd"
 Write-Host "Diagnostics:      $pkg\collect-diagnostics.cmd"
+if (-not $NoZip) { Write-Host "Without launcher: unzip $name-dropin.zip into the game's End\Binaries\Win64 (GUIDE.md)" }
