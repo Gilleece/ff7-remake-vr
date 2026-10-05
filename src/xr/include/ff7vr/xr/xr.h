@@ -1,0 +1,355 @@
+// ff7vr XR layer: backend interface.
+//
+// A static library that talks to the VR runtime. It knows nothing about Unreal
+// Engine. Two backends implement the same interface:
+//   * OpenXR (D3D11, XR_KHR_D3D11_enable), loader linked statically.
+//   * Null: no runtime. Fixed resolution/FOV, scripted head motion, PNG capture.
+//
+// See xr_math.h for coordinate conventions (right-handed, Y up, -Z forward,
+// metres) and helpers that convert to Unreal's space.
+//
+// ============================ THREADING ====================================
+// Designed for an engine with a game thread (GT) and a render thread (RT) that
+// owns the D3D11 immediate context. Per frame:
+//
+//   GT: WaitFrame(info)            -> blocks for frame pacing (xrWaitFrame), polls
+//                                     runtime events, returns poses for the
+//                                     predicted display time and a frameId.
+//   RT: BeginFrame(info.frameId)   -> xrBeginFrame.
+//   RT: (optional) RelocateViews(frameId, views)   late pose update.
+//   RT: render both eyes into one texture (side by side or any layout).
+//   RT: SubmitFrame(frameId, desc) -> copy/blit into runtime swapchains, xrEndFrame.
+//
+// Rules:
+//   1. WaitFrame is called from ONE thread (normally GT). Not reentrant.
+//   2. BeginFrame/SubmitFrame/SkipFrame/RelocateViews are called from ONE thread
+//      (normally RT), and that thread must be the only user of the device's
+//      immediate context while they run (they use it, and so may the runtime).
+//      They may run concurrently with WaitFrame on the other thread.
+//   3. Every frameId returned with info.sessionRunning == true MUST eventually
+//      get BeginFrame + (SubmitFrame or SkipFrame), in increasing frameId order.
+//      OpenXR blocks the next xrWaitFrame until the previous frame was begun,
+//      so a missing BeginFrame deadlocks the game thread. If the engine drops
+//      a frame, call SkipFrame(frameId) for it (from the RT).
+//   4. The engine may run one frame ahead: WaitFrame(N+1) may be called before
+//      SubmitFrame(N). Up to kMaxFramesInFlight frames may be outstanding.
+//   5. Init and Shutdown: call with no other call in progress on any thread.
+//   6. Recenter/ResetRecenter/RequestCapture/GetState/GetRuntimeInfo: any thread.
+//   7. frameIds of frames that became stale (session stopped/restarted between
+//      WaitFrame and SubmitFrame) are accepted and ignored (Result::Ok).
+//
+// D3D11 state: BeginFrame, SubmitFrame and SkipFrame save the immediate
+// context's pipeline state on entry and restore it on exit (covering both our
+// own draws and anything the runtime does on the context inside
+// xrBeginFrame/xrEndFrame). Saved: IA (layout, topology, all vertex buffers,
+// index buffer), VS/PS/GS/HS/DS shaders with constant buffers, SRVs and
+// samplers in slots 0-1 (the only slots this library binds), RS state,
+// viewports and scissors, OM render targets, depth view, UAVs, blend and
+// depth-stencil state, and predication. Compute shader state is never touched.
+//
+// ============================ SWAPCHAINS ===================================
+// The OpenXR backend creates one swapchain per eye and submits one projection
+// layer whose two views each use their own swapchain at imageRect (0,0,w,h).
+// Chosen over one double-wide swapchain with a sub-image per eye because:
+//   * alternate-eye mode is free: an eye that is not updated simply keeps its
+//     last released image (no copy of the old half into a new image);
+//   * it is what every runtime supports best (per-view swapchains are the
+//     common path in SteamVR, VDXR, Oculus);
+//   * the cost difference is one extra CopySubresourceRegion per frame.
+// A depth layer (XR_KHR_composition_layer_depth) will add one depth
+// swapchain per eye chained to the same views; a HUD quad layer will be an
+// extra layer after the projection layer. Both fit SubmitDesc without
+// changing the existing fields.
+// ===========================================================================
+#pragma once
+
+#include "ff7vr/xr/xr_math.h"
+
+#include <dxgiformat.h>
+
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <vector>
+
+struct ID3D11Device;
+struct ID3D11Texture2D;
+
+namespace ff7vr::xr {
+
+constexpr uint32_t kMaxFramesInFlight = 4;
+
+enum class LogLevel { Debug, Info, Warn, Error };
+
+// Host-provided log sink. May be called from any thread, concurrently.
+using LogCallback = std::function<void(LogLevel level, std::string_view message)>;
+
+enum class BackendType { Null, OpenXR };
+
+enum class Result {
+    Ok = 0,
+    NotInitialized,
+    InvalidArgument,
+    CallOrder,          // e.g. SubmitFrame for a frame that was never begun
+    RuntimeUnavailable, // no runtime / runtime JSON missing / instance creation failed
+    SystemUnavailable,  // runtime OK but no headset right now (retry Init later)
+    GraphicsMismatch,   // device on wrong adapter / feature level too low
+    SessionLost,        // runtime lost the session; Shutdown + Init to recover
+    Error,
+};
+const char* ToString(Result r);
+
+enum class Eye : uint32_t { Left = 0, Right = 1 };
+
+// High-level session state for the host.
+enum class SessionState {
+    Uninitialized,  // before Init / after Shutdown
+    Idle,           // session exists, runtime not ready (headset idle, app not focused in runtime)
+    Running,        // frame loop active, runtime not showing our frames (SYNCHRONIZED)
+    Visible,        // our frames are visible, input not focused
+    Focused,        // visible and focused
+    Stopping,       // runtime asked to stop; library ends the session itself
+    Lost,           // session/instance lost: Shutdown, then Init again later
+    ExitRequested,  // runtime wants the app to exit (XR_SESSION_STATE_EXITING); Shutdown
+};
+const char* ToString(SessionState s);
+
+struct View {
+    Pose pose{};  // eye pose in tracking space (after library recenter)
+    Fov fov{};
+};
+
+// Head motion script for the Null backend. Deterministic: a function of frameId only.
+enum class NullMotion {
+    Static,    // identity head pose
+    YawSweep,  // yaw +-30 deg sine, 8 s period
+    Sway,      // position sway: x +-3 cm (4 s), y +-2 cm (3 s), z +-1 cm (5 s)
+    YawAndSway,
+};
+
+struct NullOptions {
+    // Quest 3 class defaults (2064x2208 panel per eye; Meta default render target is a bit lower).
+    uint32_t eyeWidth = 2064;
+    uint32_t eyeHeight = 2208;
+    float refreshHz = 90.0f;
+    // Quest-3-like asymmetric FOV, left eye (radians). Right eye mirrors left/right.
+    Fov fovLeftEye{-52.0f * kDegToRad, 42.0f * kDegToRad, 46.0f * kDegToRad, -50.0f * kDegToRad};
+    float ipdMetres = 0.064f;
+    NullMotion motion = NullMotion::Static;
+    bool paceToRefresh = false;  // WaitFrame sleeps to emulate vsync at refreshHz
+    // Format of the Null backend's emulated swapchain images.
+    DXGI_FORMAT swapchainFormat = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+};
+
+struct InitDesc {
+    BackendType backend = BackendType::OpenXR;
+    ID3D11Device* device = nullptr;  // required; the library AddRefs it
+    LogCallback log;                 // optional (nullptr = silent)
+
+    // OpenXR runtime selection, applied per process before the loader creates
+    // the instance (see ApplyRuntimeSelection). "" or "inherit" = leave the
+    // process environment as is. Default: "virtualdesktop" (VDXR, Quest via
+    // Virtual Desktop), regardless of the machine's default runtime.
+    std::string runtime = "virtualdesktop";
+    std::string appName = "ff7-remake-vr";
+    uint32_t appVersion = 1;
+
+    // Per-eye swapchain size. 0 = runtime recommended size * resolutionScale.
+    uint32_t eyeWidth = 0;
+    uint32_t eyeHeight = 0;
+    float resolutionScale = 1.0f;
+
+    // Preferred swapchain format. UNKNOWN = automatic: first of
+    // R8G8B8A8_UNORM_SRGB, B8G8R8A8_UNORM_SRGB, R16G16B16A16_FLOAT,
+    // R10G10B10A2_UNORM, R8G8B8A8_UNORM, B8G8R8A8_UNORM offered by the runtime.
+    DXGI_FORMAT swapchainFormat = DXGI_FORMAT_UNKNOWN;
+
+    // Request XR_KHR_composition_layer_depth if available (not used yet; reserved
+    // so a depth layer can be added without API change).
+    bool requestDepthExtension = true;
+    // Enable XR_EXT_debug_utils messages from the runtime/loader into the log (if offered).
+    bool enableDebugUtils = false;
+    // Disable every implicit OpenXR API layer registered on the machine (OpenXR
+    // Toolkit, ReShade, vendor compatibility layers...) for this process only,
+    // by setting each layer's own disable_environment variable before the
+    // instance is created. The layers found are listed in RuntimeInfo either way.
+    bool disableImplicitApiLayers = false;
+
+    NullOptions null;
+};
+
+struct SwapchainInfo {
+    uint32_t width = 0, height = 0;
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+    uint32_t imageCount = 0;
+};
+
+struct RuntimeInfo {
+    BackendType backend = BackendType::Null;
+    std::string runtimeName;      // e.g. "SteamVR/OpenXR", "VirtualDesktopXR", "Null"
+    std::string runtimeVersion;   // "major.minor.patch"
+    std::string runtimeJson;      // resolved runtime JSON (OpenXR), "" = system default
+    std::string systemName;       // XrSystemProperties::systemName
+    uint32_t vendorId = 0;
+    uint32_t maxSwapchainWidth = 0, maxSwapchainHeight = 0;
+    uint32_t recommendedWidth[2]{}, recommendedHeight[2]{};  // per eye
+    uint32_t maxWidth[2]{}, maxHeight[2]{};
+    float refreshHz = 0;          // current refresh rate (XR_FB_display_refresh_rate), else estimated from frame period, 0 = unknown
+    std::vector<float> availableRefreshHz;
+    std::vector<DXGI_FORMAT> runtimeFormats;  // swapchain formats offered by the runtime, runtime preference order
+    SwapchainInfo eyeSwapchain[2];
+    bool orientationTracking = false, positionTracking = false;
+    bool depthLayerSupported = false;  // XR_KHR_composition_layer_depth enabled
+    std::vector<std::string> enabledExtensions;
+    std::vector<std::string> apiLayers;       // API layers the loader reports (implicit ones load automatically)
+    std::vector<std::string> implicitLayers;  // implicit layer manifests in the registry, "<json> (enabled|disabled|disabled for this process)"
+    uint64_t adapterLuid = 0;                 // adapter required by the runtime (LowPart | HighPart<<32)
+    int64_t lastPredictedDisplayPeriod = 0;   // nanoseconds, from the last WaitFrame
+};
+
+struct FrameInfo {
+    uint64_t frameId = 0;           // 0 when sessionRunning is false
+    bool sessionRunning = false;    // false: no XR frame this time; do not call Begin/Submit
+    bool shouldRender = false;      // runtime wants pixels; if false still Begin + Submit (or SkipFrame)
+    int64_t predictedDisplayTime = 0;   // runtime clock, nanoseconds (XrTime)
+    int64_t predictedDisplayPeriod = 0; // nanoseconds
+    bool orientationValid = false;
+    bool positionValid = false;
+    View views[2]{};                // [0] left, [1] right; tracking space after recenter
+    Pose head{};                    // head (VIEW space origin) in tracking space after recenter
+    SessionState state = SessionState::Uninitialized;
+};
+
+struct Rect {
+    int32_t x = 0, y = 0;
+    uint32_t width = 0, height = 0;
+};
+
+// How the source texture's values are encoded.
+enum class ColorEncoding {
+    Srgb,    // gamma (sRGB) encoded values in a UNORM format: what a game back buffer holds
+    Linear,  // linear light (scene colour, FP16, or a texture read through an _SRGB view)
+};
+
+struct EyeSubmit {
+    // Region of the source texture holding this eye, in pixels of the selected
+    // mip, origin top-left. width or height 0 = the left (Eye::Left) or right
+    // half of the texture. If the region is larger than the eye swapchain it is
+    // scaled down to fit (aspect preserved); otherwise it is copied 1:1 and the
+    // layer's imageRect is the region's size.
+    Rect rect{};
+    // false: alternate-eye mode. The eye keeps showing its last submitted image,
+    // re-projected by the runtime with the pose it was rendered with. If the eye
+    // was never submitted, it is updated anyway.
+    bool update = true;
+    // Pose/FOV the image was actually rendered with (tracking space after
+    // recenter, like FrameInfo::views). null = the frame's views (or the views
+    // from RelocateViews).
+    const View* viewOverride = nullptr;
+};
+
+struct SubmitDesc {
+    ID3D11Texture2D* texture = nullptr;  // null: submit no layers (frame shows nothing new)
+    DXGI_FORMAT viewFormat = DXGI_FORMAT_UNKNOWN;  // format to read the texture as (required if typeless); UNKNOWN = texture format
+    ColorEncoding encoding = ColorEncoding::Srgb;
+    uint32_t arraySlice = 0;
+    uint32_t mipLevel = 0;
+    EyeSubmit eyes[2]{};
+    // Reserved for future layers (depth, HUD quad); must stay null for now.
+    const void* reserved = nullptr;
+};
+
+struct CaptureRequest {
+    std::string pathPrefix;  // writes <pathPrefix>_L.png and <pathPrefix>_R.png (UTF-8 path)
+};
+
+struct CaptureResult {
+    uint64_t frameId = 0;
+    bool ok = false;
+    std::string files[2];
+    std::string error;
+};
+
+struct FrameStats {
+    uint64_t framesWaited = 0, framesBegun = 0, framesSubmitted = 0, framesSkipped = 0;
+    uint64_t framesNotRendered = 0;   // shouldRender == false
+    uint64_t framesDiscarded = 0;     // xrBeginFrame returned XR_FRAME_DISCARDED
+    uint64_t copyPath = 0, blitPath = 0;  // per-eye submission paths used
+};
+
+class IXrBackend {
+public:
+    virtual ~IXrBackend() = default;
+
+    virtual Result Init(const InitDesc& desc) = 0;
+    virtual void Shutdown() = 0;
+    virtual BackendType Type() const = 0;
+
+    // Snapshot of what the runtime reported. Valid after a successful Init.
+    virtual RuntimeInfo GetRuntimeInfo() const = 0;
+    virtual SessionState GetState() const = 0;
+
+    // GT. See threading rules above. Returns Ok with info.sessionRunning=false
+    // while the session is idle (host keeps rendering flat). Returns
+    // SessionLost / Error when the host must Shutdown.
+    virtual Result WaitFrame(FrameInfo& info) = 0;
+
+    // RT.
+    virtual Result BeginFrame(uint64_t frameId) = 0;
+    // RT, optional: re-locate the eyes for frameId's display time (late latching).
+    // The returned views replace the frame's views for submission.
+    virtual Result RelocateViews(uint64_t frameId, View outViews[2]) = 0;
+    // RT. Copies the eye regions into the runtime swapchains and ends the frame.
+    virtual Result SubmitFrame(uint64_t frameId, const SubmitDesc& desc) = 0;
+    // RT. Ends the frame with no layers (begins it first if needed).
+    virtual Result SkipFrame(uint64_t frameId) = 0;
+
+    // Any thread. Recenter: make the current head yaw and position the new
+    // origin (pitch/roll untouched). Applied from the next WaitFrame.
+    virtual void Recenter() = 0;
+    virtual void ResetRecenter() = 0;
+
+    // Any thread. Captures the eye images of the next submitted frame (what
+    // went into the swapchains), converted to 8-bit sRGB PNG on a worker thread.
+    virtual void RequestCapture(const CaptureRequest& req) = 0;
+    // Blocks until all requested captures were written (or timeout). Returns results since last call.
+    virtual std::vector<CaptureResult> WaitForCaptures(uint32_t timeoutMs) = 0;
+
+    virtual FrameStats GetStats() const = 0;
+};
+
+std::unique_ptr<IXrBackend> CreateBackend(BackendType type);
+
+// ---- runtime selection (OpenXR) ----
+// selection: "system"         -> the machine's default runtime (registry ActiveRuntime);
+//                                removes XR_RUNTIME_JSON from this process
+//            "steamvr"        -> SteamVR's steamxr_win64.json (found via openvrpaths.vrpath,
+//                                the Steam install, or the AvailableRuntimes registry list)
+//            "virtualdesktop" | "vdxr" -> Virtual Desktop's virtualdesktop-openxr.json
+//            "<path>.json"    -> that file
+//            "" | "inherit"   -> leave the process environment untouched
+// ApplyRuntimeSelection sets XR_RUNTIME_JSON in this process only (Win32 and
+// CRT environment). The OpenXR backend additionally passes the same path to
+// the loader as a loader property (XR_EXT_loader_init_properties), which also
+// works in an elevated process where the loader ignores environment variables.
+// Never touches the registry. Returns the resolved JSON path ("" for system)
+// or an error message in *error.
+bool ResolveRuntimeJson(std::string_view selection, std::string* outPath, std::string* error);
+bool ApplyRuntimeSelection(std::string_view selection, std::string* outPath, std::string* error);
+
+// Implicit API layers registered for this user/machine (HKLM and HKCU).
+struct ImplicitLayer {
+    std::string manifest;            // JSON path
+    std::string disableEnvironment;  // variable that disables it ("" if none)
+    bool enabledInRegistry = false;
+};
+std::vector<ImplicitLayer> EnumerateImplicitApiLayers();
+// Sets the disable_environment variable of every enabled implicit layer in
+// this process. Returns how many layers were disabled (their manifests in *disabled).
+int DisableImplicitApiLayers(std::vector<std::string>* disabled = nullptr);
+
+const char* DxgiFormatName(DXGI_FORMAT f);
+
+}  // namespace ff7vr::xr
