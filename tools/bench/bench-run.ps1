@@ -55,6 +55,12 @@ $cfg = $all[$Config]
 function Get-Cfg([string]$key) { if ($cfg.ContainsKey($key)) { return $cfg[$key] } return $null }
 $kind = $cfg.Kind
 $isVr = ($kind -eq 'uevr' -or $kind -eq 'mod')
+# The mod's stereo mode: 'Stereo = $true' in the configuration, or a configuration
+# that starts with stereo off on purpose (stereo.start_in_stereo=0) to switch it on in gameplay.
+$setList = @()
+if ($cfg.ContainsKey('Set')) { $setList = @($cfg['Set']) }
+$isStereo = (($cfg.ContainsKey('Stereo') -and $cfg['Stereo']) -or ($setList -contains 'stereo.start_in_stereo=0')) -and
+            -not ($setList -contains 'stereo.enabled=0')
 $owner = Get-DefaultOwner
 $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss')
 if (-not $OutDir) { $OutDir = Join-Path $script:BenchResultsDir "$stamp-$Config" }
@@ -198,6 +204,18 @@ try {
         Write-Step ("UEVR running: OpenXR system '{0}', double-wide swapchain {1}x{2}" -f $ok.openxrSystem, $ok.swapchainWidth, $ok.swapchainHeight)
     }
 
+    # ---------------------------------------------------------------- the mod's stereo mode
+    # launch.ps1 reaches gameplay with stereo off (the menus are recognised from
+    # the window, which in stereo shows an eye crop). Switch it on and wait until
+    # the engine renders stereo, so the warm-up and the recording are in stereo.
+    if ($isStereo) {
+        [void](Send-Bench 'stereo on')
+        $sst = Wait-Until { $s = Send-Bench 'stereo status'; if ($s -match '\bactive=1\b') { $s } } 60 1000 'the engine to render stereo'
+        if (-not $sst) { throw "Stereo did not become active: '$(Send-Bench 'stereo status')'" }
+        Write-Step "Stereo active: $sst"
+        $result.stereoStatusBefore = $sst
+    }
+
     # ---------------------------------------------------------------- console variables for this run
     $st = Send-Bench 'bench status'
     if ($st -notmatch 'hooked=1') { throw "Frame timer not running: '$st'" }
@@ -270,6 +288,15 @@ try {
     if ($r -notlike 'ok*') { throw "bench stop failed: $r" }
     $status = ConvertFrom-KvReply (Send-Bench 'bench status')
     $cvars = ConvertFrom-KvReply $cvBefore
+    $stereoAfter = $null
+    if ($isStereo) {
+        $stereoAfter = Send-Bench 'stereo status'
+        $result.stereoStatusAfter = $stereoAfter
+        if ($stereoAfter -notmatch '\bactive=1\b') { throw "Stereo was no longer active at the end of the recording: '$stereoAfter'" }
+        foreach ($cmd in @('fov status', 'status')) {
+            try { $result["reply_" + ($cmd -replace '\s', '_')] = Send-Bench $cmd } catch { }
+        }
+    }
     try {
         $shot = Save-GameScreenshot -path (Join-Path $OutDir 'game.png')
         $result.screenshot = [ordered]@{ path = $shot.Path; mean = $shot.Mean; blank = $shot.Blank }
@@ -324,6 +351,12 @@ try {
         $result.eyeResolution = "${eyeW}x${eyeH}"
         $result.renderedPixels = 2 * $eyeW * $eyeH
         $result.resolutionSource = 'UEVR log: double-wide eye swapchain'
+    } elseif ($isStereo -and $stereoAfter -match '\beye=(\d+)x(\d+)') {
+        # The eye size the engine rendered (stereo status of the mod's stereo device).
+        $eyeW = [int]$Matches[1]; $eyeH = [int]$Matches[2]
+        $result.eyeResolution = "${eyeW}x${eyeH}"
+        $result.renderedPixels = 2 * $eyeW * $eyeH
+        $result.resolutionSource = 'ff7vr stereo status: eye size rendered by the engine'
     } else {
         $sp = 100.0
         if ($cvars.Contains('r.ScreenPercentage')) { [void][double]::TryParse($cvars['r.ScreenPercentage'], [ref]$sp) }

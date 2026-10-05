@@ -132,6 +132,11 @@ over the runs, and the spread (max - min) / mean of the average fps. Treat a
 difference as real only when it is clearly larger than the spread of both
 configurations.
 
+For VR configurations the table also has SteamVR's own per-application
+statistics over the whole session (`SteamVR app GPU ms`, `SteamVR app CPU ms`,
+from `steamvrAppStats` in `result.json`); they are empty for flat runs. The
+p50 column shows the mean and standard deviation over the runs.
+
 ## The benchmark scene
 
 Scene `idle`: the latest save, loaded through "Continue", the character
@@ -218,7 +223,12 @@ file). The ones provided:
 | `uevr-2496-hzb` | profile with `VR_DisableHZBOcclusion=false` |
 | `uevr-2496-nofix` | profile with `VR_NativeStereoFix=false` |
 | `uevr-2496-early` | profile with `VR_SynchronizationMode=0` |
-| `mod-screen-720p` | this mod's virtual screen mode (render module, `buildull`), 1280x720, uncapped |
+| `mod-screen-720p` | this mod's virtual screen mode (render module, `build\full`), 1280x720, uncapped |
+
+`tools/bench/configs-foveation.psd1` holds more configurations for
+`-ConfigFile`: foveation presets, through the Null backend without pacing
+(`fov-<size>-<preset>`) or SteamVR's null driver (`fov-svr-<size>-<preset>`);
+see `docs/render.md`.
 
 ### Adding a configuration of this mod
 
@@ -238,17 +248,20 @@ ini keys that switch the mode on in `Set`, for example:
 ```
 
 `Set` keys are appended to `tools/bench/bench.ini`, so the frame timer stays
-on. Two things to keep in mind:
+on. The render module hooks Present through the swap chain's vtable slot, so
+it chains with the frame timer's inline hook on the function body; both see
+every Present.
 
-- The frame timer hooks the body of `IDXGISwapChain::Present` with MinHook.
-  A module of the mod that hooks the same function with MinHook in the same
-  DLL makes the second hook fail (`frame_timer: hooking Present ... failed`
-  in `ff7vr.log`, and the run fails with "Frame timer not running"). Such a
-  module should hook the vtable slot, or the frame timer should take its
-  timestamps from that module.
-- Record the per-eye size the mode actually rendered in `ff7vr.log` and teach
-  `bench-run.ps1` to read it (as it reads UEVR's log), so the table shows the
-  real resolution and not the requested one.
+The mod's stereo mode: give the configuration `Stereo = $true` (or start it
+with `stereo.start_in_stereo=0`). `launch.ps1` reaches gameplay with stereo
+off (the menus are recognised from the window, which in stereo shows a crop of
+an eye), then the run sends `stereo on` through the dev pipe and waits for
+`stereo status` to report `active=1` before the warm-up starts. After the
+recording it asks again: a run whose stereo is no longer active fails, and the
+`eye=WxH` of that reply (the eye size the engine rendered) becomes the
+result's `eyeResolution` and `renderedPixels` (`resolutionSource` says where
+the size came from). The replies of `stereo status`, `fov status` and `status`
+are stored in `result.json`.
 
 ### Command line knobs
 

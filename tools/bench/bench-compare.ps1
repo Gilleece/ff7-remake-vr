@@ -89,6 +89,9 @@ function Get-Summary([string]$dir) {
             eye = (@($ok | ForEach-Object { $_.eyeResolution } | Where-Object { $_ } | Select-Object -Unique) -join '/')
             megapixels = Get-MeanStd ([double[]]@($ok | ForEach-Object { $_.renderedPixels / 1e6 }))
             backBuffer = (@($ok | ForEach-Object { $_.backBuffer } | Select-Object -Unique) -join '/')
+            # SteamVR's own per-application statistics (whole session, VR configurations only)
+            svAppGpuMs = Get-MeanStd ([double[]]@($ok | Where-Object { $_.PSObject.Properties.Name -contains 'steamvrAppStats' -and $_.steamvrAppStats -and $_.steamvrAppStats.PSObject.Properties.Name -contains 'appGpuMs' } | ForEach-Object { $_.steamvrAppStats.appGpuMs }))
+            svAppCpuMs = Get-MeanStd ([double[]]@($ok | Where-Object { $_.PSObject.Properties.Name -contains 'steamvrAppStats' -and $_.steamvrAppStats -and $_.steamvrAppStats.PSObject.Properties.Name -contains 'appCpuMs' } | ForEach-Object { $_.steamvrAppStats.appCpuMs }))
         }
         $rows += [pscustomobject]$row
     }
@@ -96,16 +99,17 @@ function Get-Summary([string]$dir) {
 }
 
 function Write-Table($rows, [string]$mdPath) {
-    $hdr = '| Configuration | Runs | Avg fps (mean +- sd) | Spread | p50 ms | p99 ms | 1% low fps | Hitches >50ms | GPU % | GPU mem MiB | GPU W | CPU cores | Eye | Rendered MP |'
-    $sep = '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|'
+    $hdr = '| Configuration | Runs | Avg fps (mean +- sd) | Spread | p50 ms | p99 ms | 1% low fps | Hitches >50ms | GPU % | SteamVR app GPU ms | SteamVR app CPU ms | GPU mem MiB | GPU W | CPU cores | Eye | Rendered MP |'
+    $sep = '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|'
     $lines = @($hdr, $sep)
     foreach ($r in $rows) {
-        $lines += ('| {0} | {1}{2} | {3} +- {4} | {5}% | {6} | {7} | {8} | {15} | {9} | {10} | {11} | {12} | {13} | {14} |' -f
+        $lines += ('| {0} | {1}{2} | {3} +- {4} | {5}% | {6} | {7} | {8} | {15} | {9} | {16} | {17} | {10} | {11} | {12} | {13} | {14} |' -f
             $r.config, $r.runs, $(if ($r.failed) { " ($($r.failed) failed)" } else { '' }),
             (Format-Num $r.avgFps.mean 1), (Format-Num $r.avgFps.std 1), (Format-Num $r.spreadPct 1),
-            (Format-Num $r.p50Ms.mean 2), (Format-Num $r.p99Ms.mean 2), (Format-Num $r.low1Fps.mean 1),
+            ((Format-Num $r.p50Ms.mean 2) + ' +- ' + (Format-Num $r.p50Ms.std 2)), (Format-Num $r.p99Ms.mean 2), (Format-Num $r.low1Fps.mean 1),
             (Format-Num $r.gpuPct.mean 0), (Format-Num $r.gpuMemMiB.mean 0), (Format-Num $r.gpuPowerW.mean 0),
-            (Format-Num $r.cpuCores.mean 2), $(if ($r.eye) { $r.eye } else { '-' }), (Format-Num $r.megapixels.mean 1), (Format-Num $r.hitches.mean 1))
+            (Format-Num $r.cpuCores.mean 2), $(if ($r.eye) { $r.eye } else { '-' }), (Format-Num $r.megapixels.mean 1), (Format-Num $r.hitches.mean 1),
+            (Format-Num $r.svAppGpuMs.mean 2), (Format-Num $r.svAppCpuMs.mean 2))
     }
     $lines += ''
     foreach ($r in $rows) { $lines += "- **$($r.config)**: $($r.description) (back buffer $($r.backBuffer))" }
