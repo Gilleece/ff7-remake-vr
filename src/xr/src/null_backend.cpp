@@ -1,7 +1,8 @@
 // Null backend: no runtime. Emulates a Quest 3 class headset with a fixed
 // asymmetric FOV, a fixed IPD and a scripted, deterministic head motion. Eye
-// images are copied into emulated swapchain textures exactly like the OpenXR
-// backend does, so PNG captures show what a runtime would have received.
+// and quad layer images are copied into emulated swapchain textures exactly
+// like the OpenXR backend does; captures composite them the way a runtime
+// would (see QUAD LAYERS in xr.h), so PNGs show what the user would see.
 #include "backend_base.h"
 
 #include <algorithm>
@@ -120,6 +121,10 @@ public:
     void Shutdown() override {
         if (!initialized_) return;
         blitter_.ClearCache();
+        {
+            std::lock_guard lk(quadMutex_);
+            quads_ = {};
+        }
         for (auto& e : eyes_) e = EyeImage{};
         initialized_ = false;
         ShutdownCommon();
@@ -147,8 +152,9 @@ public:
             r.orientationValid = r.positionValid = true;
             rawHead = HeadPose(r.id);
             ComputeViews(rawHead, r.raw);
+            r.rawHead = rawHead;
             r.recenter = UpdateRecenter(rawHead, true);
-            FillFrameInfo(r, rawHead, info);
+            FillFrameInfo(r, info);
         }
         CountStat(&FrameStats::framesWaited);
         return Result::Ok;
@@ -189,39 +195,102 @@ public:
             r->ended = true;
             rec = *r;
         }
-        if (!desc.texture) {
-            CountStat(&FrameStats::framesSubmitted);
-            return Result::Ok;
-        }
         if (!ValidateSubmit(desc)) return Result::InvalidArgument;
 
         bool ok = true;
         {
             ScopedStateBackup backup(stateBackup_, context_.Get());
             capture_.BeginFrame(frameId);
-            for (int e = 0; e < 2; ++e) {
-                EyeImage& img = eyes_[e];
-                const bool update = desc.eyes[e].update || !img.hasImage;
-                if (update) {
-                    uint32_t w = 0, h = 0;
-                    const EyeTarget t{img.texture.Get(), format_, opt_.eyeWidth, opt_.eyeHeight, 0};
-                    if (TransferEye(static_cast<Eye>(e), desc, t, &w, &h)) {
-                        img.hasImage = true;
-                        img.w = w;
-                        img.h = h;
-                        img.view = SubmittedView(rec, desc, e);
-                    } else {
-                        ok = false;
+            LayerImage projection[2]{};
+            if (desc.texture) {
+                for (int e = 0; e < 2; ++e) {
+                    EyeImage& img = eyes_[e];
+                    const bool update = desc.eyes[e].update || !img.hasImage;
+                    if (update) {
+                        uint32_t w = 0, h = 0;
+                        const EyeTarget t{img.texture.Get(), format_, opt_.eyeWidth, opt_.eyeHeight, 0};
+                        if (TransferEye(static_cast<Eye>(e), desc, t, &w, &h)) {
+                            img.hasImage = true;
+                            img.w = w;
+                            img.h = h;
+                            img.view = SubmittedView(rec, desc, e);
+                        } else {
+                            ok = false;
+                        }
                     }
-                } else {
-                    // Alternate-eye mode: the eye keeps its previous image; capture shows what would be displayed.
-                    capture_.CaptureEye(context_.Get(), static_cast<Eye>(e), img.texture.Get(), format_, img.w, img.h);
+                    // Alternate-eye mode: an eye that is not updated shows its previous image.
+                    if (img.hasImage) projection[e] = LayerImage{img.texture.Get(), format_, img.w, img.h};
                 }
             }
+            for (uint32_t i = 0; i < desc.quadCount; ++i) {
+                const QuadLayer& q = desc.quads[i];
+                QuadSlot* s = FindQuad(q.layer);
+                if (!s || !q.texture) continue;
+                uint32_t w = 0, h = 0;
+                const EyeTarget t{s->sc.owned.Get(), s->sc.format, s->sc.width, s->sc.height, 0};
+                if (TransferQuad(q, t, &w, &h)) {
+                    s->sc.hasImage = true;
+                    s->sc.lastW = w;
+                    s->sc.lastH = h;
+                } else {
+                    ok = false;
+                }
+            }
+            CaptureComposited(rec, desc, projection, opt_.eyeWidth, opt_.eyeHeight);
             capture_.EndFrame();
         }
         CountStat(&FrameStats::framesSubmitted);
         return ok ? Result::Ok : Result::Error;
+    }
+
+    Result CreateQuadLayer(const QuadLayerCreateDesc& desc, LayerHandle* out) override {
+        if (out) *out = 0;
+        if (!initialized_) return Result::NotInitialized;
+        if (!out || desc.width == 0 || desc.height == 0 || desc.width > 16384 || desc.height > 16384) return Result::InvalidArgument;
+        static const DXGI_FORMAT kOffered[] = {DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB,
+                                               DXGI_FORMAT_R16G16B16A16_FLOAT,  DXGI_FORMAT_R10G10B10A2_UNORM,
+                                               DXGI_FORMAT_R8G8B8A8_UNORM,      DXGI_FORMAT_B8G8R8A8_UNORM};
+        const std::vector<DXGI_FORMAT> offered(std::begin(kOffered), std::end(kOffered));
+        const DXGI_FORMAT fmt = PickLayerFormat(desc.sourceFormatHint, offered, kOffered, std::size(kOffered));
+        D3D11_TEXTURE2D_DESC d{};
+        d.Width = desc.width;
+        d.Height = desc.height;
+        d.MipLevels = 1;
+        d.ArraySize = 1;
+        d.Format = TypelessFamily(fmt);
+        d.SampleDesc.Count = 1;
+        d.Usage = D3D11_USAGE_DEFAULT;
+        d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        ComPtr<ID3D11Texture2D> tex;
+        const HRESULT hr = device_->CreateTexture2D(&d, nullptr, &tex);
+        if (FAILED(hr)) {
+            log_.Error("null backend: quad layer {}x{} {} failed {}", desc.width, desc.height, DxgiFormatName(fmt), HResultString(hr));
+            return Result::Error;
+        }
+        std::lock_guard lk(quadMutex_);
+        const int idx = FreeQuadSlotLocked();
+        if (idx < 0) {
+            log_.Error("null backend: no free quad layer slot (max {})", kMaxQuadLayers);
+            return Result::Error;
+        }
+        QuadSlot& s = quads_[idx];
+        s = QuadSlot{};
+        s.used = true;
+        s.sc.owned = tex;
+        s.sc.width = desc.width;
+        s.sc.height = desc.height;
+        s.sc.format = fmt;
+        *out = MakeHandle(idx);
+        log_.Info("null backend: quad layer 0x{:X} {}x{} {}", *out, desc.width, desc.height, DxgiFormatName(fmt));
+        return Result::Ok;
+    }
+
+    void DestroyQuadLayer(LayerHandle layer) override {
+        std::lock_guard lk(quadMutex_);
+        QuadSlot* s = FindQuad(layer);
+        if (!s) return;
+        blitter_.Forget(s->sc.owned.Get());
+        *s = QuadSlot{};
     }
 
     Result SkipFrame(uint64_t frameId) override {

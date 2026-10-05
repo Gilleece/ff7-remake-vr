@@ -57,9 +57,24 @@
 //     common path in SteamVR, VDXR, Oculus);
 //   * the cost difference is one extra CopySubresourceRegion per frame.
 // A depth layer (XR_KHR_composition_layer_depth) will add one depth
-// swapchain per eye chained to the same views; a HUD quad layer will be an
-// extra layer after the projection layer. Both fit SubmitDesc without
-// changing the existing fields.
+// swapchain per eye chained to the same views.
+//
+// ============================ QUAD LAYERS ==================================
+// A quad layer is a flat rectangle placed in space (a virtual screen, a HUD
+// panel). Each one owns its own runtime swapchain, created with
+// CreateQuadLayer. Per frame, SubmitDesc::quads lists the quads to show, in
+// back-to-front order after the projection layer. A quad entry either brings
+// new content (a texture region that is copied into the layer's swapchain)
+// or none, in which case the runtime keeps showing the last image copied in.
+// The runtime re-projects quads with the newest head pose on every display
+// refresh, so a quad stays steady even when the host submits slowly.
+// A frame may contain only quads (SubmitDesc::texture == nullptr): the
+// projection layer is then omitted and the runtime shows the quads on black.
+//
+// The Null backend composites the layers itself (projection image stretched
+// over each eye's field of view, then each quad drawn with perspective using
+// the frame's eye views), so its PNG captures show what the user would see.
+// The OpenXR backend does the same for captures only.
 // ===========================================================================
 #pragma once
 
@@ -250,15 +265,52 @@ struct EyeSubmit {
     const View* viewOverride = nullptr;
 };
 
+// ---- quad layers (see QUAD LAYERS above) ----
+using LayerHandle = uint32_t;  // 0 = none
+constexpr uint32_t kMaxQuadLayers = 8;
+
+struct QuadLayerCreateDesc {
+    uint32_t width = 0, height = 0;  // image size in pixels
+    // Format of the textures that will be copied in. The backend picks that
+    // format's sRGB variant when the runtime offers it (plain copy, no
+    // conversion), otherwise the same automatic list as the eye swapchains.
+    DXGI_FORMAT sourceFormatHint = DXGI_FORMAT_UNKNOWN;
+};
+
+enum class LayerSpace {
+    World,  // tracking space after recenter, like FrameInfo::views: the quad stays put in the room
+    Head,   // relative to the head (OpenXR VIEW space): the quad follows the head
+};
+
+struct QuadLayer {
+    LayerHandle layer = 0;
+    // New content: this region is copied into the layer's swapchain (scaled
+    // down, aspect preserved, if larger than the layer image). null = keep
+    // the last image (nothing is copied).
+    ID3D11Texture2D* texture = nullptr;
+    DXGI_FORMAT viewFormat = DXGI_FORMAT_UNKNOWN;  // as SubmitDesc::viewFormat
+    ColorEncoding encoding = ColorEncoding::Srgb;
+    uint32_t arraySlice = 0;
+    uint32_t mipLevel = 0;
+    Rect rect{};  // width or height 0 = the whole texture
+    LayerSpace space = LayerSpace::World;
+    Pose pose{};                        // centre of the quad; the image faces +Z of this pose
+    float width = 1.0f, height = 1.0f;  // metres
+    bool alphaBlend = false;            // false: opaque; true: blend with the texture's alpha
+};
+
 struct SubmitDesc {
-    ID3D11Texture2D* texture = nullptr;  // null: submit no layers (frame shows nothing new)
+    // Projection layer source. null: no projection layer this frame (quads only,
+    // or an empty frame when there are no quads either).
+    ID3D11Texture2D* texture = nullptr;
     DXGI_FORMAT viewFormat = DXGI_FORMAT_UNKNOWN;  // format to read the texture as (required if typeless); UNKNOWN = texture format
     ColorEncoding encoding = ColorEncoding::Srgb;
     uint32_t arraySlice = 0;
     uint32_t mipLevel = 0;
     EyeSubmit eyes[2]{};
-    // Reserved for future layers (depth, HUD quad); must stay null for now.
-    const void* reserved = nullptr;
+    // Quad layers drawn over the projection layer, back to front.
+    const QuadLayer* quads = nullptr;
+    uint32_t quadCount = 0;
 };
 
 struct CaptureRequest {
@@ -276,7 +328,9 @@ struct FrameStats {
     uint64_t framesWaited = 0, framesBegun = 0, framesSubmitted = 0, framesSkipped = 0;
     uint64_t framesNotRendered = 0;   // shouldRender == false
     uint64_t framesDiscarded = 0;     // xrBeginFrame returned XR_FRAME_DISCARDED
-    uint64_t copyPath = 0, blitPath = 0;  // per-eye submission paths used
+    uint64_t copyPath = 0, blitPath = 0;  // per-image submission paths used (eyes and quads)
+    uint64_t quadUpdates = 0;             // quad layer images copied in
+    uint64_t imageWaitTimeouts = 0;       // xrWaitSwapchainImage timed out (image kept for the next frame)
 };
 
 class IXrBackend {
@@ -306,13 +360,23 @@ public:
     // RT. Ends the frame with no layers (begins it first if needed).
     virtual Result SkipFrame(uint64_t frameId) = 0;
 
+    // RT (same thread rules as SubmitFrame). Creates a quad layer and its
+    // swapchain. Handles stay valid until DestroyQuadLayer or Shutdown; after
+    // a new Init, create the layers again. At most kMaxQuadLayers.
+    virtual Result CreateQuadLayer(const QuadLayerCreateDesc& desc, LayerHandle* out) = 0;
+    // RT. Unknown or stale handles are ignored.
+    virtual void DestroyQuadLayer(LayerHandle layer) = 0;
+    // Any thread. Size and format of a layer's image; false if the handle is not valid.
+    virtual bool GetQuadLayerInfo(LayerHandle layer, SwapchainInfo* out) const = 0;
+
     // Any thread. Recenter: make the current head yaw and position the new
     // origin (pitch/roll untouched). Applied from the next WaitFrame.
     virtual void Recenter() = 0;
     virtual void ResetRecenter() = 0;
 
-    // Any thread. Captures the eye images of the next submitted frame (what
-    // went into the swapchains), converted to 8-bit sRGB PNG on a worker thread.
+    // Any thread. Captures what each eye would see in the next submitted frame
+    // (projection layer and quad layers composited with that frame's views),
+    // converted to 8-bit sRGB PNG on a worker thread.
     virtual void RequestCapture(const CaptureRequest& req) = 0;
     // Blocks until all requested captures were written (or timeout). Returns results since last call.
     virtual std::vector<CaptureResult> WaitForCaptures(uint32_t timeoutMs) = 0;

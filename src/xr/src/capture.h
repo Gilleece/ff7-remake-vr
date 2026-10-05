@@ -26,6 +26,7 @@ public:
     // Render thread, inside a saved D3D11 state scope. Start a capture for this
     // frame if one is pending; then CaptureEye for each eye; then EndFrame.
     bool BeginFrame(uint64_t frameId);
+    bool Active() const { return active_; }  // render thread: a capture was started for this frame
     // Reads `tex` (interpreted as viewFormat, linear-light semantics of that format) region (0,0,w,h).
     void CaptureEye(ID3D11DeviceContext* ctx, Eye eye, ID3D11Texture2D* tex, DXGI_FORMAT viewFormat, uint32_t w, uint32_t h);
     void EndFrame();

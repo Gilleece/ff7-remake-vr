@@ -1,6 +1,7 @@
 // OpenXR backend for D3D11 (XR_KHR_D3D11_enable). The OpenXR loader is linked
-// statically. One swapchain per eye, one projection layer per frame, LOCAL
-// reference space. See xr.h for the threading contract.
+// statically. One swapchain per eye and one per quad layer; per frame an
+// optional projection layer followed by quad layers; LOCAL reference space
+// (VIEW space for head-locked quads). See xr.h for the threading contract.
 #include "backend_base.h"
 
 #include <dxgi.h>
@@ -69,17 +70,11 @@ public:
     Result RelocateViews(uint64_t frameId, View outViews[2]) override;
     Result SubmitFrame(uint64_t frameId, const SubmitDesc& desc) override;
     Result SkipFrame(uint64_t frameId) override;
+    Result CreateQuadLayer(const QuadLayerCreateDesc& desc, LayerHandle* out) override;
+    void DestroyQuadLayer(LayerHandle layer) override;
 
 private:
-    struct EyeSwapchain {
-        XrSwapchain handle = XR_NULL_HANDLE;
-        std::vector<ID3D11Texture2D*> images;  // owned by the runtime
-        uint32_t width = 0, height = 0;
-        bool hasImage = false;  // an image was released at least once
-        uint32_t lastIndex = 0;
-        uint32_t lastW = 0, lastH = 0;
-        View lastView{};  // raw view of the last released image
-    };
+    enum class ImageWait { Ready, NotReady, Failed };
 
     std::string Name(XrResult r) const;
     bool Check(XrResult r, const char* what) const;
@@ -92,6 +87,15 @@ private:
     Result EndFrameLocked(int64_t displayTime, const XrCompositionLayerBaseHeader* const* layers, uint32_t layerCount);
     Result StaleOrUnknown(uint64_t frameId);
     Result BeginLocked(FrameRecord& r);
+    Result CreateSwapchain(uint32_t w, uint32_t h, DXGI_FORMAT fmt, SwapImages* out);
+    void DestroySwapchain(SwapImages& sc);
+    // Acquires an image and waits for it (retrying a wait that timed out on an
+    // earlier frame instead of acquiring another one).
+    ImageWait AcquireAndWait(SwapImages& sc, uint32_t* index);
+    // Acquire, copy with `transfer(target, &w, &h)`, release. Updates sc.last*.
+    template <class F>
+    ImageWait UpdateImage(SwapImages& sc, F&& transfer);
+    static XrSwapchain Handle(const SwapImages& sc) { return reinterpret_cast<XrSwapchain>(sc.xr); }
 
     XrInstance instance_ = XR_NULL_HANDLE;
     XrSystemId systemId_ = XR_NULL_SYSTEM_ID;
@@ -101,7 +105,7 @@ private:
     XrDebugUtilsMessengerEXT messenger_ = XR_NULL_HANDLE;
     XrEnvironmentBlendMode blendMode_ = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
     DXGI_FORMAT format_ = DXGI_FORMAT_UNKNOWN;
-    EyeSwapchain eyes_[2];
+    SwapImages eyes_[2];
 
     // Guards xrBeginSession/xrEndSession against xrBeginFrame/xrEndFrame on the other thread.
     std::mutex sessionMutex_;
@@ -410,42 +414,18 @@ Result OpenXrBackend::InitImpl(const InitDesc& desc) {
     for (int e = 0; e < 2; ++e) {
         uint32_t w = desc.eyeWidth, h = desc.eyeHeight;
         if (w == 0 || h == 0) {
-            const float s = desc.resolutionScale > 0.0f ? desc.resolutionScale : 1.0f;
-            w = static_cast<uint32_t>(std::lround(vcv[e].recommendedImageRectWidth * s));
-            h = static_cast<uint32_t>(std::lround(vcv[e].recommendedImageRectHeight * s));
+            const float sc = desc.resolutionScale > 0.0f ? desc.resolutionScale : 1.0f;
+            w = static_cast<uint32_t>(std::lround(vcv[e].recommendedImageRectWidth * sc));
+            h = static_cast<uint32_t>(std::lround(vcv[e].recommendedImageRectHeight * sc));
         }
         w = std::clamp(w, 16u, std::max(16u, vcv[e].maxImageRectWidth));
         h = std::clamp(h, 16u, std::max(16u, vcv[e].maxImageRectHeight));
-        XrSwapchainCreateInfo ci{XR_TYPE_SWAPCHAIN_CREATE_INFO};
-        ci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
-        ci.format = static_cast<int64_t>(format_);
-        ci.sampleCount = 1;
-        ci.width = w;
-        ci.height = h;
-        ci.faceCount = 1;
-        ci.arraySize = 1;
-        ci.mipCount = 1;
-        xr = xrCreateSwapchain(session_, &ci, &eyes_[e].handle);
-        if (XR_FAILED(xr)) {
-            log_.Error("xrCreateSwapchain({}x{} {}) failed: {}", w, h, DxgiFormatName(format_), Name(xr));
-            return Result::Error;
-        }
-        uint32_t n = 0;
-        if (!Check(xrEnumerateSwapchainImages(eyes_[e].handle, 0, &n, nullptr), "xrEnumerateSwapchainImages")) return Result::Error;
-        std::vector<XrSwapchainImageD3D11KHR> imgs(n, XrSwapchainImageD3D11KHR{XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR});
-        if (!Check(xrEnumerateSwapchainImages(eyes_[e].handle, n, &n, reinterpret_cast<XrSwapchainImageBaseHeader*>(imgs.data())),
-                   "xrEnumerateSwapchainImages"))
-            return Result::Error;
-        eyes_[e].images.clear();
-        for (auto& i : imgs) eyes_[e].images.push_back(i.texture);
-        eyes_[e].width = w;
-        eyes_[e].height = h;
-        eyes_[e].hasImage = false;
+        if (const Result r = CreateSwapchain(w, h, format_, &eyes_[e]); r != Result::Ok) return r;
+        info.eyeSwapchain[e] = SwapchainInfo{w, h, format_, static_cast<uint32_t>(eyes_[e].images.size())};
         D3D11_TEXTURE2D_DESC td{};
-        if (n) imgs[0].texture->GetDesc(&td);
-        info.eyeSwapchain[e] = SwapchainInfo{w, h, format_, n};
-        log_.Info("eye {} swapchain: {}x{} {} ({} images, texture format {}, bind 0x{:X})", e, w, h, DxgiFormatName(format_), n,
-                  DxgiFormatName(td.Format), td.BindFlags);
+        if (!eyes_[e].images.empty()) eyes_[e].images[0]->GetDesc(&td);
+        log_.Info("eye {} swapchain: {}x{} {} ({} images, texture format {}, bind 0x{:X})", e, w, h, DxgiFormatName(format_),
+                  eyes_[e].images.size(), DxgiFormatName(td.Format), td.BindFlags);
     }
 
     // ---- refresh rate ----
@@ -510,10 +490,14 @@ void OpenXrBackend::Shutdown() {
 
 void OpenXrBackend::DestroyAll() {
     blitter_.ClearCache();  // drops cached views of swapchain images
-    for (auto& e : eyes_) {
-        if (e.handle != XR_NULL_HANDLE) xrDestroySwapchain(e.handle);
-        e = EyeSwapchain{};
+    {
+        std::lock_guard lk(quadMutex_);
+        for (QuadSlot& q : quads_) {
+            if (q.used) DestroySwapchain(q.sc);
+            q = QuadSlot{};
+        }
     }
+    for (auto& e : eyes_) DestroySwapchain(e);
     if (viewSpace_ != XR_NULL_HANDLE) xrDestroySpace(viewSpace_);
     if (localSpace_ != XR_NULL_HANDLE) xrDestroySpace(localSpace_);
     viewSpace_ = localSpace_ = XR_NULL_HANDLE;
@@ -677,8 +661,9 @@ Result OpenXrBackend::WaitFrame(FrameInfo& info) {
         r.positionValid = pv;
         r.raw[0] = raw[0];
         r.raw[1] = raw[1];
+        r.rawHead = rawHead;
         r.recenter = UpdateRecenter(rawHead, headValid);
-        FillFrameInfo(r, rawHead, info);
+        FillFrameInfo(r, info);
     }
     {
         std::lock_guard lk(infoMutex_);
@@ -780,6 +765,101 @@ Result OpenXrBackend::EndFrameLocked(int64_t displayTime, const XrCompositionLay
     return Result::Ok;
 }
 
+Result OpenXrBackend::CreateSwapchain(uint32_t w, uint32_t h, DXGI_FORMAT fmt, SwapImages* out) {
+    *out = SwapImages{};
+    XrSwapchainCreateInfo ci{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+    ci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+    ci.format = static_cast<int64_t>(fmt);
+    ci.sampleCount = 1;
+    ci.width = w;
+    ci.height = h;
+    ci.faceCount = 1;
+    ci.arraySize = 1;
+    ci.mipCount = 1;
+    XrSwapchain handle = XR_NULL_HANDLE;
+    const XrResult xr = xrCreateSwapchain(session_, &ci, &handle);
+    if (XR_FAILED(xr)) {
+        log_.Error("xrCreateSwapchain({}x{} {}) failed: {}", w, h, DxgiFormatName(fmt), Name(xr));
+        return MapError(xr) == Result::SessionLost ? Result::SessionLost : Result::Error;
+    }
+    out->xr = reinterpret_cast<uint64_t>(handle);
+    uint32_t n = 0;
+    std::vector<XrSwapchainImageD3D11KHR> imgs;
+    bool ok = Check(xrEnumerateSwapchainImages(handle, 0, &n, nullptr), "xrEnumerateSwapchainImages");
+    if (ok) {
+        imgs.assign(n, XrSwapchainImageD3D11KHR{XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR});
+        ok = Check(xrEnumerateSwapchainImages(handle, n, &n, reinterpret_cast<XrSwapchainImageBaseHeader*>(imgs.data())),
+                   "xrEnumerateSwapchainImages");
+    }
+    if (!ok || n == 0) {
+        DestroySwapchain(*out);
+        return Result::Error;
+    }
+    for (auto& i : imgs) out->images.push_back(i.texture);
+    out->width = w;
+    out->height = h;
+    out->format = fmt;
+    return Result::Ok;
+}
+
+void OpenXrBackend::DestroySwapchain(SwapImages& sc) {
+    for (ID3D11Texture2D* t : sc.images) blitter_.Forget(t);
+    if (sc.xr) xrDestroySwapchain(Handle(sc));
+    sc = SwapImages{};
+}
+
+OpenXrBackend::ImageWait OpenXrBackend::AcquireAndWait(SwapImages& sc, uint32_t* index) {
+    if (!sc.waitPending) {
+        XrSwapchainImageAcquireInfo ai{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+        uint32_t idx = 0;
+        if (!Check(xrAcquireSwapchainImage(Handle(sc), &ai, &idx), "xrAcquireSwapchainImage")) return ImageWait::Failed;
+        sc.acquiredIndex = idx;
+        sc.waitPending = true;
+    }
+    // A wait that times out leaves the image acquired: wait again for the same
+    // image (it may neither be released unwaited nor skipped by acquiring the next).
+    XrSwapchainImageWaitInfo wi{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+    wi.timeout = 100'000'000;  // 100 ms per attempt
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        const XrResult wr = xrWaitSwapchainImage(Handle(sc), &wi);
+        if (wr == XR_SUCCESS) {
+            sc.waitPending = false;
+            *index = sc.acquiredIndex;
+            return ImageWait::Ready;
+        }
+        if (wr != XR_TIMEOUT_EXPIRED) {
+            log_.Error("xrWaitSwapchainImage: {}", Name(wr));
+            return ImageWait::Failed;
+        }
+        CountStat(&FrameStats::imageWaitTimeouts);
+    }
+    log_.Warn("xrWaitSwapchainImage: image {} still not ready after 300 ms; waiting for it again next frame", sc.acquiredIndex);
+    return ImageWait::NotReady;
+}
+
+template <class F>
+OpenXrBackend::ImageWait OpenXrBackend::UpdateImage(SwapImages& sc, F&& transfer) {
+    uint32_t idx = 0;
+    const ImageWait w = AcquireAndWait(sc, &idx);
+    if (w != ImageWait::Ready) return w;
+    uint32_t outW = 0, outH = 0;
+    const EyeTarget t{sc.images[idx], sc.format, sc.width, sc.height, 0};
+    const bool transferred = transfer(t, &outW, &outH);
+    XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+    const bool released = Check(xrReleaseSwapchainImage(Handle(sc), &ri), "xrReleaseSwapchainImage");
+    if (!transferred) {
+        // The newest released image now holds undefined content: stop showing it until a good copy.
+        if (released) sc.hasImage = false;
+        return ImageWait::Failed;
+    }
+    if (!released) return ImageWait::Failed;
+    sc.hasImage = true;
+    sc.lastIndex = idx;
+    sc.lastW = outW;
+    sc.lastH = outH;
+    return ImageWait::Ready;
+}
+
 Result OpenXrBackend::SubmitFrame(uint64_t frameId, const SubmitDesc& desc) {
     if (!initialized_) return Result::NotInitialized;
     std::lock_guard sl(sessionMutex_);
@@ -805,72 +885,139 @@ Result OpenXrBackend::SubmitFrame(uint64_t frameId, const SubmitDesc& desc) {
     }
 
     XrCompositionLayerProjectionView pv[2]{{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}, {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
-    bool haveLayer = false;
+    XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    XrCompositionLayerQuad quads[kMaxQuadLayers]{};
+    const XrCompositionLayerBaseHeader* layers[1 + kMaxQuadLayers]{};
+    uint32_t layerCount = 0;
     bool ok = true;
-    const bool render = rec.shouldRender && desc.texture != nullptr;
+    const bool render = rec.shouldRender && (desc.texture != nullptr || desc.quadCount > 0);
     if (render) {
         ScopedStateBackup backup(stateBackup_, context_.Get());
         capture_.BeginFrame(frameId);
-        haveLayer = true;
-        for (int e = 0; e < 2 && ok; ++e) {
-            EyeSwapchain& sc = eyes_[e];
-            const bool update = desc.eyes[e].update || !sc.hasImage;
-            if (update) {
-                uint32_t idx = 0;
-                XrSwapchainImageAcquireInfo ai{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
-                if (!Check(xrAcquireSwapchainImage(sc.handle, &ai, &idx), "xrAcquireSwapchainImage")) {
-                    ok = false;
-                    break;
+        LayerImage captureImages[2]{};
+
+        // ---- projection layer ----
+        if (desc.texture) {
+            bool eyesOk = true;
+            for (int e = 0; e < 2; ++e) {
+                SwapImages& sc = eyes_[e];
+                if (desc.eyes[e].update || !sc.hasImage) {
+                    const ImageWait w = UpdateImage(sc, [&](const EyeTarget& t, uint32_t* ow, uint32_t* oh) {
+                        return TransferEye(static_cast<Eye>(e), desc, t, ow, oh);
+                    });
+                    if (w == ImageWait::Ready) sc.lastView = SubmittedView(rec, desc, e);
+                    if (w == ImageWait::Failed) ok = false;
                 }
-                XrSwapchainImageWaitInfo wi{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
-                wi.timeout = 500'000'000;  // 0.5 s
-                const XrResult wr = xrWaitSwapchainImage(sc.handle, &wi);
-                if (wr != XR_SUCCESS) {
-                    log_.Error("xrWaitSwapchainImage: {}", Name(wr));
-                    // A timed-out image must still be released after a later successful wait;
-                    // simplest recovery is to drop this frame's layer.
-                    ok = false;
-                    break;
+                // Not updated (alternate-eye mode, or the image was not ready yet): show the last image.
+                if (!sc.hasImage) {
+                    eyesOk = false;
+                    continue;
                 }
-                uint32_t w = 0, h = 0;
-                const EyeTarget t{sc.images[idx], format_, sc.width, sc.height, 0};
-                const bool transferred = TransferEye(static_cast<Eye>(e), desc, t, &w, &h);
-                XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-                Check(xrReleaseSwapchainImage(sc.handle, &ri), "xrReleaseSwapchainImage");
-                if (!transferred) {
-                    ok = false;
-                    break;
-                }
-                sc.hasImage = true;
-                sc.lastIndex = idx;
-                sc.lastW = w;
-                sc.lastH = h;
-                sc.lastView = SubmittedView(rec, desc, e);
-            } else {
-                capture_.CaptureEye(context_.Get(), static_cast<Eye>(e), sc.images[sc.lastIndex], format_, sc.lastW, sc.lastH);
+                pv[e].pose = ToXr(sc.lastView.pose);
+                pv[e].fov = ToXr(sc.lastView.fov);
+                pv[e].subImage.swapchain = Handle(sc);
+                pv[e].subImage.imageRect.offset = {0, 0};
+                pv[e].subImage.imageRect.extent = {static_cast<int32_t>(sc.lastW), static_cast<int32_t>(sc.lastH)};
+                pv[e].subImage.imageArrayIndex = 0;
+                captureImages[e] = sc.Last();
             }
-            pv[e].pose = ToXr(sc.lastView.pose);
-            pv[e].fov = ToXr(sc.lastView.fov);
-            pv[e].subImage.swapchain = sc.handle;
-            pv[e].subImage.imageRect.offset = {0, 0};
-            pv[e].subImage.imageRect.extent = {static_cast<int32_t>(sc.lastW), static_cast<int32_t>(sc.lastH)};
-            pv[e].subImage.imageArrayIndex = 0;
+            // A projection layer needs valid tracking for its poses (or poses given by the host).
+            const bool posesKnown = rec.orientationValid || (desc.eyes[0].viewOverride && desc.eyes[1].viewOverride);
+            if (eyesOk && posesKnown) {
+                projection.space = localSpace_;
+                projection.viewCount = 2;
+                projection.views = pv;
+                layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
+            } else {
+                captureImages[0] = captureImages[1] = LayerImage{};
+            }
         }
+
+        // ---- quad layers ----
+        for (uint32_t i = 0; i < desc.quadCount; ++i) {
+            const QuadLayer& q = desc.quads[i];
+            QuadSlot* slot = FindQuad(q.layer);
+            if (!slot) continue;
+            if (q.texture &&
+                UpdateImage(slot->sc, [&](const EyeTarget& t, uint32_t* ow, uint32_t* oh) { return TransferQuad(q, t, ow, oh); }) ==
+                    ImageWait::Failed)
+                ok = false;
+            if (!slot->sc.hasImage) continue;
+            XrCompositionLayerQuad& l = quads[i];
+            l.type = XR_TYPE_COMPOSITION_LAYER_QUAD;
+            l.next = nullptr;
+            l.layerFlags = q.alphaBlend ? XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT : 0;
+            l.space = q.space == LayerSpace::Head ? viewSpace_ : localSpace_;
+            l.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+            l.subImage.swapchain = Handle(slot->sc);
+            l.subImage.imageRect.offset = {0, 0};
+            l.subImage.imageRect.extent = {static_cast<int32_t>(slot->sc.lastW), static_cast<int32_t>(slot->sc.lastH)};
+            l.subImage.imageArrayIndex = 0;
+            l.pose = ToXr(q.space == LayerSpace::Head ? q.pose : PoseMultiply(rec.recenter, q.pose));
+            l.size = XrExtent2Df{q.width, q.height};
+            layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&l);
+        }
+
+        CaptureComposited(rec, desc, captureImages, eyes_[0].width, eyes_[0].height);
         capture_.EndFrame();
-        // A projection layer needs valid tracking for its poses (or poses given by the host).
-        const bool posesKnown = rec.orientationValid || (desc.eyes[0].viewOverride && desc.eyes[1].viewOverride);
-        haveLayer = ok && posesKnown;
     }
 
-    XrCompositionLayerProjection layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
-    layer.space = localSpace_;
-    layer.viewCount = 2;
-    layer.views = pv;
-    const XrCompositionLayerBaseHeader* layers[1] = {reinterpret_cast<const XrCompositionLayerBaseHeader*>(&layer)};
-    const Result er = EndFrameLocked(rec.displayTime, haveLayer ? layers : nullptr, haveLayer ? 1u : 0u);
+    const Result er = EndFrameLocked(rec.displayTime, layerCount ? layers : nullptr, layerCount);
     if (er != Result::Ok) return er;
     CountStat(render ? &FrameStats::framesSubmitted : &FrameStats::framesSkipped);
     return ok ? Result::Ok : Result::Error;
+}
+
+Result OpenXrBackend::CreateQuadLayer(const QuadLayerCreateDesc& desc, LayerHandle* out) {
+    if (out) *out = 0;
+    if (!initialized_) return Result::NotInitialized;
+    if (!out || desc.width == 0 || desc.height == 0) return Result::InvalidArgument;
+    std::vector<DXGI_FORMAT> offered;
+    uint32_t maxW = 0, maxH = 0;
+    {
+        std::lock_guard lk(infoMutex_);
+        offered = info_.runtimeFormats;
+        maxW = info_.maxSwapchainWidth;
+        maxH = info_.maxSwapchainHeight;
+    }
+    if ((maxW && desc.width > maxW) || (maxH && desc.height > maxH)) {
+        log_.Error("quad layer {}x{} exceeds the runtime maximum {}x{}", desc.width, desc.height, maxW, maxH);
+        return Result::InvalidArgument;
+    }
+    const DXGI_FORMAT fmt = PickLayerFormat(desc.sourceFormatHint, offered, kPreferredFormats, std::size(kPreferredFormats));
+    {
+        std::lock_guard lk(quadMutex_);
+        if (FreeQuadSlotLocked() < 0) {
+            log_.Error("no free quad layer slot (max {})", kMaxQuadLayers);
+            return Result::Error;
+        }
+    }
+    SwapImages sc;
+    {
+        std::lock_guard sl(sessionMutex_);  // must not race xrEndSession on the other thread
+        if (const Result r = CreateSwapchain(desc.width, desc.height, fmt, &sc); r != Result::Ok) return r;
+    }
+    std::lock_guard lk(quadMutex_);
+    const int idx = FreeQuadSlotLocked();
+    if (idx < 0) {
+        DestroySwapchain(sc);
+        return Result::Error;
+    }
+    QuadSlot& s = quads_[idx];
+    s = QuadSlot{};
+    s.used = true;
+    s.sc = std::move(sc);
+    *out = MakeHandle(idx);
+    log_.Info("quad layer 0x{:X}: {}x{} {} ({} images)", *out, desc.width, desc.height, DxgiFormatName(fmt), s.sc.images.size());
+    return Result::Ok;
+}
+
+void OpenXrBackend::DestroyQuadLayer(LayerHandle layer) {
+    std::lock_guard lk(quadMutex_);
+    QuadSlot* s = FindQuad(layer);
+    if (!s) return;
+    DestroySwapchain(s->sc);
+    *s = QuadSlot{};
 }
 
 Result OpenXrBackend::SkipFrame(uint64_t frameId) {

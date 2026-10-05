@@ -101,6 +101,10 @@ ff7vr_compile_shader(OUT_VAR _blit_vs SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/shad
   PROFILE vs_5_0 ENTRY VSMain VAR g_ff7vr_blit_vs OUTPUT "${_shader_out}/blit_vs.h")
 ff7vr_compile_shader(OUT_VAR _blit_ps SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/shaders/blit.hlsl"
   PROFILE ps_5_0 ENTRY PSMain VAR g_ff7vr_blit_ps OUTPUT "${_shader_out}/blit_ps.h")
+ff7vr_compile_shader(OUT_VAR _quad_vs SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/shaders/quad.hlsl"
+  PROFILE vs_5_0 ENTRY VSMain VAR g_ff7vr_quad_vs OUTPUT "${_shader_out}/quad_vs.h")
+ff7vr_compile_shader(OUT_VAR _quad_ps SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/shaders/quad.hlsl"
+  PROFILE ps_5_0 ENTRY PSMain VAR g_ff7vr_quad_ps OUTPUT "${_shader_out}/quad_ps.h")
 
 add_library(ff7vr_xr STATIC
   include/ff7vr/xr/xr.h
@@ -113,14 +117,17 @@ add_library(ff7vr_xr STATIC
   src/d3d11_blitter.cpp
   src/capture.h
   src/capture.cpp
+  src/compositor.h
+  src/compositor.cpp
   src/backend_base.h
   src/backend_base.cpp
   src/null_backend.cpp
   src/openxr_backend.cpp
   src/shaders/blit.hlsl
-  ${_blit_vs} ${_blit_ps}
+  src/shaders/quad.hlsl
+  ${_blit_vs} ${_blit_ps} ${_quad_vs} ${_quad_ps}
 )
-set_source_files_properties(src/shaders/blit.hlsl PROPERTIES HEADER_FILE_ONLY TRUE)
+set_source_files_properties(src/shaders/blit.hlsl src/shaders/quad.hlsl PROPERTIES HEADER_FILE_ONLY TRUE)
 target_compile_features(ff7vr_xr PUBLIC cxx_std_20)
 target_include_directories(ff7vr_xr
   PUBLIC  "${CMAKE_CURRENT_LIST_DIR}/include"

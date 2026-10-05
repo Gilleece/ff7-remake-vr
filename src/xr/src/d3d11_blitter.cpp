@@ -235,19 +235,15 @@ void Blitter::Shutdown() {
 }
 
 void Blitter::Forget(ID3D11Texture2D* tex) {
-    std::erase_if(srvs_, [&](const SrvEntry& e) { return e.tex.Get() == tex; });
     std::erase_if(rtvs_, [&](const RtvEntry& e) { return e.tex.Get() == tex; });
 }
 
 void Blitter::ClearCache() {
-    srvs_.clear();
     rtvs_.clear();
     temps_.clear();
 }
 
-ID3D11ShaderResourceView* Blitter::GetSrv(ID3D11Texture2D* tex, DXGI_FORMAT fmt, uint32_t slice, uint32_t mip) {
-    for (auto& e : srvs_)
-        if (e.tex.Get() == tex && e.format == fmt && e.slice == slice && e.mip == mip) return e.srv.Get();
+ComPtr<ID3D11ShaderResourceView> Blitter::CreateSrv(ID3D11Texture2D* tex, DXGI_FORMAT fmt, uint32_t slice, uint32_t mip) {
     D3D11_SHADER_RESOURCE_VIEW_DESC d{};
     d.Format = fmt;
     d.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
@@ -261,9 +257,7 @@ ID3D11ShaderResourceView* Blitter::GetSrv(ID3D11Texture2D* tex, DXGI_FORMAT fmt,
         log_->Error("blitter: CreateShaderResourceView({}) failed {}", DxgiFormatName(fmt), HResultString(hr));
         return nullptr;
     }
-    if (srvs_.size() >= 12) srvs_.erase(srvs_.begin());  // bounded: we hold a reference to the texture
-    srvs_.push_back(SrvEntry{tex, fmt, slice, mip, srv});
-    return srv.Get();
+    return srv;
 }
 
 ID3D11RenderTargetView* Blitter::GetRtv(ID3D11Texture2D* tex, DXGI_FORMAT fmt, uint32_t slice) {
@@ -415,7 +409,8 @@ bool Blitter::Transfer(ID3D11DeviceContext* ctx, const BlitSource& src, const Re
         return false;
     }
 
-    ID3D11ShaderResourceView* srv = GetSrv(readTex, readFmt, readSlice, readMip);
+    const ComPtr<ID3D11ShaderResourceView> srvRef = CreateSrv(readTex, readFmt, readSlice, readMip);
+    ID3D11ShaderResourceView* srv = srvRef.Get();
     ID3D11RenderTargetView* rtv = GetRtv(dst.texture, dstFmt, dst.arraySlice);
     if (!srv || !rtv) return false;
 

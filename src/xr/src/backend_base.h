@@ -1,8 +1,10 @@
-// Shared implementation for both backends: device/context, blitter, capture,
-// frame records, recentering, statistics.
+// Shared implementation for both backends: device/context, blitter,
+// compositor, capture, frame records, quad layer slots, recentering,
+// statistics.
 #pragma once
 
 #include "capture.h"
+#include "compositor.h"
 #include "d3d11_blitter.h"
 
 #include <array>
@@ -10,6 +12,25 @@
 #include <mutex>
 
 namespace ff7vr::xr {
+
+// One swapchain: a runtime swapchain (OpenXR) or an emulated single image (Null).
+struct SwapImages {
+    uint64_t xr = 0;                       // XrSwapchain handle (OpenXR), 0 when emulated
+    std::vector<ID3D11Texture2D*> images;  // runtime-owned images (OpenXR)
+    ComPtr<ID3D11Texture2D> owned;         // the emulated image (Null)
+    uint32_t width = 0, height = 0;
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;  // format the runtime interprets the images as
+    bool hasImage = false;                     // an image was released at least once
+    uint32_t lastIndex = 0, lastW = 0, lastH = 0;
+    View lastView{};  // eye swapchains: raw view the last released image was rendered with
+    // OpenXR: an image was acquired but xrWaitSwapchainImage timed out; it
+    // stays acquired and the next frame waits for it again instead of acquiring.
+    bool waitPending = false;
+    uint32_t acquiredIndex = 0;
+
+    ID3D11Texture2D* Image(uint32_t i) const { return owned ? owned.Get() : (i < images.size() ? images[i] : nullptr); }
+    LayerImage Last() const { return LayerImage{Image(lastIndex), format, lastW, lastH}; }
+};
 
 class BackendBase : public IXrBackend {
 public:
@@ -20,6 +41,7 @@ public:
     void RequestCapture(const CaptureRequest& req) override { capture_.Request(req); }
     std::vector<CaptureResult> WaitForCaptures(uint32_t timeoutMs) override { return capture_.Wait(timeoutMs); }
     FrameStats GetStats() const override;
+    bool GetQuadLayerInfo(LayerHandle layer, SwapchainInfo* out) const override;
 
 protected:
     struct FrameRecord {
@@ -32,9 +54,16 @@ protected:
         bool ended = false;
         bool orientationValid = false, positionValid = false;
         View raw[2]{};     // views in the runtime's LOCAL space (what goes into the layer)
+        Pose rawHead{};    // head pose in LOCAL space
         Pose recenter{};   // recenter transform in effect for this frame
     };
     static constexpr size_t kRing = 8;
+
+    struct QuadSlot {
+        bool used = false;
+        uint32_t serial = 0;
+        SwapImages sc;
+    };
 
     Result InitCommon(const InitDesc& desc);
     void ShutdownCommon();
@@ -49,27 +78,45 @@ protected:
     static View ApplyRecenter(const Pose& recenter, const View& raw);
     static Pose ApplyRecenter(const Pose& recenter, const Pose& raw);
     static View RemoveRecenter(const Pose& recenter, const View& v);
-    void FillFrameInfo(const FrameRecord& r, const Pose& rawHead, FrameInfo& info) const;
+    void FillFrameInfo(const FrameRecord& r, FrameInfo& info) const;
 
-    // RT, inside a saved-state scope: move one eye of `desc` into an eye image and capture it if requested.
     struct EyeTarget {
         ID3D11Texture2D* texture = nullptr;
         DXGI_FORMAT viewFormat = DXGI_FORMAT_UNKNOWN;
         uint32_t width = 0, height = 0;
         uint32_t arraySlice = 0;
     };
+    // RT, inside a saved-state scope: copy one eye of `desc` / one quad's new content into `target`.
     bool TransferEye(Eye eye, const SubmitDesc& desc, const EyeTarget& target, uint32_t* outW, uint32_t* outH);
+    bool TransferQuad(const QuadLayer& q, const EyeTarget& target, uint32_t* outW, uint32_t* outH);
     static Rect EyeRect(const SubmitDesc& desc, Eye eye);
+    static Rect QuadRect(const QuadLayer& q);
     // Raw (pre-recenter) view an eye image was rendered with.
     static View SubmittedView(const FrameRecord& r, const SubmitDesc& desc, int eye);
-    // Validates a SubmitDesc against the source texture. Logs and returns false on error.
+    // Raw (LOCAL space) pose of a quad in this frame.
+    static Pose QuadPoseLocal(const FrameRecord& r, const QuadLayer& q);
+    // Validates a SubmitDesc (source regions, quad handles). Logs and returns false on error.
     bool ValidateSubmit(const SubmitDesc& desc);
     void CountStat(uint64_t FrameStats::* field);
+
+    // RT, inside a saved-state scope, between capture_.BeginFrame and EndFrame:
+    // if a capture is active, composites each eye (projection image, may be
+    // null, then the frame's quads) at eyeW x eyeH and hands it to the capture.
+    void CaptureComposited(const FrameRecord& rec, const SubmitDesc& desc, const LayerImage projection[2], uint32_t eyeW,
+                           uint32_t eyeH);
+
+    // Quad slots. Mutated on the RT under quadMutex_; read on the RT without it.
+    QuadSlot* FindQuad(LayerHandle h);
+    const QuadSlot* FindQuad(LayerHandle h) const;
+    // Returns a free slot index or -1 (caller holds quadMutex_).
+    int FreeQuadSlotLocked() const;
+    LayerHandle MakeHandle(int index) const;
 
     Logger log_;
     ComPtr<ID3D11Device> device_;
     ComPtr<ID3D11DeviceContext> context_;
     Blitter blitter_;
+    Compositor compositor_;
     CaptureManager capture_;
     D3D11StateBackup stateBackup_;  // RT only
 
@@ -82,13 +129,20 @@ protected:
     uint64_t nextFrameId_ = 1;
     uint64_t epoch_ = 1;
 
+    mutable std::mutex quadMutex_;
+    std::array<QuadSlot, kMaxQuadLayers> quads_{};
+    uint32_t layerSerial_ = 0;  // bumped on every Init so handles from an earlier session are stale
+
     std::atomic<int> recenterRequest_{0};
     Pose recenter_{};  // GT only
-    Pose lastRawHead_{};
 
     mutable std::mutex statsMutex_;
     FrameStats stats_;
     bool initialized_ = false;
+
+private:
+    ComPtr<ID3D11Texture2D> composeTarget_[2];  // R8G8B8A8, viewed as UNORM_SRGB
+    uint32_t composeW_[2]{}, composeH_[2]{};
 };
 
 std::unique_ptr<IXrBackend> CreateNullBackend();
@@ -106,5 +160,9 @@ private:
     D3D11StateBackup& b_;
     ID3D11DeviceContext* ctx_;
 };
+
+// Picks a layer swapchain format: the sRGB variant of `hint` (or `hint`
+// itself) if offered, otherwise the first offered entry of `preferred`.
+DXGI_FORMAT PickLayerFormat(DXGI_FORMAT hint, const std::vector<DXGI_FORMAT>& offered, const DXGI_FORMAT* preferred, size_t count);
 
 }  // namespace ff7vr::xr

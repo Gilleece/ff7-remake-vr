@@ -88,17 +88,15 @@ public:
     bool Transfer(ID3D11DeviceContext* ctx, const BlitSource& src, const Rect& rect, const BlitDest& dst, Path* usedPath,
                   uint32_t* outW, uint32_t* outH);
 
-    // Drops cached views referring to `tex` (call before releasing a texture the cache may hold).
+    // Drops cached render-target views of `tex` (call before releasing a
+    // destination texture). Source textures are never cached: their views are
+    // created per transfer and released before Transfer returns, so the host
+    // can resize or release its textures (a swap chain's ResizeBuffers fails
+    // while any reference to a back buffer is alive).
     void Forget(ID3D11Texture2D* tex);
     void ClearCache();
 
 private:
-    struct SrvEntry {
-        ComPtr<ID3D11Texture2D> tex;
-        DXGI_FORMAT format;
-        uint32_t slice, mip;
-        ComPtr<ID3D11ShaderResourceView> srv;
-    };
     struct RtvEntry {
         ComPtr<ID3D11Texture2D> tex;
         DXGI_FORMAT format;
@@ -111,7 +109,7 @@ private:
         ComPtr<ID3D11Texture2D> tex;
     };
 
-    ID3D11ShaderResourceView* GetSrv(ID3D11Texture2D* tex, DXGI_FORMAT fmt, uint32_t slice, uint32_t mip);
+    ComPtr<ID3D11ShaderResourceView> CreateSrv(ID3D11Texture2D* tex, DXGI_FORMAT fmt, uint32_t slice, uint32_t mip);
     ID3D11RenderTargetView* GetRtv(ID3D11Texture2D* tex, DXGI_FORMAT fmt, uint32_t slice);
     ID3D11Texture2D* GetTemp(DXGI_FORMAT fmt, uint32_t w, uint32_t h, UINT bind);
 
@@ -124,7 +122,6 @@ private:
     ComPtr<ID3D11RasterizerState> rs_;
     ComPtr<ID3D11BlendState> blend_;
     ComPtr<ID3D11DepthStencilState> dss_;
-    std::vector<SrvEntry> srvs_;
     std::vector<RtvEntry> rtvs_;
     std::vector<TempEntry> temps_;
     bool warnedOnce_ = false;

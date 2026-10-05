@@ -88,7 +88,13 @@ struct Options {
     uint32_t sessionTimeoutSec = 30;
     uint32_t printViewsEvery = 0;  // 0 = first frame and a few more
     int64_t recenterAt = -1;       // frame index at which Recenter() is called
+    bool quad = false;             // submit the left eye image as a quad layer only (no projection layer)
+    bool quadOver = false;         // projection layer plus the quad layer on top
 };
+
+// Quad used by --quad / --quad-over: the left eye image on a 1.6 m wide panel 2 m ahead.
+constexpr float kQuadDistance = 2.0f;
+constexpr float kQuadWidth = 1.6f;
 
 void PrintUsage() {
     std::printf(
@@ -117,6 +123,9 @@ void PrintUsage() {
         "  --d3d-debug                 create the D3D11 device with the debug layer\n"
         "  --print-views N             print views every N frames\n"
         "  --recenter-at N             call Recenter() before frame N and check the head pose after it\n"
+        "  --quad                      quad layer only: the left eye image on a 1.6 m panel 2 m ahead;\n"
+        "                              captures are checked for the panel's position and orientation per eye\n"
+        "  --quad-over                 projection layer plus that quad on top\n"
         "  --verbose                   debug log output\n");
 }
 
@@ -202,6 +211,10 @@ bool ParseArgs(int argc, char** argv, Options& o) {
             o.printViewsEvery = static_cast<uint32_t>(std::strtoul(next().c_str(), nullptr, 10));
         } else if (a == "--recenter-at") {
             o.recenterAt = std::strtoll(next().c_str(), nullptr, 10);
+        } else if (a == "--quad") {
+            o.quad = true;
+        } else if (a == "--quad-over") {
+            o.quadOver = true;
         } else if (a == "--verbose" || a == "-v") {
             o.verbose = true;
         } else {
@@ -410,6 +423,123 @@ bool VerifyEyePng(const std::string& path, int eye, uint32_t expectW, uint32_t e
     return ok;
 }
 
+// Projects a point given in tracking space into an eye image (pixels), with
+// the math written out independently of the library's compositor.
+bool ProjectToEye(const xr::View& v, const xr::Vec3& p, uint32_t w, uint32_t h, double* px, double* py) {
+    const xr::Vec3 rel{p.x - v.pose.position.x, p.y - v.pose.position.y, p.z - v.pose.position.z};
+    const xr::Vec3 e = xr::QuatRotate(xr::QuatConjugate(v.pose.orientation), rel);  // eye space, -Z forward
+    if (e.z >= -1e-4f) return false;
+    const double tx = e.x / -e.z, ty = e.y / -e.z;
+    const double l = std::tan(v.fov.angleLeft), r = std::tan(v.fov.angleRight);
+    const double u = std::tan(v.fov.angleUp), d = std::tan(v.fov.angleDown);
+    *px = (tx - l) / (r - l) * w;
+    *py = (u - ty) / (u - d) * h;
+    return true;
+}
+
+// Checks a --quad capture: black outside the panel, panel where the eye's view
+// puts it, upright and not mirrored (green marker at its top-left).
+bool VerifyQuadPng(const std::string& path, int eye, const xr::View& view, const xr::Pose& quadPose, float qw, float qh) {
+    int w = 0, h = 0, n = 0;
+    unsigned char* px = stbi_load(path.c_str(), &w, &h, &n, 3);
+    if (!px) {
+        Fail("cannot read {}", path);
+        return false;
+    }
+    auto at = [&](int x, int y) {
+        x = std::clamp(x, 0, w - 1);
+        y = std::clamp(y, 0, h - 1);
+        const unsigned char* p = px + (size_t(y) * w + x) * 3;
+        return Rgb{p[0], p[1], p[2]};
+    };
+    auto lit = [](const Rgb& c) { return c.r + c.g + c.b > 24; };
+    bool ok = true;
+    // Expected corners (TL, TR, BL, BR) in pixels.
+    double cx[4], cy[4];
+    const xr::Vec3 local[4] = {{-qw / 2, qh / 2, 0}, {qw / 2, qh / 2, 0}, {-qw / 2, -qh / 2, 0}, {qw / 2, -qh / 2, 0}};
+    for (int i = 0; i < 4; ++i) {
+        const xr::Vec3 r = xr::QuatRotate(quadPose.orientation, local[i]);
+        const xr::Vec3 p{r.x + quadPose.position.x, r.y + quadPose.position.y, r.z + quadPose.position.z};
+        if (!ProjectToEye(view, p, w, h, &cx[i], &cy[i])) {
+            Fail("{}: quad corner {} behind the eye; test geometry invalid", path, i);
+            stbi_image_free(px);
+            return false;
+        }
+    }
+    const double ex0 = std::min({cx[0], cx[2]}), ex1 = std::max({cx[1], cx[3]});
+    const double ey0 = std::min({cy[0], cy[1]}), ey1 = std::max({cy[2], cy[3]});
+    // Measured bounding box of lit pixels.
+    int mx0 = w, my0 = h, mx1 = -1, my1 = -1;
+    for (int y = 0; y < h; y += 2)
+        for (int x = 0; x < w; x += 2)
+            if (lit(at(x, y))) {
+                mx0 = std::min(mx0, x);
+                mx1 = std::max(mx1, x);
+                my0 = std::min(my0, y);
+                my1 = std::max(my1, y);
+            }
+    Info("{}: panel expected x {:.1f}..{:.1f} y {:.1f}..{:.1f}, measured x {}..{} y {}..{}", path, ex0, ex1, ey0, ey1, mx0, mx1, my0, my1);
+    const double tol = 4.0;
+    const bool fullyVisible = ex0 >= 0 && ey0 >= 0 && ex1 <= w && ey1 <= h;
+    if (fullyVisible) {
+        if (mx1 < 0 || std::fabs(mx0 - ex0) > tol || std::fabs(mx1 - ex1) > tol || std::fabs(my0 - ey0) > tol || std::fabs(my1 - ey1) > tol) {
+            Fail("{}: panel is not where the eye's view puts it", path);
+            ok = false;
+        }
+    } else {
+        // Partly outside the view: the visible part must lie inside the expected outline.
+        Info("{}: panel partly outside the view; checking containment only", path);
+        if (mx1 < 0 || mx0 < ex0 - tol || mx1 > ex1 + tol || my0 < ey0 - tol || my1 > ey1 + tol) {
+            Fail("{}: lit pixels outside the expected panel outline", path);
+            ok = false;
+        }
+    }
+    if (lit(at(2, 2)) || lit(at(w - 3, h - 3))) {
+        Fail("{}: background is not black", path);
+        ok = false;
+    }
+    stbi_image_free(px);
+    if (ok) Info("verified {} ({}x{}): {} eye, panel position within {:.0f} px", path, w, h, eye == 0 ? "left" : "right", tol);
+    return ok;
+}
+
+// Checks that the green orientation marker lands at the panel's top-left.
+bool VerifyQuadMarker(const std::string& path, const xr::View& view, const xr::Pose& quadPose, float qw, float qh, uint32_t srcW,
+                      uint32_t srcH) {
+    int w = 0, h = 0, n = 0;
+    unsigned char* px = stbi_load(path.c_str(), &w, &h, &n, 3);
+    if (!px) return false;
+    auto at = [&](double fx, double fy) {
+        const int x = std::clamp(static_cast<int>(fx), 0, w - 1), y = std::clamp(static_cast<int>(fy), 0, h - 1);
+        const unsigned char* p = px + (size_t(y) * w + x) * 3;
+        return Rgb{p[0], p[1], p[2]};
+    };
+    auto panelPoint = [&](double sx, double sy, double* ox, double* oy) {
+        const float lx = static_cast<float>((sx / srcW - 0.5) * qw), ly = static_cast<float>((0.5 - sy / srcH) * qh);
+        const xr::Vec3 r = xr::QuatRotate(quadPose.orientation, xr::Vec3{lx, ly, 0});
+        return ProjectToEye(view, xr::Vec3{r.x + quadPose.position.x, r.y + quadPose.position.y, r.z + quadPose.position.z}, w, h, ox,
+                            oy);
+    };
+    bool ok = true;
+    const Rgb green{0, 200, 0};
+    double x = 0, y = 0;
+    if (!panelPoint(90, 90, &x, &y) || !Near(at(x, y), green, 40)) {
+        const Rgb c = at(x, y);
+        Fail("{}: orientation marker not at the panel's top-left (found {},{},{} at {:.0f},{:.0f})", path, c.r, c.g, c.b, x, y);
+        ok = false;
+    }
+    if (panelPoint(srcW - 90.0, 90, &x, &y) && Near(at(x, y), green, 40)) {
+        Fail("{}: marker at the panel's top-right: mirrored", path);
+        ok = false;
+    }
+    if (panelPoint(90, srcH - 90.0, &x, &y) && Near(at(x, y), green, 40)) {
+        Fail("{}: marker at the panel's bottom-left: upside down", path);
+        ok = false;
+    }
+    stbi_image_free(px);
+    return ok;
+}
+
 // ---------------------------------------------------------------------------
 // Statistics
 // ---------------------------------------------------------------------------
@@ -478,6 +608,16 @@ struct Run {
     PatternRenderer* pattern = nullptr;
     uint32_t eyeW = 0, eyeH = 0;
     std::vector<std::pair<uint32_t, std::string>> capturePrefixes;
+    xr::LayerHandle quadLayer = 0;
+    std::vector<std::pair<uint64_t, xr::FrameInfo>> capturedFrames;  // frameId -> views, for quad checks
+    std::mutex capturedMutex;
+
+    xr::Pose QuadPose() const {
+        xr::Pose p;
+        p.position = xr::Vec3{0, 0, -kQuadDistance};
+        return p;
+    }
+    float QuadHeight() const { return kQuadWidth * float(eyeH) / float(eyeW); }
 
     Series waitMs, intervalMs, submitMs, periodMs;
     std::atomic<uint32_t> submitted{0};
@@ -526,11 +666,28 @@ struct Run {
         if (!fi.shouldRender) ++shouldRenderFalse;
         pattern->Render(ctx, index);
         for (const auto& [f, prefix] : capturePrefixes)
-            if (f == index) be->RequestCapture(xr::CaptureRequest{prefix});
+            if (f == index) {
+                be->RequestCapture(xr::CaptureRequest{prefix});
+                std::lock_guard lk(capturedMutex);
+                capturedFrames.push_back({fi.frameId, fi});
+            }
         xr::SubmitDesc sd;
-        sd.texture = pattern->Texture();
+        sd.texture = opt.quad ? nullptr : pattern->Texture();
         sd.viewFormat = opt.source->view;
         sd.encoding = opt.source->linear ? xr::ColorEncoding::Linear : xr::ColorEncoding::Srgb;
+        xr::QuadLayer q;
+        if (quadLayer) {
+            q.layer = quadLayer;
+            q.texture = pattern->Texture();
+            q.viewFormat = opt.source->view;
+            q.encoding = sd.encoding;
+            q.rect = xr::Rect{0, 0, eyeW, eyeH};  // the left eye image
+            q.pose = QuadPose();
+            q.width = kQuadWidth;
+            q.height = QuadHeight();
+            sd.quads = &q;
+            sd.quadCount = 1;
+        }
         if (opt.alternateEyes) {
             sd.eyes[0].update = (index % 2) == 0;
             sd.eyes[1].update = (index % 2) == 1;
@@ -739,6 +896,17 @@ int main(int argc, char** argv) {
     PatternRenderer pattern;
     if (!pattern.Init(dev.Get(), *opt.source, run.eyeW, run.eyeH)) return 1;
     run.pattern = &pattern;
+    if (opt.quad || opt.quadOver) {
+        xr::QuadLayerCreateDesc qd{run.eyeW, run.eyeH, opt.source->texture};
+        if (const xr::Result r = be->CreateQuadLayer(qd, &run.quadLayer); r != xr::Result::Ok) {
+            Fail("CreateQuadLayer: {}", xr::ToString(r));
+            return 1;
+        }
+        xr::SwapchainInfo si;
+        be->GetQuadLayerInfo(run.quadLayer, &si);
+        Info("quad layer: {}x{} {} ({} images), {:.2f} x {:.2f} m at {:.1f} m", si.width, si.height, xr::DxgiFormatName(si.format),
+             si.imageCount, kQuadWidth, run.QuadHeight(), kQuadDistance);
+    }
     Info("source texture: {}x{} {}", run.eyeW * 2, run.eyeH, xr::DxgiFormatName(opt.source->texture));
 
     if (!opt.capturePrefix.empty()) {
@@ -768,6 +936,21 @@ int main(int argc, char** argv) {
                 ok = false;
                 continue;
             }
+            if (opt.quad) {
+                const xr::FrameInfo* fi = nullptr;
+                for (const auto& [id, info] : run.capturedFrames)
+                    if (id == r.frameId) fi = &info;
+                if (!fi) {
+                    Fail("no views recorded for captured frame {}", r.frameId);
+                    ok = false;
+                    continue;
+                }
+                for (int e = 0; e < 2; ++e) {
+                    ok = VerifyQuadPng(r.files[e], e, fi->views[e], run.QuadPose(), kQuadWidth, run.QuadHeight()) && ok;
+                    ok = VerifyQuadMarker(r.files[e], fi->views[e], run.QuadPose(), kQuadWidth, run.QuadHeight(), run.eyeW, run.eyeH) && ok;
+                }
+                continue;
+            }
             // In alternate-eye mode the eye not updated keeps the previous image: still the right eye's content.
             for (int e = 0; e < 2; ++e) ok = VerifyEyePng(r.files[e], e, run.eyeW, run.eyeH) && ok;
         }
@@ -778,7 +961,8 @@ int main(int argc, char** argv) {
     Info("frames: submitted {} of {} in {:.1f} ms; backend waited {} begun {} submitted {} skipped {} discarded {} not-rendered {}",
          run.submitted.load(), opt.frames, loopMs, st.framesWaited, st.framesBegun, st.framesSubmitted, st.framesSkipped,
          st.framesDiscarded, st.framesNotRendered);
-    Info("eye transfers: copy {}, shader blit {}", st.copyPath, st.blitPath);
+    Info("image transfers: copy {}, shader blit {}; quad updates {}; swapchain image wait timeouts {}", st.copyPath, st.blitPath,
+         st.quadUpdates, st.imageWaitTimeouts);
     Info("WaitFrame blocking : {}", run.waitMs.Summary());
     Info("frame interval     : {}", run.intervalMs.Summary());
     Info("SubmitFrame (CPU)  : {}", run.submitMs.Summary());
