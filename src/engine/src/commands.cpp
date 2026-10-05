@@ -17,6 +17,7 @@
 //   stereo host <render|fixed>    switch where eye size and views come from
 //   stereo bloomfix [0|1]         right-eye bloom fix (bloom_fix.h), with its counters
 //   stereo movie [on|off]         movie detection (movie_watch.h), with its state
+//   stereo window [<w>x<h>|0]     game window size while VR renders in a fullscreen mode (fixes.h)
 //   stereo frametime <s>          frame time window length in seconds; restarts the window
 //   stereo swap <0|1>             test: right eye rendered into the left half and vice versa, to tell
 //                                 bugs that follow the view's position from bugs that follow its index
@@ -138,6 +139,7 @@ std::string stereo_command(const std::vector<std::string>& a) {
     if (c == "on" || c == "off") {
         if (!stereo_installed()) return "err stereo device not installed";
         request_stereo(c == "on");
+        if (c == "off") fixes::vr_window_leave();
         return "ok stereo " + c + " requested";
     }
     if (c == "mirror" && a.size() == 3) {
@@ -222,6 +224,10 @@ std::string stereo_command(const std::vector<std::string>& a) {
         if (a.size() == 3 && (a[2] == "on" || a[2] == "off")) movie::set_enabled(a[2] == "on");
         if (a.size() == 4 && a[2] == "menu") movie::set_include_menu(a[3] == "1");
         return "ok " + movie::status();
+    }
+    if (c == "window") {
+        if (a.size() == 3) fixes::set_vr_window_size(a[2]);
+        return "ok " + fixes::vr_window_status();
     }
     if (c == "frametime" && a.size() == 3 && to_float(a[2], v[0]) && v[0] >= 1 && v[0] <= 600) {
         s.frame_window_ms = static_cast<int>(v[0] * 1000);

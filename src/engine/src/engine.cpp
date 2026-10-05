@@ -177,6 +177,7 @@ bool start(const StartupContext& ctx) {
         g_opt.light_fix = cfg.get_bool("stereo", "light_fix", false);
         g_opt.movie_screen = cfg.get_bool("stereo", "movie_screen", false);
         g_opt.bloom_fix = cfg.get_bool("stereo", "bloom_fix", true);
+        fixes::set_vr_window_size(cfg.get_string("stereo", "vr_window", "1280x720"));
         device::Settings& s = device::settings();
         s.world_scale = static_cast<float>(cfg.get_float("stereo", "world_scale", 1.0));
         s.decouple_pitch = cfg.get_bool("stereo", "decoupled_pitch", true);

@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <string>
 
 namespace ff7vr::engine::fixes {
 
@@ -28,5 +29,19 @@ std::optional<bool> view_rect_patch();
 void apply_system_resolution(std::int32_t width, std::int32_t height);
 void restore_system_resolution();
 bool system_resolution_overridden();
+
+// The game window while VR renders. In windowed fullscreen (GSystemResolution.WindowMode
+// 1) Square Enix's renderer replaces view and pass rectangles with the full screen in many
+// places, which breaks both eyes; in exclusive fullscreen (0) losing focus minimises the
+// window and the game stops presenting, and on reactivation the engine re-requests
+// GSystemResolution as a display mode. So the first time stereo becomes active while the
+// game is in either fullscreen mode, the window is switched to a normal window of the
+// configured size (r.SetRes "<w>x<h>w"); vr_window_leave() puts the game's mode back
+// (when stereo is switched off by the user). Game thread for enter; leave queues the
+// change for the game thread. size "0" (or empty) disables the switch.
+void set_vr_window_size(const std::string& size);
+void vr_window_enter();
+void vr_window_leave();
+std::string vr_window_status();
 
 }  // namespace ff7vr::engine::fixes
