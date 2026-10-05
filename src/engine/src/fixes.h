@@ -1,6 +1,8 @@
 #pragma once
 // Game-specific patches that matter for stereo.
 
+#include <d3d11.h>
+
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -53,5 +55,25 @@ void set_vr_window_size(const std::string& size);
 void vr_window_enter();
 void vr_window_leave();
 std::string vr_window_status();
+
+// Screen-space reflections per eye ([stereo] ssr_per_eye, `stereo ssrfix`). Square Enix's
+// reflection pass runs once per view, each time as one full-screen triangle over the whole
+// side-by-side target, and the next pass of that view reads only its own half; the other
+// half is overwritten by the next view's run before anything reads it. With the switch on,
+// each run is limited by a scissor rectangle to its view's half (the first run of a frame
+// to the left half, the second to the right half), which halves the pass's cost and leaves
+// every pixel that is read afterwards as it was. Recognised on the RHI thread by its shape:
+// a full-screen triangle over a whole R16G16B16A16 target at least 1.5 times as wide as
+// high, without depth, reading a hierarchical depth texture (R16_FLOAT with mips).
+// docs/engine-module.md, "Reflections per eye".
+void set_ssr_per_eye(bool on);
+bool ssr_per_eye();
+void set_ssr_poison(int mode);  // test: 1 fills the half a run skipped with a loud colour, 2 its own half (control), 0 off
+// RHI thread: true if the draw was recognised and run (limited to its half).
+bool ssr_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base,
+              void(STDMETHODCALLTYPE* original)(ID3D11DeviceContext*, UINT, UINT, INT));
+// RHI thread, once per frame (frame end).
+void ssr_frame();
+std::string ssr_status();
 
 }  // namespace ff7vr::engine::fixes

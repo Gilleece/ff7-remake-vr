@@ -2,10 +2,16 @@
 
 #include "engine_internal.h"
 
+#include "stereo_device.h"
+
+#include <d3d11_1.h>
+
 #include "ff7vr/core/hook.h"
 #include "ff7vr/core/log.h"
 #include "ff7vr/engine/cvars.h"
 
+#include <algorithm>
+#include <atomic>
 #include <format>
 #include <mutex>
 
@@ -158,6 +164,172 @@ std::string vr_window_status() {
     std::int32_t* r = addresses().GSystemResolution;
     return std::format("vr window {} (restore '{}'), window mode {}", g_vr_window_size.empty() ? "off" : g_vr_window_size,
                        g_vr_window_restore, r ? r[2] : -1);
+}
+
+// ------------------------------------------------------------------ reflections per eye
+namespace {
+std::atomic<bool> g_ssr_on{false};
+std::atomic<int> g_ssr_poison{0};  // test (`ssr poison 1`): fill the skipped half with a loud colour (2: the run's own half, the control)
+std::atomic<std::uint64_t> g_ssr_limited{0}, g_ssr_extra{0}, g_ssr_frames{0};
+int g_ssr_index = 0;  // RHI thread: reflection runs seen this frame
+// RHI thread: the engine's rasterizer state -> the same state with the scissor test on.
+struct RsPair {
+    ID3D11RasterizerState* engine = nullptr;  // compared only
+    ID3D11RasterizerState* scissor = nullptr;  // owned
+};
+RsPair g_rs_cache[8];
+unsigned g_rs_next = 0;
+
+bool is_hzb(ID3D11ShaderResourceView* srv) {
+    ID3D11Resource* r = nullptr;
+    srv->GetResource(&r);
+    if (!r) return false;
+    D3D11_RESOURCE_DIMENSION dim{};
+    r->GetType(&dim);
+    bool yes = false;
+    if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+        D3D11_TEXTURE2D_DESC d{};
+        static_cast<ID3D11Texture2D*>(r)->GetDesc(&d);
+        yes = (d.Format == DXGI_FORMAT_R16_FLOAT || d.Format == DXGI_FORMAT_R16_TYPELESS) && d.MipLevels >= 4;
+    }
+    r->Release();
+    return yes;
+}
+
+ID3D11RasterizerState* scissor_state(ID3D11DeviceContext* ctx, ID3D11RasterizerState* engine) {
+    for (const RsPair& p : g_rs_cache)
+        if (p.scissor && p.engine == engine) return p.scissor;
+    D3D11_RASTERIZER_DESC d{};
+    if (engine) {
+        engine->GetDesc(&d);
+    } else {
+        d.FillMode = D3D11_FILL_SOLID;
+        d.CullMode = D3D11_CULL_BACK;
+        d.DepthClipEnable = TRUE;
+    }
+    d.ScissorEnable = TRUE;
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    ID3D11RasterizerState* s = nullptr;
+    if (dev) {
+        dev->CreateRasterizerState(&d, &s);
+        dev->Release();
+    }
+    if (!s) return nullptr;
+    RsPair& slot = g_rs_cache[g_rs_next];
+    g_rs_next = (g_rs_next + 1) % (sizeof(g_rs_cache) / sizeof(g_rs_cache[0]));
+    if (slot.scissor) slot.scissor->Release();
+    slot = RsPair{engine, s};
+    return s;
+}
+}  // namespace
+
+void set_ssr_per_eye(bool on) {
+    g_ssr_on = on;
+    log::info("fixes: reflections per eye {}", on ? "on" : "off");
+}
+bool ssr_per_eye() { return g_ssr_on.load(); }
+void set_ssr_poison(int mode) { g_ssr_poison = mode; }
+
+bool ssr_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base,
+              void(STDMETHODCALLTYPE* original)(ID3D11DeviceContext*, UINT, UINT, INT)) {
+    if (count != 3 || !g_ssr_on.load(std::memory_order_relaxed)) return false;
+    ID3D11RenderTargetView* rtvs[2]{};
+    ID3D11DepthStencilView* dsv = nullptr;
+    ctx->OMGetRenderTargets(2, rtvs, &dsv);
+    const bool shape = rtvs[0] && !rtvs[1] && !dsv;
+    D3D11_TEXTURE2D_DESC td{};
+    if (rtvs[0]) {
+        ID3D11Resource* r = nullptr;
+        rtvs[0]->GetResource(&r);
+        D3D11_RESOURCE_DIMENSION dim{};
+        if (r) r->GetType(&dim);
+        if (r && dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) static_cast<ID3D11Texture2D*>(r)->GetDesc(&td);
+        if (r) r->Release();
+    }
+    for (auto* v : rtvs)
+        if (v) v->Release();
+    if (dsv) dsv->Release();
+    if (!shape || (td.Format != DXGI_FORMAT_R16G16B16A16_FLOAT && td.Format != DXGI_FORMAT_R16G16B16A16_TYPELESS) ||
+        td.Width * 2 < td.Height * 3 || td.Width < 128)
+        return false;
+    D3D11_VIEWPORT vp{};
+    UINT nvp = 1;
+    ctx->RSGetViewports(&nvp, &vp);
+    if (nvp == 0 || vp.TopLeftX != 0.0f || vp.TopLeftY != 0.0f || vp.Width != static_cast<float>(td.Width) ||
+        vp.Height != static_cast<float>(td.Height))
+        return false;
+    ID3D11ShaderResourceView* srvs[16]{};
+    ctx->PSGetShaderResources(0, 16, srvs);
+    bool hzb = false;
+    for (auto* s : srvs) {
+        if (s && !hzb) hzb = is_hzb(s);
+        if (s) s->Release();
+    }
+    if (!hzb) return false;
+    const int index = g_ssr_index++;
+    if (index >= 2) {
+        ++g_ssr_extra;
+        return false;
+    }
+    // Views are rendered left eye first; `stereo swap` puts the left eye into the right half.
+    const bool right_half = (index == 1) != device::settings().swap_rects.load();
+    const LONG half = static_cast<LONG>(td.Width / 2);
+    D3D11_RECT rect{right_half ? half : 0, 0, right_half ? static_cast<LONG>(td.Width) : half, static_cast<LONG>(td.Height)};
+
+    ID3D11RasterizerState* engine_rs = nullptr;
+    ctx->RSGetState(&engine_rs);
+    D3D11_RASTERIZER_DESC ed{};
+    if (engine_rs) engine_rs->GetDesc(&ed);
+    UINT nsc = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    D3D11_RECT saved[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
+    ctx->RSGetScissorRects(&nsc, saved);
+    if (engine_rs && ed.ScissorEnable && nsc > 0) {
+        // The engine already scissors this draw: keep the overlap.
+        rect.left = std::max(rect.left, saved[0].left);
+        rect.top = std::max(rect.top, saved[0].top);
+        rect.right = std::min(rect.right, saved[0].right);
+        rect.bottom = std::min(rect.bottom, saved[0].bottom);
+    }
+    ID3D11RasterizerState* rs = engine_rs && ed.ScissorEnable ? engine_rs : scissor_state(ctx, engine_rs);
+    if (!rs || rect.right <= rect.left || rect.bottom <= rect.top) {
+        if (engine_rs) engine_rs->Release();
+        return false;
+    }
+    ctx->RSSetState(rs);
+    ctx->RSSetScissorRects(1, &rect);
+    original(ctx, count, start, base);
+    if (g_ssr_poison.load(std::memory_order_relaxed)) {
+        // Test: fill the half this run skipped with a loud colour. If a later pass read the
+        // reflections outside its own eye's half, it would show in the eye images.
+        ID3D11RenderTargetView* rtv = nullptr;
+        ctx->OMGetRenderTargets(1, &rtv, nullptr);
+        ID3D11DeviceContext1* ctx1 = nullptr;
+        if (rtv && SUCCEEDED(ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&ctx1))) && ctx1) {
+            const bool own = g_ssr_poison.load() == 2;
+            const bool left = own ? !right_half : right_half;
+            const D3D11_RECT other{left ? 0 : half, 0, left ? half : static_cast<LONG>(td.Width), static_cast<LONG>(td.Height)};
+            const float magenta[4] = {50.0f, 0.0f, 50.0f, 1.0f};
+            ctx1->ClearView(rtv, magenta, &other, 1);
+            ctx1->Release();
+        }
+        if (rtv) rtv->Release();
+    }
+    ctx->RSSetState(engine_rs);
+    ctx->RSSetScissorRects(nsc, nsc ? saved : nullptr);
+    if (engine_rs) engine_rs->Release();
+    ++g_ssr_limited;
+    return true;
+}
+
+void ssr_frame() {
+    if (g_ssr_index) ++g_ssr_frames;
+    g_ssr_index = 0;
+}
+
+std::string ssr_status() {
+    return std::format("reflections per eye {}: runs limited {} in {} frames, extra runs left alone {}", g_ssr_on.load() ? "on" : "off",
+                       g_ssr_limited.load(), g_ssr_frames.load(), g_ssr_extra.load());
 }
 
 }  // namespace ff7vr::engine::fixes
