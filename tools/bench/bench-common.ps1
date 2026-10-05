@@ -439,6 +439,33 @@ function Get-ImplicitLayerDisableEnv {
     return $out
 }
 
+# SteamVR's own per-application statistics, written to vrcompositor.txt when
+# the application disconnects ("Cumulative stats for pid: N"): presents,
+# dropped and reprojected frames, and the application's average CPU and GPU
+# frame time as the compositor measured it. Returns $null if not found.
+function Get-SteamVrAppStats([int]$gamePid) {
+    $steam = Get-SteamRoot
+    if (-not $steam) { return $null }
+    $log = Join-Path $steam 'logs\vrcompositor.txt'
+    if (-not (Test-Path -LiteralPath $log)) { return $null }
+    $lines = @((Read-SharedText $log) -split "`r?`n")
+    $start = -1
+    for ($i = $lines.Count - 1; $i -ge 0; $i--) { if ($lines[$i] -match "Cumulative stats for pid: $gamePid\b") { $start = $i; break } }
+    if ($start -lt 0) { return $null }
+    $o = [ordered]@{ raw = @() }
+    for ($i = $start + 1; $i -lt [math]::Min($lines.Count, $start + 12); $i++) {
+        $l = $lines[$i]
+        if ($l -match '#####') { break }
+        $c = ($l -replace '^.*?\[Info\] - ', '')
+        $o.raw += $c
+        if ($c -match '^Total\.+\s+(\d+) presents\.\s+(\d+) dropped\.\s+(\d+) reprojected') { $o.presents = [int]$Matches[1]; $o.dropped = [int]$Matches[2]; $o.reprojected = [int]$Matches[3] }
+        if ($l -match 'Compositor Time\.+CPU: ([\d.]+)ms / GPU: ([\d.]+)ms') { $o.compositorCpuMs = [double]$Matches[1]; $o.compositorGpuMs = [double]$Matches[2] }
+        if ($l -match 'ApplicationTime CPU: ([\d.]+)ms / GPU: ([\d.]+)ms') { $o.appCpuMs = [double]$Matches[1]; $o.appGpuMs = [double]$Matches[2] }
+        if ($l -match 'FPS Average Target (\d+)') { $o.targetFps = [int]$Matches[1] }
+    }
+    return [pscustomobject]$o
+}
+
 # ------------------------------------------------------------------ GPU and CPU sampling
 
 function Get-NvidiaSmi {
@@ -675,6 +702,8 @@ function Get-FrameStats([string]$csvPath) {
     $worst = [math]::Max(1, [int][math]::Floor($n / 100))
     $wsum = 0.0; for ($k = $n - $worst; $k -lt $n; $k++) { $wsum += $sorted[$k] }
     $prs = $pr.ToArray(); [Array]::Sort($prs)
+    # Hitches: frames longer than 50 ms (a stall of the game, the runtime or the machine).
+    $hitches = 0; foreach ($v in $sorted) { if ($v -gt 50.0) { $hitches++ } }
     $mean = $sum / $n
     $var = 0.0; foreach ($v in $sorted) { $var += ($v - $mean) * ($v - $mean) }
     return [pscustomobject]@{
@@ -687,6 +716,7 @@ function Get-FrameStats([string]$csvPath) {
             p99 = [math]::Round((Get-Percentile $sorted 99), 3); max = [math]::Round($sorted[$n - 1], 3); min = [math]::Round($sorted[0], 3)
         }
         # 1% low: frame rate over the slowest 1% of frames (mean of their frame times).
+        hitchesOver50ms  = $hitches
         onePercentLowFps = [math]::Round(1000.0 / ($wsum / $worst), 2)
         p99Fps           = [math]::Round(1000.0 / (Get-Percentile $sorted 99), 2)
         # Time spent inside the original Present (blocking on the GPU queue or vsync).

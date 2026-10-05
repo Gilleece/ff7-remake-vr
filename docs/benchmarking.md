@@ -42,7 +42,9 @@ for UEVR configurations. Nothing needs administrator rights.
    deadlock.
 2. VR configurations: switches SteamVR to its null driver
    (`tools/dev/steamvr-null-enable.ps1`) with the configuration's render size
-   and refresh rate, and starts SteamVR.
+   and refresh rate, turns SteamVR's dashboard off (it otherwise opens over
+   the application and adds compositor work), and starts SteamVR. The
+   settings file is restored byte for byte afterwards.
 3. UEVR configurations: makes sure a verified backup of UEVR's profile folder
    for this game exists, then writes the run's `config.txt` (see "UEVR").
 4. Starts the game with `tools/dev/launch.ps1 -Until gameplay`: windowed at the
@@ -141,10 +143,15 @@ deviation well under 1 ms on the development machine).
 
 It is only as repeatable as the save: the newest save decides where you
 stand. Keep the save fixed while comparing (the harness never saves; the
-game's own autosave does not trigger while standing still). A second scene
-with scripted camera motion is not implemented yet; the keyboard input path
-(`tools/dev/send-input.ps1`) works, so a `pan` scene that holds a camera key
-during the recording is the natural next step.
+game's own autosave does not trigger while standing still).
+
+Scene `pan` (`-Scene pan`): the same, plus relative mouse moves sent with
+`SendInput` every 10 ms during the recording (`-PanStep` pixels each, default
+6), which turns the camera at a constant rate while the game window has the
+focus. The number of input events delivered is stored as `panInputs`. Its
+effect on the camera depends on the game's mouse sensitivity setting, and
+under UEVR the mouse may be handled differently; check `game.png` /
+`steamvr-vrcompositor.png` before relying on it.
 
 ## UEVR
 
@@ -211,6 +218,7 @@ file). The ones provided:
 | `uevr-2496-hzb` | profile with `VR_DisableHZBOcclusion=false` |
 | `uevr-2496-nofix` | profile with `VR_NativeStereoFix=false` |
 | `uevr-2496-early` | profile with `VR_SynchronizationMode=0` |
+| `mod-screen-720p` | this mod's virtual screen mode (render module, `buildull`), 1280x720, uncapped |
 
 ### Adding a configuration of this mod
 

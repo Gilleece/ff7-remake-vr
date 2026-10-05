@@ -81,6 +81,7 @@ function Get-Summary([string]$dir) {
             p95Ms = Get-MeanStd ([double[]]@($ok | ForEach-Object { $_.frames.frameTimeMs.p95 }))
             p99Ms = Get-MeanStd ([double[]]@($ok | ForEach-Object { $_.frames.frameTimeMs.p99 }))
             low1Fps = Get-MeanStd ([double[]]@($ok | ForEach-Object { $_.frames.onePercentLowFps }))
+            hitches = Get-MeanStd ([double[]]@($ok | Where-Object { $_.frames.PSObject.Properties.Name -contains 'hitchesOver50ms' } | ForEach-Object { $_.frames.hitchesOver50ms }))
             gpuPct = Get-MeanStd ([double[]]@($ok | Where-Object { $_.gpu.PSObject.Properties.Name -contains 'utilPct' } | ForEach-Object { $_.gpu.utilPct }))
             gpuMemMiB = Get-MeanStd ([double[]]@($ok | Where-Object { $_.gpu.PSObject.Properties.Name -contains 'memUsedMiB' } | ForEach-Object { $_.gpu.memUsedMiB }))
             gpuPowerW = Get-MeanStd ([double[]]@($ok | Where-Object { $_.gpu.PSObject.Properties.Name -contains 'powerW' } | ForEach-Object { $_.gpu.powerW }))
@@ -95,16 +96,16 @@ function Get-Summary([string]$dir) {
 }
 
 function Write-Table($rows, [string]$mdPath) {
-    $hdr = '| Configuration | Runs | Avg fps (mean +- sd) | Spread | p50 ms | p99 ms | 1% low fps | GPU % | GPU mem MiB | GPU W | CPU cores | Eye | Rendered MP |'
-    $sep = '|---|---|---|---|---|---|---|---|---|---|---|---|---|'
+    $hdr = '| Configuration | Runs | Avg fps (mean +- sd) | Spread | p50 ms | p99 ms | 1% low fps | Hitches >50ms | GPU % | GPU mem MiB | GPU W | CPU cores | Eye | Rendered MP |'
+    $sep = '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|'
     $lines = @($hdr, $sep)
     foreach ($r in $rows) {
-        $lines += ('| {0} | {1}{2} | {3} +- {4} | {5}% | {6} | {7} | {8} | {9} | {10} | {11} | {12} | {13} | {14} |' -f
+        $lines += ('| {0} | {1}{2} | {3} +- {4} | {5}% | {6} | {7} | {8} | {15} | {9} | {10} | {11} | {12} | {13} | {14} |' -f
             $r.config, $r.runs, $(if ($r.failed) { " ($($r.failed) failed)" } else { '' }),
             (Format-Num $r.avgFps.mean 1), (Format-Num $r.avgFps.std 1), (Format-Num $r.spreadPct 1),
             (Format-Num $r.p50Ms.mean 2), (Format-Num $r.p99Ms.mean 2), (Format-Num $r.low1Fps.mean 1),
             (Format-Num $r.gpuPct.mean 0), (Format-Num $r.gpuMemMiB.mean 0), (Format-Num $r.gpuPowerW.mean 0),
-            (Format-Num $r.cpuCores.mean 2), $(if ($r.eye) { $r.eye } else { '-' }), (Format-Num $r.megapixels.mean 1))
+            (Format-Num $r.cpuCores.mean 2), $(if ($r.eye) { $r.eye } else { '-' }), (Format-Num $r.megapixels.mean 1), (Format-Num $r.hitches.mean 1))
     }
     $lines += ''
     foreach ($r in $rows) { $lines += "- **$($r.config)**: $($r.description) (back buffer $($r.backBuffer))" }

@@ -357,6 +357,14 @@ finally {
         $l = Join-Path $d 'ff7vr.log'
         if (Test-Path -LiteralPath $l) { Copy-Item -LiteralPath $l -Destination (Join-Path $OutDir 'ff7vr.log') -Force }
     }
+    if ($svEnabled -and $result.Contains('gamePid')) {
+        # Written by the compositor when the game disconnects (whole session, not only the recording).
+        try {
+            $sva = $null
+            for ($k = 0; $k -lt 10 -and -not $sva; $k++) { $sva = Get-SteamVrAppStats $result.gamePid; if (-not $sva) { Start-Sleep -Milliseconds 500 } }
+            if ($sva) { $result.steamvrAppStats = $sva }
+        } catch { $notes += "SteamVR stats: $_" }
+    }
     if ($uevrRun) {
         $p = @(Exit-UevrProfileRun)
         $result.uevrProfileRestored = ($p.Count -eq 0)
