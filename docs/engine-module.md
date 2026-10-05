@@ -757,6 +757,54 @@ and shown). Keys to flip in `ff7vr.ini` to narrow it down:
 | any first-person problem | `[first_person] enabled = 0` switches the whole feature off |
 | a cutscene or conversation viewed from the wrong place | `[camera] boom = game`; if that does not fix it, the follow-camera test passed for an authored camera: the log line `player: follow camera on (...)` names the camera |
 
+## Long session (soak) test
+
+The configuration a player gets (`tools/package/ff7vr.ini`: stereo, UI layer, foveation
+`quality`, first person by default) with the Null backend (Quest 3 class eyes 2064x2208,
+90 Hz) and the dev pipe on, from the latest save, 15.5 minutes of scripted play
+(`captures/soak/runN`): 20 rounds of walking out and back (rooms, then outdoors in the
+slums), turning and pitching with the mouse, Home twice, the command menu and the main
+menu opened and closed, End, Insert twice (stereo off for 4 s), idle. Process samples every
+30 s (`monitor.csv`: working set, private bytes, handles, threads, GPU memory of the
+process from the `GPU Process Memory` counters), frame times from the log's 10 s windows.
+
+| | start (17:38) | middle (17:46) | end (17:53) |
+|---|---|---|---|
+| working set | 2945 MB | 2773 MB | 2871 MB |
+| private bytes | 10783 MB | 10540 MB | 10862 MB |
+| GPU memory of the process (dedicated) | 7613 MB | 7529 MB | 7676 MB |
+| handles | 2998 | 2986 | 2986 |
+| threads | 121 | 115 | 115 |
+| frame interval in stereo, 10 s windows (median, p95) | 11.11, 11.11 ms | 11.11, 11.11 ms | 11.11, 11.11 ms |
+
+Over all 31 samples: working set 2769 to 2965 MB, private bytes 9583 to 11064 MB (lower
+while stereo was off: the eye target is released), GPU memory 6514 to 7676 MB, handles
+2984 to 3003, threads 115 to 121; nothing grows steadily. Every all-stereo 10 s window has
+a median and p95 of 11.11 ms (the 90 Hz pacing) from the first to the last minute; the
+windows with a stereo switch have their longest frame at 50 to 77 ms (the switch
+reallocates the eye target). Two other frames, at minute 13 and 14, took over 100 ms (the
+render module's XR thread took over pacing for 30 ms and logged it); both came right when
+the test script brought the window to the front and pressed a movement key (60 such
+presses in the run), not at a switch; the cause was not found. The log has no warning or error line (2140 lines,
+about 140 per minute); 20 recenters and 40 stereo switches were logged, `submit errors 0`,
+the bloom fix `missed 0` for 75180 frames. Eye captures at the start, after the first
+round, in the middle and at the end (`s00` to `s03`) show the scene correctly in both eyes.
+
+## What a real headset may do differently
+
+Everything above was tested with the Null backend and SteamVR's null driver, whose
+virtual headset never moves, never sleeps and never loses tracking. What the code does in
+the situations a real one adds (read from the code, not seen):
+
+| Situation | What happens |
+|---|---|
+| tracking lost, headset taken off | the XR layer passes the runtime's views on with their valid bits recorded but not acted on. Views that cannot be rendered (non-finite values, a non-unit orientation, a position over 100 m away, a field of view that does not open) are replaced by the last good ones (`stereo: unusable views from the host ...`, `unusable_views` in `stereo status`); finite but stale poses are used as they come, so the view freezes with the head until tracking returns. If the runtime stops the session (a Quest asleep), the engine renders mono after 45 frames without an XR frame and the desktop game carries on; when the session runs again stereo resumes with a short hitch (the eye target is allocated again) |
+| eye size or field of view changes | the field of view is read from every frame's views, so the projection follows at once. A different recommended eye size (only possible with a new session) is compared with the eye target every frame and the target is reallocated (one hitch) |
+| the session starts while the game is already in gameplay | stereo is wanted from the start but every frame stays mono until the host has frames; then the eye target is allocated (the first start also sets up foveated rendering: a single frame of about 0.35 s measured), the game window is switched from a fullscreen mode to `vr_window`, and the render module recenters at the session start. A session that starts while the player is not yet facing forward is fixed with the recenter key |
+| refresh rate 72, 90 or 120 Hz | in stereo the game thread waits for each XR frame, so the game runs at the headset's rate; its own limit of 120 fps is above 72 and 90 and equal at 120. SteamVR's null driver paces at about 120 Hz, where the game delivered 115 to 120 frames per second with a median frame interval of 8.33 ms; at 120 Hz the GPU budget (8.3 ms, plus the video encoding of Virtual Desktop) is tighter than the 7.0 ms measured for 2 x 2064x2208 without foveation, so 90 Hz is the safer first setting |
+| the head far from the origin | with `positional = 1` the eyes move by the head's offset (times `world_scale`) from the eye base, with no limit: standing up or leaning far moves the view through Cloud or through walls. The recenter key makes the current head position the origin again |
+| looking straight up or down | with decoupled pitch the head's pitch is applied as it is on top of the camera's yaw; the conversion to the engine's rotator keeps the orientation at the poles (unit test: pitch +-90 and +-89.99 with yaw 30 give the same axes after the conversion). In first person nothing of the character is in view below |
+
 ## Known problems
 
 Ordered by how much they would bother a player in the headset:
@@ -791,7 +839,16 @@ Ordered by how much they would bother a player in the headset:
    into each eye as a central crop of the 16:9 UI; the size variables cannot fix that
    (`docs/re/engine.md`, "What the UI composite does with an eye view"). With it the UI is on
    its own layer (section "UI layer").
-9. With a real OpenXR runtime the render module must hand the frame its XR thread already
+9. **The headset's own recenter** (holding the Meta button on a Quest) is logged by the XR
+   layer (`runtime reference space change pending`) but the recenter offset stored at the
+   session start or by the recenter key stays applied on top of the runtime's new origin
+   (`src/xr/src/openxr_backend.cpp`, the `XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING`
+   case), so after it the view can be off by the yaw and position stored before. The
+   recenter key (End, View/Back + left stick click) puts it right.
+10. **Gamepad View/Back alone** reaches the game on release, about 120 ms long, instead of
+   while held (`[controls] pad_hold_view`). A game action that needs View held would not
+   work; none is known in exploration (View opens the map).
+11. With a real OpenXR runtime the render module must hand the frame its XR thread already
    waited to the game thread at the start of stereo instead of waiting a second one
    (`XrController::BeginGameFrame`, in place); otherwise the game thread blocks in
    `xrWaitFrame` forever when the pipeline is idle (seen with SteamVR's null driver).
