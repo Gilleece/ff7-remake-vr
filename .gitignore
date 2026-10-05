@@ -1,0 +1,11 @@
+build/
+_ref/
+.venv/
+.locks/
+third_party/_fetched/
+*.log
+*.dmp
+captures/
+.vs/
+CMakeUserPresets.json
+__pycache__/
