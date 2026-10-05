@@ -6,6 +6,7 @@ add_library(ff7vr SHARED
     startup.cpp
     xinput_proxy.cpp
     dev_input.cpp
+    cmdline.cpp
     xinput1_3.def
     version.rc
 )

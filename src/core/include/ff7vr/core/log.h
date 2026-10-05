@@ -14,6 +14,7 @@
 #include <format>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace ff7vr::log {
 
@@ -23,6 +24,15 @@ enum class Level : int { Trace = 0, Debug = 1, Info = 2, Warn = 3, Error = 4, Fa
 // ignored. Lines logged before init are kept in memory and written on init.
 bool init(const std::wstring& path, Level min_level = Level::Info);
 void shutdown();
+
+// Keeps earlier sessions before init truncates the log. Moves `dir`\ff7vr.log
+// (as ff7vr-<last write time>.log) and any `dir`\ff7vr-crash-*.dmp into
+// `dir`\ff7vr-logs\, then deletes all but the newest `keep` logs and the newest
+// `keep` crash dumps there. Only ever touches files with those names. keep <= 0
+// does nothing (the log is overwritten and dumps stay where they are). Creates
+// the folder only when there is something to keep. Returns one line per action
+// for the log (written once the log is open).
+std::vector<std::string> archive_previous(const std::wstring& dir, int keep);
 
 void set_level(Level level);
 Level level();

@@ -2,7 +2,9 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -85,6 +87,86 @@ bool init(const std::wstring& path, Level min_level) {
     s.pending.shrink_to_fit();
     LeaveCriticalSection(&s.cs);
     return true;
+}
+
+namespace {
+
+bool starts_ends(const std::wstring& name, std::wstring_view prefix, std::wstring_view suffix) {
+    if (name.size() < prefix.size() + suffix.size()) return false;
+    return _wcsnicmp(name.c_str(), prefix.data(), prefix.size()) == 0 &&
+           _wcsicmp(name.c_str() + name.size() - suffix.size(), suffix.data()) == 0;
+}
+
+std::wstring stamp_of(const std::filesystem::path& file) {
+    WIN32_FILE_ATTRIBUTE_DATA a{};
+    SYSTEMTIME t{};
+    FILETIME local{};
+    if (GetFileAttributesExW(file.c_str(), GetFileExInfoStandard, &a) &&
+        FileTimeToLocalFileTime(&a.ftLastWriteTime, &local) && FileTimeToSystemTime(&local, &t)) {
+    } else {
+        GetLocalTime(&t);
+    }
+    return std::format(L"{:04}{:02}{:02}-{:02}{:02}{:02}", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+}
+
+// Deletes all but the newest `keep` files of `dir` whose names match; names sort by time.
+int prune(const std::filesystem::path& dir, std::wstring_view prefix, std::wstring_view suffix, int keep) {
+    std::error_code ec;
+    std::vector<std::filesystem::path> files;
+    for (const auto& e : std::filesystem::directory_iterator(dir, ec)) {
+        if (!e.is_regular_file(ec)) continue;
+        if (starts_ends(e.path().filename().wstring(), prefix, suffix)) files.push_back(e.path());
+    }
+    if (static_cast<int>(files.size()) <= keep) return 0;
+    std::sort(files.begin(), files.end(), [](const auto& a, const auto& b) { return a.filename() > b.filename(); });
+    int removed = 0;
+    for (size_t i = static_cast<size_t>(keep); i < files.size(); ++i)
+        if (std::filesystem::remove(files[i], ec)) ++removed;
+    return removed;
+}
+
+}  // namespace
+
+std::vector<std::string> archive_previous(const std::wstring& dir_str, int keep) {
+    std::vector<std::string> out;
+    if (keep <= 0) return out;
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path dir(dir_str);
+    const fs::path archive = dir / L"ff7vr-logs";
+
+    std::vector<fs::path> dumps;
+    for (const auto& e : fs::directory_iterator(dir, ec))
+        if (e.is_regular_file(ec) && starts_ends(e.path().filename().wstring(), L"ff7vr-crash-", L".dmp"))
+            dumps.push_back(e.path());
+    const fs::path log = dir / L"ff7vr.log";
+    const bool have_log = fs::is_regular_file(log, ec);
+
+    if (have_log || !dumps.empty()) {
+        fs::create_directories(archive, ec);
+        if (have_log) {
+            std::wstring base = L"ff7vr-" + stamp_of(log);
+            fs::path dest = archive / (base + L".log");
+            for (int n = 2; fs::exists(dest, ec) && n < 100; ++n) dest = archive / std::format(L"{}-{}.log", base, n);
+            if (MoveFileExW(log.c_str(), dest.c_str(), MOVEFILE_COPY_ALLOWED))
+                out.push_back(std::format("log: previous session's log kept as {}", narrow(dest.wstring())));
+            else
+                out.push_back(std::format("log: could not keep the previous session's log (error {}); it is overwritten",
+                                          GetLastError()));
+        }
+        for (const auto& d : dumps) {
+            fs::path dest = archive / d.filename();
+            if (MoveFileExW(d.c_str(), dest.c_str(), MOVEFILE_COPY_ALLOWED | MOVEFILE_REPLACE_EXISTING))
+                out.push_back(std::format("log: earlier crash dump moved to {}", narrow(dest.wstring())));
+        }
+    }
+    if (fs::is_directory(archive, ec)) {
+        int a = prune(archive, L"ff7vr-", L".log", keep);
+        int b = prune(archive, L"ff7vr-crash-", L".dmp", keep);
+        if (a || b) out.push_back(std::format("log: deleted {} old log(s) and {} old crash dump(s) from {} (keeping {})", a, b,
+                                              narrow(archive.wstring()), keep));
+    }
+    return out;
 }
 
 void shutdown() {

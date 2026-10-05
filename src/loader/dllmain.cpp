@@ -1,7 +1,9 @@
 // ff7vr loader: the xinput1_3.dll proxy that ff7remake_.exe loads from its own
-// directory (End\Binaries\Win64). DllMain does nothing but start one thread;
-// all work happens on that thread, after the loader lock is released.
+// directory (End\Binaries\Win64). DllMain reads ff7vr.ini, adds -d3d11 to the
+// command line if needed (the engine has not read it yet) and starts one thread;
+// all other work happens on that thread, after the loader lock is released.
 
+#include "cmdline.h"
 #include "dev_input.h"
 #include "startup.h"
 #include "xinput_proxy.h"
@@ -17,6 +19,8 @@
 #include <windows.h>
 
 #include <filesystem>
+#include <format>
+#include <string>
 #include <system_error>
 
 namespace {
@@ -27,6 +31,81 @@ constexpr char kVersion[] = "0.1.0";
 
 Config g_config;
 HANDLE g_bootstrap = nullptr;
+
+// Result of the Direct3D 11 check made in DllMain, logged once the log is open.
+struct D3D11Check {
+    log::Level level = log::Level::Info;
+    std::string message;
+    std::wstring original;  // command line before the change, empty when unchanged
+} g_d3d11;
+
+std::filesystem::path dll_directory(HMODULE module) {
+    wchar_t buf[MAX_PATH * 2] = {};
+    DWORD n = GetModuleFileNameW(module, buf, static_cast<DWORD>(std::size(buf)));
+    if (n == 0 || n >= std::size(buf)) return {};
+    return std::filesystem::path(buf).parent_path();
+}
+
+// Reads ff7vr.ini with plain Win32 file calls (this runs under the loader lock).
+void load_config_early(const std::filesystem::path& ini) {
+    HANDLE f = CreateFileW(ini.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return;
+    std::string text;
+    LARGE_INTEGER size{};
+    if (GetFileSizeEx(f, &size) && size.QuadPart > 0 && size.QuadPart < (1 << 20)) {
+        text.resize(static_cast<size_t>(size.QuadPart));
+        DWORD got = 0;
+        if (!ReadFile(f, text.data(), static_cast<DWORD>(text.size()), &got, nullptr)) got = 0;
+        text.resize(got);
+    }
+    CloseHandle(f);
+    g_config.load_from_string(text);
+}
+
+// The mod's D3D11 hooks need the engine to choose Direct3D 11; without a
+// graphics option on its command line it chooses Direct3D 12. The engine reads
+// the command line only after every DLL the exe imports is initialised, so the
+// option can still be added here. Runs in DllMain, before the engine starts.
+void ensure_d3d11() {
+    auto exe = module::main_module();
+    if (_wcsicmp(exe.path.filename().c_str(), L"ff7remake_.exe") != 0) return;
+    if (!g_config.get_bool("loader", "force_d3d11", true)) {
+        g_d3d11.message = "d3d11: [loader] force_d3d11 = 0, command line left as it is";
+        return;
+    }
+    if (!g_config.get_bool("render", "enabled", true) && !g_config.get_bool("stereo", "enabled", true)) {
+        g_d3d11.message = "d3d11: [render] and [stereo] are off, command line left as it is";
+        return;
+    }
+    std::wstring option;
+    switch (loader::cmdline::find_d3d_choice(GetCommandLineW(), &option)) {
+        case loader::cmdline::D3DChoice::D3D11:
+            g_d3d11.message = std::format("d3d11: the command line already has {}", log::narrow(option));
+            return;
+        case loader::cmdline::D3DChoice::Other:
+            g_d3d11.level = log::Level::Warn;
+            g_d3d11.message = std::format(
+                "d3d11: the command line asks for {}; left as it is. The mod needs Direct3D 11: remove {} from the "
+                "game's launch options",
+                log::narrow(option), log::narrow(option));
+            return;
+        case loader::cmdline::D3DChoice::None:
+            break;
+    }
+    std::wstring before = GetCommandLineW();
+    std::string detail;
+    if (loader::cmdline::append_argument(L"-d3d11", &detail)) {
+        g_d3d11.original = std::move(before);
+        g_d3d11.message = std::format("d3d11: added -d3d11 to the command line so the game uses Direct3D 11 ({})", detail);
+    } else {
+        g_d3d11.level = log::Level::Warn;
+        g_d3d11.message = std::format(
+            "d3d11: could not add -d3d11 to the command line ({}). The game will use Direct3D 12 and the mod stays "
+            "inactive: add -d3d11 to the game's launch options in Steam",
+            detail);
+    }
+}
 
 void log_identity(const std::filesystem::path& dll_dir) {
     auto self = module::self();
@@ -58,8 +137,10 @@ DWORD WINAPI bootstrap(void*) {
     auto self = module::self();
     std::filesystem::path dll_dir = self.path.parent_path();
 
-    g_config.load(dll_dir / L"ff7vr.ini");
     auto level = log::parse_level(g_config.get_string("log", "level", "info"), log::Level::Info);
+    // Earlier sessions' logs and crash dumps go to ff7vr-logs\ (only when the mod is installed
+    // by hand; the launcher and the dev tools move them away after every session).
+    auto kept = log::archive_previous(dll_dir.wstring(), static_cast<int>(g_config.get_int("log", "keep_sessions", 5)));
     log::init((dll_dir / L"ff7vr.log").wstring(), level);
 
     if (g_config.get_bool("crash", "enabled", true)) {
@@ -73,6 +154,9 @@ DWORD WINAPI bootstrap(void*) {
     }
 
     log_identity(dll_dir);
+    for (const auto& line : kept) log::info("{}", line);
+    if (!g_d3d11.original.empty()) log::info("process: command line at start: {}", log::narrow(g_d3d11.original));
+    if (!g_d3d11.message.empty()) log::write(g_d3d11.level, g_d3d11.message);
 
     if (loader::xinput::load_real())
         log::info("xinput: forwarding to {}", log::narrow(loader::xinput::real_path()));
@@ -110,6 +194,9 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
     switch (reason) {
         case DLL_PROCESS_ATTACH:
             DisableThreadLibraryCalls(module);
+            // Before the engine starts: the settings, then the graphics API option.
+            if (auto dir = dll_directory(module); !dir.empty()) load_config_early(dir / L"ff7vr.ini");
+            ensure_d3d11();
             // The thread starts running only after the loader lock is released.
             g_bootstrap = CreateThread(nullptr, 0, bootstrap, nullptr, 0, nullptr);
             if (g_bootstrap) {
