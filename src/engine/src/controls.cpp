@@ -5,6 +5,9 @@
 
 #include "ff7vr/core/dev_commands.h"
 #include "ff7vr/core/log.h"
+#if FF7VR_ENGINE_WITH_RENDER
+#include "ff7vr/render/render.h"
+#endif
 
 #include <windows.h>
 
@@ -79,6 +82,16 @@ void trigger(Action a, const char* source) {
             run_command("recenter", what);
             break;
         case Action::Stereo: {
+#if FF7VR_ENGINE_WITH_RENDER
+            // No XR session (the runtime asked the game to let go of the headset, or it was
+            // never reached): reconnect now and keep stereo on, instead of switching it off
+            // where nothing can be seen.
+            if (!render::GetEyeSetup(nullptr)) {
+                device::request_active(true);
+                run_command("xr-restart", what + ": no XR session, reconnecting (stereo on)");
+                break;
+            }
+#endif
             // The game window stays as it is (a normal window while VR runs), so the virtual
             // screen shows the game at once and switching back needs no mode change.
             const bool on = !device::wanted();

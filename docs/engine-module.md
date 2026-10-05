@@ -305,7 +305,7 @@ every press toggles once.
 |---|---|---|---|
 | first / third person | Home (`[first_person] toggle_key`) | right stick click | switches the camera mode (see "First person") |
 | recenter | End (`[controls] recenter_key`) | left stick click | the direction the head faces now becomes forward, and the head's position the origin, for the view and for the floating panels: the UI panel and the virtual screen are placed in front of the head again |
-| stereo off / on | Insert (`[controls] stereo_key`) | Menu/Start | stereo off: the game is shown on the virtual screen (the same fallback as for menus and loading screens); on again: back to 3D. The game window keeps its size and mode either way |
+| stereo off / on | Insert (`[controls] stereo_key`) | Menu/Start | stereo off: the game is shown on the virtual screen (the same fallback as for menus and loading screens); on again: back to 3D. The game window keeps its size and mode either way. While no XR session runs (the runtime asked the game to let go of the headset, for example after SteamVR or the streaming app was closed and opened again; the render module then waits for `xr-restart`), the same key reconnects instead (`xr-restart`) and keeps stereo on |
 | UI panel nearer | Page Down (`[controls] ui_nearer_key`) | D-pad down | the HUD/menu panel `ui_step` (0.25 m) nearer, down to `ui_min` (0.75 m); its size in metres stays, so it looks larger |
 | UI panel farther | Page Up (`[controls] ui_farther_key`) | D-pad up | `ui_step` farther, up to `ui_max` (8 m) |
 
@@ -348,7 +348,12 @@ meshes hidden again); four Page Down presses moved the panel from 3.00 to 2.00 m
 Page Up presses to 3.50 m (`ui status`, captures `p04_ui_default`, `p05_ui_nearer`,
 `p06_ui_farther`); Home toggled twice. In the game's main menu Page Up, Page Down and End
 changed nothing on screen (`p08` to `p11`; the menu footer shows that F2 is the game's
-photo mode key).
+photo mode key). Reconnect (`captures/controls/runR`): after `xr-stop` the render module
+logged `staying off until 'xr-restart'` and the engine rendered mono; Insert logged
+`controls: stereo on/off (keyboard): no XR session, reconnecting (stereo on): ok`, the
+session was created 8 ms later and recentered, `stereo status` showed `wanted=1 active=1`
+and first person again (`r01_reconnected`); the next two presses switched stereo off and
+on as usual.
 
 Gamepad, without a pad (`controls pad`): `0x0020` (View down) gives `0x0000`, then
 `0x0000` (released) gives `0x0020` twice within 120 ms and `0x0000` after 300 ms (the View
@@ -789,6 +794,18 @@ presses in the run), not at a switch; the cause was not found. The log has no wa
 about 140 per minute); 20 recenters and 40 stereo switches were logged, `submit errors 0`,
 the bloom fix `missed 0` for 75180 frames. Eye captures at the start, after the first
 round, in the middle and at the end (`s00` to `s03`) show the scene correctly in both eyes.
+
+The same configuration on SteamVR's null driver (OpenXR, eyes 1512x1680, `captures/soak/runV`),
+4 minutes of the same rounds with SteamVR closed in the middle the way a user quits it:
+the runtime moved the session through STOPPING to EXITING, the render module ended it in
+6 ms and, as `[xr] reconnect_after_exit = 0` says, stayed off; the engine went to mono
+within 0.4 s, the game carried on in its window (frame interval median 8.33 ms) and
+nothing was logged as a warning or error. SteamVR started again did not bring the session
+back by itself; `xr-restart` did (session created in 2.2 s, stereo and first person back
+at once, `v03_after_restart`). The stereo key now does that for a player (see "Player
+controls"). Handles 2706 to 2725, threads 116 to 121, working set 2714 to 3043 MB, GPU
+memory 6358 to 7277 MB over the 10 samples; frame intervals in stereo 8.3 to 10.3 ms
+median per 10 s window (the null driver's pacing), no error line, `submit errors 0`.
 
 ## What a real headset may do differently
 
