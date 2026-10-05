@@ -64,6 +64,10 @@ struct Settings {
     std::atomic<int> recreate_requests{0};
     std::atomic<int> dump_requests{0};
     std::atomic<bool> log_ngx{true};
+    // Synthetic cost measurement: one extra DLSS evaluation per frame on blank textures of a
+    // chosen input and output size (the image is discarded).
+    std::atomic<bool> bench{false};
+    std::atomic<unsigned> bench_in_w{0}, bench_in_h{0}, bench_out_w{0}, bench_out_h{0};
 };
 Settings g_set;
 std::filesystem::path g_dll_dir;
@@ -257,6 +261,10 @@ struct Rhi {
     unsigned timing_next = 0;
     std::chrono::steady_clock::time_point last_frame_time{};
     float frame_dt_ms = 11.1f;
+    // Synthetic bench
+    Feature bench;
+    UINT bench_out_w = 0, bench_out_h = 0;
+    ComPtr<ID3D11Texture2D> bench_color, bench_depth, bench_mv, bench_out;
 };
 Rhi* g_rhi = new Rhi();  // never freed (D3D objects must not be released at process exit)
 
@@ -271,8 +279,9 @@ struct Info {
     std::string last_error;
     std::uint64_t taa_seen = 0, replaced = 0, fallback = 0, no_rows = 0, creates = 0, eval_fail = 0;
     unsigned seen_this_frame = 0, seen_last_frame = 0;
-    double ms_sum[2]{}, mv_ms_sum[2]{};
-    std::uint64_t ms_n[2]{};
+    double ms_sum[3]{}, mv_ms_sum[3]{};  // [2]: the synthetic bench
+    std::uint64_t ms_n[3]{};
+    std::string bench;
     float jitter_px[2][2]{};
     std::string dump;
 };
@@ -292,6 +301,12 @@ void NVSDK_CONV ngx_log(const char* message, NVSDK_NGX_Logging_Level, NVSDK_NGX_
     std::string m(message);
     while (!m.empty() && (m.back() == '\n' || m.back() == '\r')) m.pop_back();
     log::info("ngx: {}", m);
+    // Where the DLSS model really came from (the driver can override the application's DLL).
+    const std::size_t at = m.find("Loaded from path");
+    if (at != std::string::npos) {
+        std::lock_guard lock(g_info_mutex);
+        g_info.dll = m.substr(at);
+    }
 }
 
 std::string result_text(NVSDK_NGX_Result r) {
@@ -394,7 +409,7 @@ bool init_ngx(ID3D11Device* dev) {
         i.ngx = ngx;
         i.capability = cap;
         i.optimal = optimal;
-        i.dll = dll;
+        if (i.dll.empty() || dll.find("not loaded") == std::string::npos) i.dll = dll;
     });
     if (!available) return false;
     R.params = p;
@@ -465,7 +480,7 @@ bool ensure_feature(ID3D11DeviceContext* ctx, int eye, UINT w, UINT h, bool& cre
 
 // ------------------------------------------------------------------ motion vector pass
 constexpr char kShader[] = R"(
-cbuffer Pass : register(b0) { float4 Rect; float4 Opt; };   // eye rect x y w h; 1/w 1/h, remove-jitter, 0
+cbuffer EyePass : register(b0) { float4 Rect; float4 Opt; };   // eye rect x y w h; 1/w 1/h, remove-jitter, 0
 cbuffer View : register(b1) { float4 V[146]; };
 Texture2D<float> Depth : register(t0);
 Texture2D<float2> Velocity : register(t1);
@@ -846,6 +861,106 @@ bool run_dlss(ID3D11DeviceContext* ctx, PassInputs& in, int eye, std::string& wh
 
 std::atomic<std::uint64_t> g_fallback_log{0};
 
+ComPtr<ID3D11Texture2D> make_tex(ID3D11Device* dev, UINT w, UINT h, DXGI_FORMAT f, UINT bind) {
+    D3D11_TEXTURE2D_DESC d{};
+    d.Width = w;
+    d.Height = h;
+    d.MipLevels = 1;
+    d.ArraySize = 1;
+    d.Format = f;
+    d.SampleDesc.Count = 1;
+    d.Usage = D3D11_USAGE_DEFAULT;
+    d.BindFlags = bind;
+    ComPtr<ID3D11Texture2D> t;
+    if (FAILED(dev->CreateTexture2D(&d, nullptr, &t))) t.Reset();
+    return t;
+}
+
+// RHI thread, once per frame while "dlss bench" is set: one DLSS evaluation of the chosen
+// sizes on blank textures, timed like the eyes (slot 2). Measures the cost of a mode
+// without changing the engine's render size.
+void run_bench(ID3D11DeviceContext* ctx) {
+    Rhi& R = *g_rhi;
+    const UINT iw = g_set.bench_in_w.load(), ih = g_set.bench_in_h.load(), ow = g_set.bench_out_w.load(), oh = g_set.bench_out_h.load();
+    if (!iw || !ih || !ow || !oh || iw > ow || ih > oh || !ensure_shaders(R.dev)) return;
+    if (!R.bench_out || R.bench_out_w != ow || R.bench_out_h != oh || R.bench.w != iw || R.bench.h != ih) {
+        release_feature(R.bench);
+        R.bench_color = make_tex(R.dev, iw, ih, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_BIND_SHADER_RESOURCE);
+        R.bench_depth = make_tex(R.dev, iw, ih, DXGI_FORMAT_R32_FLOAT, D3D11_BIND_SHADER_RESOURCE);
+        R.bench_mv = make_tex(R.dev, iw, ih, DXGI_FORMAT_R16G16_FLOAT, D3D11_BIND_SHADER_RESOURCE);
+        R.bench_out = make_tex(R.dev, ow, oh, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS);
+        R.bench_out_w = ow;
+        R.bench_out_h = oh;
+        if (!R.bench_color || !R.bench_depth || !R.bench_mv || !R.bench_out) {
+            g_set.bench = false;
+            return;
+        }
+    }
+    ComPtr<ID3D11DeviceContext1> ctx1;
+    if (FAILED(ctx->QueryInterface(IID_PPV_ARGS(&ctx1)))) return;
+    ID3DDeviceContextState* game_state = nullptr;
+    ctx1->SwapDeviceContextState(R.state.Get(), &game_state);
+    if (!R.bench.handle) {
+        const double ratio = static_cast<double>(iw) / static_cast<double>(ow);
+        const NVSDK_NGX_PerfQuality_Value q = iw == ow   ? NVSDK_NGX_PerfQuality_Value_DLAA
+                                              : ratio >= 0.66 ? NVSDK_NGX_PerfQuality_Value_MaxQuality
+                                              : ratio >= 0.57 ? NVSDK_NGX_PerfQuality_Value_Balanced
+                                              : ratio >= 0.49 ? NVSDK_NGX_PerfQuality_Value_MaxPerf
+                                                              : NVSDK_NGX_PerfQuality_Value_UltraPerformance;
+        const unsigned preset = g_set.preset.load();
+        NVSDK_NGX_Parameter_SetUI(R.params, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA, preset);
+        NVSDK_NGX_Parameter_SetUI(R.params, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality, preset);
+        NVSDK_NGX_Parameter_SetUI(R.params, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced, preset);
+        NVSDK_NGX_Parameter_SetUI(R.params, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance, preset);
+        NVSDK_NGX_Parameter_SetUI(R.params, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance, preset);
+        NVSDK_NGX_DLSS_Create_Params cp{};
+        cp.Feature.InWidth = iw;
+        cp.Feature.InHeight = ih;
+        cp.Feature.InTargetWidth = ow;
+        cp.Feature.InTargetHeight = oh;
+        cp.Feature.InPerfQualityValue = q;
+        cp.InFeatureCreateFlags = wanted_flags();
+        const NVSDK_NGX_Result r = NGX_D3D11_CREATE_DLSS_EXT(ctx, &R.bench.handle, R.params, &cp);
+        const std::string text = std::format("bench {}x{} -> {}x{} quality value {} preset {}: create {}", iw, ih, ow, oh, static_cast<int>(q),
+                                             preset_name(preset), result_text(r));
+        log::info("dlss: {}", text);
+        with_info([&](Info& i) {
+            i.bench = text;
+            i.ms_sum[2] = i.mv_ms_sum[2] = 0;
+            i.ms_n[2] = 0;
+        });
+        if (NVSDK_NGX_FAILED(r)) {
+            R.bench = Feature{};
+            g_set.bench = false;
+        } else {
+            R.bench.w = iw;
+            R.bench.h = ih;
+        }
+    }
+    if (R.bench.handle) {
+        Timing* t = begin_timing(ctx, 2);
+        if (t) ctx->End(t->t1);
+        NVSDK_NGX_D3D11_DLSS_Eval_Params ep{};
+        ep.Feature.pInColor = R.bench_color.Get();
+        ep.Feature.pInOutput = R.bench_out.Get();
+        ep.pInDepth = R.bench_depth.Get();
+        ep.pInMotionVectors = R.bench_mv.Get();
+        ep.InRenderSubrectDimensions = {iw, ih};
+        ep.InMVScaleX = 1.0f;
+        ep.InMVScaleY = 1.0f;
+        ep.InFrameTimeDeltaInMsec = R.frame_dt_ms;
+        NGX_D3D11_EVALUATE_DLSS_EXT(ctx, R.bench.handle, R.params, &ep);
+        ctx->ClearState();
+        if (t) {
+            ctx->End(t->t2);
+            ctx->End(t->disjoint);
+            t->pending = true;
+        }
+    }
+    ctx1->SwapDeviceContextState(game_state, nullptr);
+    if (game_state) game_state->Release();
+}
+
 }  // namespace
 
 void start(const Config& cfg, const std::filesystem::path& dll_dir) {
@@ -895,9 +1010,12 @@ void frame(ID3D11Texture2D* any_texture) {
         if (g_set.recreate_requests.exchange(0) > 0) {
             release_feature(R.feat[0]);
             release_feature(R.feat[1]);
+            release_feature(R.bench);
             with_info([](Info& i) { i.features[0] = i.features[1] = "released"; });
         }
         collect_timing(ctx);
+        if (g_set.bench.load() && R.ngx_state == 1) run_bench(ctx);
+        else if (R.bench.handle) release_feature(R.bench);
         ctx->Release();
     }
     dev->Release();
@@ -992,9 +1110,24 @@ std::string command(const std::string& args) {
         g_set.dump_requests = 2;
         return "ok the next two views' constants go to the log";
     }
+    if (sub == "bench") {
+        if (a.size() == 2 && a[1] == "off") {
+            g_set.bench = false;
+            return "ok bench off";
+        }
+        if (a.size() != 5) return "err dlss bench <out w> <out h> <in w> <in h> | dlss bench off";
+        g_set.bench_out_w = static_cast<unsigned>(std::atoi(a[1].c_str()));
+        g_set.bench_out_h = static_cast<unsigned>(std::atoi(a[2].c_str()));
+        g_set.bench_in_w = static_cast<unsigned>(std::atoi(a[3].c_str()));
+        g_set.bench_in_h = static_cast<unsigned>(std::atoi(a[4].c_str()));
+        g_set.recreate_requests = 1;
+        g_set.init_requested = true;
+        g_set.bench = true;
+        return std::format("ok bench {}x{} from {}x{} (one extra evaluation per frame, timed as slot 2)", a[1], a[2], a[3], a[4]);
+    }
     if (sub == "timing") {
         with_info([](Info& i) {
-            for (int e = 0; e < 2; ++e) i.ms_sum[e] = i.mv_ms_sum[e] = 0, i.ms_n[e] = 0;
+            for (int e = 0; e < 3; ++e) i.ms_sum[e] = i.mv_ms_sum[e] = 0, i.ms_n[e] = 0;
         });
         return "ok GPU timing restarted";
     }
@@ -1013,6 +1146,8 @@ std::string command(const std::string& args) {
             i.features[1].empty() ? "-" : i.features[1], avg(0, i.ms_sum), avg(1, i.ms_sum), avg(0, i.mv_ms_sum), avg(1, i.mv_ms_sum), i.ms_n[0], i.ms_n[1],
             i.jitter_px[0][0], i.jitter_px[0][1], i.jitter_px[1][0], i.jitter_px[1][1], g_ub_size.load(), g_ub_captures_map.load(),
             g_ub_captures_update.load(), g_ub_captures_create.load(), i.optimal.empty() ? "" : " | optimal:" + i.optimal);
+        if (!i.bench.empty())
+            s += std::format(" | {}{}: GPU {:.3f} ms (samples {})", i.bench, g_set.bench.load() ? "" : " (off)", avg(2, i.ms_sum), i.ms_n[2]);
     });
     return s;
 }

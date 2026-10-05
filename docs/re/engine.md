@@ -885,6 +885,55 @@ component on each party member, and the conversation menu widgets
 a battle or conversation signal; a state inside one of them (or the camera manager's mode)
 has to be compared in and out of a battle, which has not been reached yet.
 
+## 12. Temporal anti-aliasing in stereo (LIVE, GPU trace)
+
+Recorded with `gpu trace` (pool names on) in the first room, eyes 3072x3264 (target
+6144x3264), Null backend, `captures/dlss/r1/tr1.txt` events 2691 (left) and 2724 (right).
+Used by the DLSS replacement (`docs/dlss.md`).
+
+- The pass is one full-screen draw per view, `DrawIndexed 3 6 0`, at the view's rectangle
+  (`vp 0 0 3072 3264` and `vp 3072 0 3072 3264`), the same vertex and pixel shader for both
+  views. It runs right before each view's bloom chain; then come the tonemapper (into a
+  `Tonemap` target at the view's rectangle) and a last full-screen pass that writes the
+  view's rectangle of the eye texture (`R10G10B10A2_UNORM`, format 24). Left view first.
+- Inputs (pixel shader resources): `t1` scene depth (`SceneDepthZ`, 6144x3264,
+  `R32G8X24_TYPELESS`, viewed as `R32_FLOAT_X8X24_TYPELESS`; also bound as the depth target,
+  read-only), `t2` scene colour before anti-aliasing (`SceneColorDeferred`, 6144x3264,
+  `R16G16B16A16_FLOAT`, jittered, linear HDR), `t3` the view's history (a `TemporalAA`
+  target, 6144x3264 `R16G16B16A16_FLOAT`), `t4` velocity (`Velocity`, 6144x3264,
+  `R16G16_UNORM`; 0 where nothing moved, otherwise UE4's encoding
+  `v * (0.499 * 0.5) + 32767/65535` of the clip-space motion), plus `t0` a 64x64x64 array
+  (format 90) and lookup textures `t5`-`t9`. Constant buffers: `cb0` 512 bytes (the pass's
+  own parameters), `cb1` 4096 bytes (the view's uniform buffer), `cb2`, `cb3` 512 bytes.
+- Output: one render target, a `TemporalAA` pooled target of the same size and format,
+  written at the view's rectangle. **Each view has its own history target**: the left view
+  wrote `...f760` and read `...33a0`; the right view wrote `...33a0` and read `...bae0`
+  (pointers of one frame). The output of a view becomes its history in the next frame
+  (per-eye view states, section 4).
+- Every buffer in the chain is double-wide with each view at its own rectangle; nothing of
+  this pass sits at the origin for the right eye (unlike the bloom and ambient occlusion
+  passes of section 10).
+
+View uniform buffer rows (float4 index into `cb1`, read from the engine's writes of the
+buffer; `dlss dump`, `captures/dlss/r1`, static camera):
+
+| Row | Content | Left / right view |
+|---|---|---|
+| 114-117 | `ClipToPrevClip` (row-major, `mul(float4(ndc, depth, 1), M)`) | near identity when nothing moves |
+| 118 | `TemporalAAJitter`: xy this frame, zw the previous frame, in clip units (pixels = `x * width / 2`, `-y * height / 2`) | e.g. `4.2e-5 -2.3e-4 3.2e-5 1.7e-4` / `-1.1e-4 -1.7e-4 2.4e-4 1.9e-4`: each view has its own jitter sequence |
+| 121 | view rectangle min | `0 0` / `3072 0` |
+| 122 | view size and inverse | `3072 3264 1/3072 1/3264` |
+| 125 | view size again | same |
+| 126 | buffer size and inverse | `6144 3264 ...` |
+| 140 | `.y` 0 in these frames (a camera-cut flag in a flat-screen mod's reading, not verified) | 0 |
+
+These match the order of `FViewUniformShaderParameters` in UE 4.18 for rows 114-122. How the
+engine writes the buffer: both through `Map(WRITE_DISCARD)`/`Unmap` and through
+`UpdateSubresource` on 4096-byte constant buffers (about 12 and 21 per stereo frame of that
+size, 8652 and 15120 over 721 frames; not all of them view buffers); none created with
+initial data. The capture is keyed by the buffer object, so the rows found for the bound
+`cb1` are those of that view.
+
 ## Tools
 
 All in `tools/re/`, run with the repo's `.venv` Python. The exe is found through Steam's
