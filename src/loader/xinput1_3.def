@@ -1,0 +1,19 @@
+; Export table of the proxy. It mirrors C:\Windows\System32\xinput1_3.dll
+; (DirectX June 2010 redist, 9.18.944.0) exactly, ordinals included:
+; ff7remake_.exe imports XInputGetState and XInputSetState BY ORDINAL (2, 3),
+; so the ordinals must not change. 100-103 are the undocumented NONAME
+; exports (XInputGetStateEx, XInputWaitForGuideButton,
+; XInputCancelGuideButtonWait, XInputPowerOffController).
+LIBRARY xinput1_3
+EXPORTS
+    XInputGetState                  = proxy_XInputGetState                  @2
+    XInputSetState                  = proxy_XInputSetState                  @3
+    XInputGetCapabilities           = proxy_XInputGetCapabilities           @4
+    XInputEnable                    = proxy_XInputEnable                    @5
+    XInputGetDSoundAudioDeviceGuids = proxy_XInputGetDSoundAudioDeviceGuids @6
+    XInputGetBatteryInformation     = proxy_XInputGetBatteryInformation     @7
+    XInputGetKeystroke              = proxy_XInputGetKeystroke              @8
+    proxy_XInputGetStateEx                                                  @100 NONAME
+    proxy_XInputWaitForGuideButton                                          @101 NONAME
+    proxy_XInputCancelGuideButtonWait                                       @102 NONAME
+    proxy_XInputPowerOffController                                          @103 NONAME
