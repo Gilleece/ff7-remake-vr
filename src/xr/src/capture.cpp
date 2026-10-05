@@ -1,7 +1,9 @@
 #include "capture.h"
 
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
+#include <string_view>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #define STB_IMAGE_WRITE_STATIC
@@ -64,6 +66,11 @@ bool CaptureManager::BeginFrame(uint64_t frameId) {
     current_.frameId = frameId;
     current_.prefix = requests_.front().pathPrefix;
     requests_.pop_front();
+    constexpr std::string_view kRaw = "+raw";
+    if (current_.prefix.size() > kRaw.size() && current_.prefix.ends_with(kRaw)) {
+        current_.prefix.resize(current_.prefix.size() - kRaw.size());
+        current_.raw = true;
+    }
     current_.eyes[0].error = current_.eyes[1].error = "eye not submitted this frame";
     active_ = true;
     return true;
@@ -147,6 +154,74 @@ void CaptureManager::CaptureEye(ID3D11DeviceContext* ctx, Eye eye, ID3D11Texture
     ctx->Unmap(staging_[e].Get(), 0);
 }
 
+void CaptureManager::CaptureRaw(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, uint32_t arraySlice, const std::string& suffix) {
+    if (!active_ || !current_.raw) return;
+    RawImage& img = current_.raws.emplace_back();
+    img.suffix = suffix;
+    if (!ctx || !tex) {
+        img.error = "no texture";
+        return;
+    }
+    D3D11_TEXTURE2D_DESC d{};
+    tex->GetDesc(&d);
+    const DXGI_FORMAT fam = TypelessFamily(d.Format);
+    const bool bgra = fam == DXGI_FORMAT_B8G8R8A8_TYPELESS || fam == DXGI_FORMAT_B8G8R8X8_TYPELESS;
+    const bool rgb10 = fam == DXGI_FORMAT_R10G10B10A2_TYPELESS;
+    if (!bgra && !rgb10 && fam != DXGI_FORMAT_R8G8B8A8_TYPELESS) {
+        img.error = std::string("unsupported format ") + DxgiFormatName(d.Format);
+        return;
+    }
+    if (d.SampleDesc.Count != 1 || arraySlice >= d.ArraySize) {
+        img.error = "multisampled texture or bad slice";
+        return;
+    }
+    D3D11_TEXTURE2D_DESC sd = d;
+    sd.Format = fam;
+    sd.MipLevels = 1;
+    sd.ArraySize = 1;
+    sd.Usage = D3D11_USAGE_STAGING;
+    sd.BindFlags = 0;
+    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    sd.MiscFlags = 0;
+    ComPtr<ID3D11Texture2D> staging;
+    HRESULT hr = device_->CreateTexture2D(&sd, nullptr, &staging);
+    if (FAILED(hr)) {
+        img.error = "staging texture: " + HResultString(hr);
+        return;
+    }
+    ctx->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, tex, D3D11CalcSubresource(0, arraySlice, d.MipLevels), nullptr);
+    D3D11_MAPPED_SUBRESOURCE m{};
+    hr = ctx->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &m);
+    if (FAILED(hr)) {
+        img.error = "map: " + HResultString(hr);
+        return;
+    }
+    img.w = d.Width;
+    img.h = d.Height;
+    img.rgba.resize(size_t(d.Width) * d.Height * 4);
+    for (uint32_t y = 0; y < d.Height; ++y) {
+        const uint8_t* s = static_cast<const uint8_t*>(m.pData) + size_t(y) * m.RowPitch;
+        uint8_t* o = img.rgba.data() + size_t(y) * d.Width * 4;
+        for (uint32_t x = 0; x < d.Width; ++x, s += 4, o += 4) {
+            if (rgb10) {
+                uint32_t v = 0;
+                std::memcpy(&v, s, 4);
+                auto to8 = [](uint32_t c) { return static_cast<uint8_t>((c * 255u + 511u) / 1023u); };
+                o[0] = to8(v & 1023u);
+                o[1] = to8((v >> 10) & 1023u);
+                o[2] = to8((v >> 20) & 1023u);
+                o[3] = static_cast<uint8_t>((v >> 30) * 85u);
+            } else {
+                o[0] = bgra ? s[2] : s[0];
+                o[1] = s[1];
+                o[2] = bgra ? s[0] : s[2];
+                o[3] = s[3];
+            }
+        }
+    }
+    ctx->Unmap(staging.Get(), 0);
+}
+
 void CaptureManager::EndFrame() {
     if (!active_) return;
     active_ = false;
@@ -185,6 +260,32 @@ void CaptureManager::WorkerMain() {
             } else {
                 r.ok = false;
                 r.error += std::format("eye {}: {}; ", e, err);
+            }
+        }
+        for (const RawImage& raw : job.raws) {
+            const std::string path = job.prefix + raw.suffix;
+            if (raw.rgba.empty()) {
+                log_->Warn("capture raw {}: {}", path, raw.error);
+                continue;
+            }
+            try {
+                const std::filesystem::path p(Utf8ToWide(path));
+                if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path());
+                FILE* f = nullptr;
+                if (_wfopen_s(&f, p.c_str(), L"wb") != 0 || !f) {
+                    log_->Warn("capture raw: cannot open {}", path);
+                    continue;
+                }
+                auto write = [](void* c, void* data, int size) { fwrite(data, 1, static_cast<size_t>(size), static_cast<FILE*>(c)); };
+                const int ok = stbi_write_png_to_func(write, f, static_cast<int>(raw.w), static_cast<int>(raw.h), 4, raw.rgba.data(),
+                                                      static_cast<int>(raw.w * 4));
+                fclose(f);
+                if (ok)
+                    log_->Info("capture raw -> {} ({}x{})", path, raw.w, raw.h);
+                else
+                    log_->Warn("capture raw: png encode failed for {}", path);
+            } catch (const std::exception& ex) {
+                log_->Warn("capture raw {}: {}", path, ex.what());
             }
         }
         if (r.ok)

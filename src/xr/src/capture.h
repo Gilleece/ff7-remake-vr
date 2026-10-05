@@ -29,6 +29,11 @@ public:
     bool Active() const { return active_; }  // render thread: a capture was started for this frame
     // Reads `tex` (interpreted as viewFormat, linear-light semantics of that format) region (0,0,w,h).
     void CaptureEye(ID3D11DeviceContext* ctx, Eye eye, ID3D11Texture2D* tex, DXGI_FORMAT viewFormat, uint32_t w, uint32_t h);
+    // Raw capture (prefix ending in "+raw"): the stored bytes of `tex` (one array
+    // slice, mip 0) with no view or colour conversion, written as an RGBA PNG to
+    // <prefix><suffix>. 8-bit RGBA/BGRA as stored; R10G10B10A2 reduced to 8 bits.
+    bool WantsRaw() const { return active_ && current_.raw; }
+    void CaptureRaw(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, uint32_t arraySlice, const std::string& suffix);
     void EndFrame();
 
 private:
@@ -37,10 +42,18 @@ private:
         std::vector<uint8_t> rgb;  // tightly packed RGB8 (sRGB encoded)
         std::string error;
     };
+    struct RawImage {
+        std::string suffix;
+        uint32_t w = 0, h = 0;
+        std::vector<uint8_t> rgba;
+        std::string error;
+    };
     struct Job {
         uint64_t frameId = 0;
         std::string prefix;
+        bool raw = false;
         Image eyes[2];
+        std::vector<RawImage> raws;
     };
 
     void WorkerMain();

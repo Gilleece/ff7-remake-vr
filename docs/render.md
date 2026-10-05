@@ -279,6 +279,59 @@ Null backend that is a Quest 3 class view (2064x2208 per eye, asymmetric FOV,
   `ff7vr-captures\` next to the DLL in the game's `End\Binaries\Win64`.
 - A capture costs one frame of 10 to 20 ms on the presenting thread (GPU
   composite and read-back); it is a development tool.
+- A prefix ending in `+raw` (for example `capture C:\...\eyes+raw`) also
+  writes the bytes the runtime is handed, read back with no view or colour
+  conversion, as RGBA PNGs: `<prefix>_rawL.png` / `_rawR.png` (each eye's
+  swapchain image as stored, alpha included), `<prefix>_rawquad<i>.png` (each
+  quad layer's image) and `<prefix>_src.png` (the frame's source texture;
+  `R10G10B10A2` is reduced to 8 bits). The `+raw` is removed from the file
+  names. It adds a few read-backs to the capture frame.
+
+### What the runtime receives (measured)
+
+Measured on the Null backend at 3072x3264 per eye in the room where the
+latest save starts (first and third person, UI layer on and off):
+
+- Eye swapchain images (`R8G8B8A8_UNORM_SRGB` view on a typeless texture)
+  hold the engine's eye image byte for byte: every pixel of `_rawL`/`_rawR`
+  is within 1 of the source's 10-bit value reduced to 8 bits (mean
+  difference +0.12 to +0.15, from rounding). Alpha is 255 everywhere.
+- The UI quad's image is premultiplied (alpha linear, colour stored
+  sRGB-encoded as the format requires). During plain exploration 1.6 % of its
+  pixels have any alpha; about 0.1 to 0.3 % carry colour where alpha is 0 or
+  colour above alpha after decoding (additive UI glows, which a
+  premultiplied blend adds on top). It cannot change the picture as a whole.
+
+### What Virtual Desktop's OpenXR runtime does with it
+
+Read in the public source of VirtualDesktop-OpenXR at the 1.0.10 release
+(commit `f039941`, "Prepare for release 1.0.10"):
+
+- `xrCreateSwapchain` (`swapchain.cpp` 335-403) turns the requested DXGI
+  format into the same LibOVR format (`R8G8B8A8_UNORM_SRGB` stays sRGB) and
+  always asks for `ovrTextureMisc_DX_Typeless`. A 2D, single-sample swapchain
+  with array size 1 (ours) is a LibOVR swapchain used directly: no copy
+  (`d3d11_native.cpp`, `resolveSwapchainImage`: a copy happens only for array
+  slices above 0 or slow-path swapchains).
+- Pre-processing (`frame.cpp` 980-1005, `AlphaBlendingCS.hlsl`) runs only for
+  layers above the first: it clears alpha when a layer lacks
+  `BLEND_TEXTURE_SOURCE_ALPHA` and premultiplies when it has
+  `UNPREMULTIPLIED_ALPHA`. Our projection layer is layer 0 and our quads are
+  premultiplied with the blend flag, so neither applies.
+- Upscaling and sharpening (`precompositor.cpp`) run only when the registry
+  values `upscaling` or `sharpen` under the runtime's key are set; its log line
+  `Recommended resolution: ... (1.000 supersampling, 1.000 upscaling)`
+  shows when they are not. They handle sRGB correctly when they do run.
+- Depth: a projection layer becomes `ovrLayerType_EyeFovDepth` only when a
+  `XrCompositionLayerDepthInfoKHR` is chained (`frame.cpp` 708-730). The mod
+  enables the extension but chains no depth, so nothing changes.
+- No gamma, brightness or colour setting and no per-application quirk that
+  matches this game. The projection layer's flags are not read at all.
+
+So for this submission the runtime passes the swapchain textures unchanged,
+tagged sRGB, to Virtual Desktop's own (closed) compositor and encoder. Any
+difference between a capture and the headset arises after that point, the
+same point every other OpenXR application goes through.
 
 ## Timing
 

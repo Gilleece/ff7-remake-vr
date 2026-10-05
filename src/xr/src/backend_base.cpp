@@ -315,6 +315,18 @@ bool BackendBase::TransferQuad(const QuadLayer& q, const EyeTarget& t, uint32_t*
 void BackendBase::CaptureComposited(const FrameRecord& rec, const SubmitDesc& desc, const LayerImage projection[2], uint32_t eyeW,
                                     uint32_t eyeH) {
     if (!capture_.Active() || eyeW == 0 || eyeH == 0) return;
+    if (capture_.WantsRaw()) {
+        // The bytes the runtime is handed, before any view conversion: each eye's
+        // swapchain image, each quad's image, and the frame's source texture.
+        ID3D11DeviceContext* ctx = context_.Get();
+        capture_.CaptureRaw(ctx, projection[0].texture, 0, "_rawL.png");
+        capture_.CaptureRaw(ctx, projection[1].texture, 0, "_rawR.png");
+        for (uint32_t i = 0; i < desc.quadCount; ++i) {
+            const QuadSlot* s = FindQuad(desc.quads[i].layer);
+            if (s && s->sc.hasImage) capture_.CaptureRaw(ctx, s->sc.Last().texture, 0, std::format("_rawquad{}.png", i));
+        }
+        if (desc.texture) capture_.CaptureRaw(ctx, desc.texture, desc.arraySlice, "_src.png");
+    }
     constexpr DXGI_FORMAT kViewFormat = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
     const float black[4] = {0, 0, 0, 1};
     for (int e = 0; e < 2; ++e) {
