@@ -112,6 +112,8 @@ size 0x28; `ProcessEvent` is vtable slot 64 (UEVR).
 | `FDeferredShadingSceneRenderer::RenderLights` | `0x2234f50` | String `L"ScreenShadowMaskTexture"` | STATIC + community plugin |
 | `FSceneView::FSceneView` | `0x3209820` | UEVR hooks it; not needed by our design | UEVR |
 | `FRenderTargetPool::FindFreeElement` | `0x253d6b0` | Where named pool targets (`InGameUIRenderTarget`, ...) are created | UEVR |
+| `FDeferredShadingSceneRenderer::Render` | `0x21e64a0` | Scene, then the in-game UI pass per view, then post-processing per view (§9) | STATIC + LIVE |
+| `FSceneRenderTargets::BeginRenderingInGameUI` / `EndRenderingInGameUI` | `0x2541670` / `0x2541910` | Names ours. Allocate and bind / resolve the UI target (§9) | STATIC + LIVE (hooked) |
 | `FName::ToString` | `0x1ce89a0` | | STATIC |
 
 ## 3. Stereo interfaces in this build
@@ -385,7 +387,7 @@ only) and the `FF7RemakeFix` mod (source public on GitHub, MIT).
 |---|---|---|---|---|
 | Lights at non-16:9 aspect ("light flag") | In `RenderLights`' sorted-light setup SE added sort-key bit 0x40 (`mov esi, 0x40` at RVA `0x22351b0`, then `and ecx,~0x40; or ecx,esi`); some lights also get bit 0x20. The same 1-byte patch is applied by `FF7RemakeFix` as "GreenFix" (from a widescreen script), so the bug is tied to view aspect ratios other than 16:9. Every VR eye view is non-16:9. | patch site `0x22351b0` (`BE 40 00 00 00`) inside `0x2234f50` | Writes 0x60 to the immediate (byte at `0x22351b1`): lights that get 0x40 also get 0x20, which changes which group they are rendered in. | site STATIC; semantics of bits 0x20/0x40 INFERRED. In the `-emulatestereo` run (640x720 eyes) no light loss was visible in the one room tested. |
 | GSystemResolution | The game sizes its in-game UI canvas from it: function `0x1508810` returns (0,0,1920,1080), or (0,0,3840,2160) when `GSystemResolution.ResX > 1920`, unless `r.InGameUI.FixedWidth/FixedHeight` are set. | `0x53e3ae0`, `0x1508810` | The plugin writes `ResX = 2 * eye width, ResY = eye height` before every viewport client draw (game thread) and sets `r.InGameUI.FixedWidth/Height` to UEVR's UI size minus one. | STATIC |
-| In-game UI in stereo | SE renders UMG HUD and menus into the pooled target `InGameUIRenderTarget` and composites it inside each view's post-processing. With two views each eye shows a 1:1 crop of the full UI (LIVE: the central 640 of 1280 pixels in each eye), at zero parallax. | `FRenderTargetPool::FindFreeElement` `0x253d6b0` (name `InGameUIRenderTarget`) | The plugin replaces the pooled UI texture with UEVR's own UI texture (shown on a quad) and clears the engine's one to (0,0,0,1), which the composite treats as empty. | LIVE (crop), plugin source |
+| In-game UI in stereo | SE renders UMG HUD and menus into the pooled target `InGameUIRenderTarget` and composites it inside each view's post-processing. With two views each eye shows a 1:1 crop of the full UI (LIVE: the central 640 of 1280 pixels in each eye), at zero parallax. | `FRenderTargetPool::FindFreeElement` `0x253d6b0` (name `InGameUIRenderTarget`); full pipeline in §9 | The plugin replaces the pooled UI texture with UEVR's own UI texture (shown on a quad) and clears the engine's one to (0,0,0,1), which the composite treats as empty. The mod instead draws the UI once and clears the family flag that gates the composite (§9). | LIVE (crop, mod's fix), plugin source |
 | Native stereo fix (`VR_NativeStereoFix`, `...SamePass`) | UEVR does **not** render both eyes in one view family on this game: it renders the family once with the left view only, then swaps the right view into slot 0, points the family at a second render target and renders again, decrementing the FScene frame counter (for right-eye motion vectors). SamePass also relabels the right view as pass 1. This is two full scene renders per frame. | UEVR hooks `BeginRenderingViewFamily` (`0x25c9770`) | Avoids whatever breaks when both views are in one family. | UEVR source + log. What it fixes on this game is unknown: true two-view rendering through `-emulatestereo` showed no obvious artefacts in the scenes tested. |
 | HZB occlusion (`VR_DisableHZBOcclusion`) | UEVR sets `r.HZBOcclusion 0` (cvar data at RVA `0x5928198`). HZB occlusion uses per-view history from the view state. | cvar | Disables HZB occlusion (falls back to hardware occlusion queries). | UEVR. A real fix looks feasible: with the device installed before the local player exists, each eye has its own view state (LIVE), which is what HZB needs. Test with it on first. |
 | Instance culling (`VR_DisableInstanceCulling`) | Sets `r.InstanceCulling.OcclusionCull`, a UE5 cvar. | - | **Nothing on this game**: UEVR's log says the cvar string does not exist in this exe. No performance cost to remove, nothing to fix. | UEVR log |
@@ -550,7 +552,8 @@ allocates the separate target with `RHICreateTargetableShaderResource2D(..., For
   parameters (`FSceneTextureShaderParameters::Bind`, `0x2548ed0`), so the UI is
   composited into each view by a post-process material reading the scene textures, not
   by C++ code. How that material maps view pixels to UI pixels decides what each eye
-  shows (see section 6 and the measurements in `docs/re/stereo-hook-plan.md`).
+  shows (see section 6 and the measurements below). The whole pipeline, including who
+  calls this and how the binding is gated, is in section 9.
 
 ### What the UI composite does with an eye view (LIVE, per-eye captures)
 
@@ -571,6 +574,129 @@ area name banner at the top left, "Commands Menu" prompt at the bottom left):
 - So no combination of the two size variables shows the whole UI undistorted in an eye;
   the composite's mapping itself has to change (or the UI has to go to its own layer).
 - The UI is at zero parallax (identical position in both eyes), drawn over the scene.
+
+## 9. In-game UI pipeline
+
+How this build draws its UMG UI (HUD, command menu, main and save menus, dialogue, markers)
+and composites it into the views, and what the mod changes in stereo
+(`src/engine/src/ui_layer.cpp`). Signature names in `tools/re/signatures.json`.
+
+### Where the UI is drawn (STATIC, LIVE)
+
+The UI is not drawn by Slate onto the back buffer. It is drawn inside the scene renderer,
+after the scene and before post-processing, by
+`FDeferredShadingSceneRenderer::Render` (`0x21e64a0`, signature
+`FDeferredShadingSceneRenderer::Render`):
+
+```
+if (ViewFamily flag 0x80 at FSceneViewFamily+0x3C)                // renderer +0x4C
+    for each view (FViewInfo, 0x28B0 bytes, Views.Data at renderer +0xD0, Num +0xD8):
+        if (UI render delegates exist || view has UI elements (+0x1738)):
+            if (BeginRenderingInGameUI(GSceneRenderTargets, RHICmdList, View)):
+                RendererModule->vt[0x148](View, RHICmdList, SceneContext)   if vt[0x150]()
+                (renderer flag bit 0) RenderXXX(renderer, View, RHICmdList)  (0x262d140)
+                RendererModule->vt[0x168](View, RHICmdList, SceneContext)   if vt[0x170]()
+                EndRenderingInGameUI(GSceneRenderTargets, RHICmdList)
+    (with no delegates and no elements the loop only runs Begin/End: the target is cleared)
+for each view: FPostProcessing::Process(View)                       (0x251c230, composite inside)
+```
+
+- `GSceneRenderTargets` (`0x5923ad0`) is the static `FSceneRenderTargets`;
+  `+0x110` is `TRefCountPtr<IPooledRenderTarget> InGameUIRenderTarget`, `+0x240/+0x244`
+  its size. `IPooledRenderTarget +8` is the targetable texture, `+0x10` the shader
+  resource texture (the same `FRHITexture2D` here).
+- `FSceneRenderTargets::BeginRenderingInGameUI` (`0x2541670`, names ours) allocates the
+  target when `+0x110` is null (`FRenderTargetPool::FindFreeElement`, debug name
+  `InGameUIRenderTarget`), binds its targetable texture with a clear and sets the
+  viewport `(0, 0, W, H)`. It does not use the view. `EndRenderingInGameUI` (`0x2541910`)
+  records a copy to the resolve target (the same texture).
+- The UI is drawn by render delegates registered on the Renderer module
+  (`GetRendererModule()`, cached at `0x5831000`; slots `+0x148/+0x150` and
+  `+0x168/+0x170`, the shape of UE 4.18's post-opaque / overlay extension hooks).
+- **Once per view.** In stereo the pass runs twice per frame, clearing and redrawing the
+  same target; only the last view's result survives to post-processing.
+- **The UI does not depend on the view** (LIVE): the UI texture after the first eye's pass
+  and after the second eye's pass were compared in gameplay (3840x2160 dumps through
+  `ui dump`); they are identical except for an animated glow around the area banner's
+  icon (a 190 px area that changes between frames anyway). World-anchored elements are
+  placed on the game thread, not from the eye views.
+
+Format and size (LIVE, D3D11 descriptions read in the game): `DXGI_FORMAT_B8G8R8A8_TYPELESS`
+(`PF_B8G8R8A8` with `TexCreate_SRGB`), written through the sRGB view, so it holds linear
+values read through `B8G8R8A8_UNORM_SRGB`. 1920x1080 in a 1280x720 window, 3840x2160 while
+the mod renders stereo (it sets `GSystemResolution` to the eye target, 4128 wide, so
+`ResX > 1920`); the target is reallocated when stereo starts or stops (seen: 1920x1080 in
+mono before stereo, 3840x2160 in stereo, 1920x1080 again in screen mode).
+
+Alpha (LIVE): Unreal's inverted convention. The clear value is (0,0,0,1); 98.4 % of the
+pixels of a gameplay HUD frame have alpha 255 (nothing drawn) and drawn pixels have lower
+alpha. Colour is premultiplied: composite = background * a + rgb. Some glow pixels carry
+colour at alpha 255 (additive light), which this formula handles. The community plugin's
+"clear to (0,0,0,1) = empty" matches this.
+
+### How the composite reads it (STATIC, LIVE)
+
+About 320 material shader `SetParameters` instantiations bind the scene-texture parameter
+`InGameUITexture` (added by Square Enix to `FSceneTextureShaderParameters`, `Bind` at
+`0x2548ed0`) with this inlined code (`r14` = `View.Family`):
+
+```
+tex = GFallbackTexture->TextureRHI                          // FTexture* at 0x594c370, +0x30
+if ((Family->flags[0x3C] & 0x80) && GSceneRenderTargets.InGameUIRenderTarget)
+    tex = InGameUIRenderTarget->ShaderResourceTexture       // read as [0x5923be0] + 0x10
+SetTexture(InGameUITexture, tex)
+```
+
+So the same family flag gates the UI pass and every binding; with the flag clear the
+composite samples the fallback texture and leaves the view unchanged (LIVE: clearing it
+after the UI pass removes the UI from both eye images, captures `captures/ui/run1`). The
+fallback's colour was not read; its effect is "no UI" (INFERRED: the engine's black
+texture with alpha 1). The composite maps the UI onto the view as described in section 8
+("What the UI composite does with an eye view").
+
+### Other UI paths
+
+- Slate (`FSlateRHIRenderer::DrawWindow_RenderThread`) draws onto the back buffer after the
+  frame; in gameplay and in the menus tested nothing visible comes from it (the window in
+  stereo shows only the mirror plus what the mod draws). INFERRED from the captures.
+- The title screen and main menu ("New Game / Continue") are InGameUI as well (LIVE: with
+  the UI redirected from start-up the desktop mirror shows a black title screen until the
+  mod draws the UI texture over it).
+- Pre-rendered movies and loading screens: not checked. Loading screens are presented while
+  the scene renderer does not run (the render module shows them on the virtual screen).
+
+### What the mod does in stereo (LIVE)
+
+`src/engine/src/ui_layer.cpp`, active only while the render module's UI layer is wanted
+(stereo mode, an XR session, `[ui] layer = 1`) and the view is a stereo eye
+(`FSceneView::StereoPass != 0`):
+
+1. `BeginRenderingInGameUI` (inline hook): a later eye of a family whose flag the mod already
+   cleared is refused (returns false, the engine skips the pass and `End`). One UI pass per
+   frame instead of two.
+2. `EndRenderingInGameUI` (inline hook): after the engine's code the family's flag `0x80` is
+   cleared, so post-processing binds the fallback texture; an RHI command is appended that,
+   on the RHI thread right after the UI pass executed and before the frame's Present, hands
+   the native texture (`FRHITexture2D +0xA0`) to the render module, which copies it into a
+   quad layer and draws it over the desktop window.
+
+The pooled target is never replaced (the community plugin swaps the targetable texture for
+its own; that needs reference counting on a pool element the engine may release). Mono
+frames, screen mode, `-emulatestereo` without the render module and `[stereo] enabled = 0`
+run the engine's code unchanged.
+
+### World-anchored UI elements and the mono camera (LIVE, measured)
+
+Markers, names and damage numbers are positioned on the game thread from the game camera,
+which in stereo is not the eye camera. In the gameplay scene tested the projection of the
+mono view (logged by `uihook proj`, the matrix the UI pass receives in screen mode) is
+**50.0 x 29.4 degrees** (16:9, symmetric, near 10 cm); the eye views have the headset's FOV
+(94 x 96 degrees, asymmetric, on the Null backend). The UI is laid out over that 50 degree
+frustum, so on a quad an element lines up with its object (for the eye midpoint) only when
+the quad covers the same angle: height `2 * distance * tan(14.7 deg)` = 1.57 m at 3 m. What
+else separates them: the game camera's pitch (with decoupled pitch the eye views drop it,
+the markers do not), head position, and the parallax between the quad's distance and the
+object's. See `docs/render.md`, "UI layer", for the numbers at the default placement.
 
 ## Tools
 
