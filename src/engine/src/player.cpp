@@ -56,6 +56,7 @@ Settings g_settings;
 void** g_gengine = nullptr;
 uobj::Lookup* g_lookup = nullptr;
 uobj::Lookup* g_opt_lookup = nullptr;
+uobj::Lookup* g_child_lookup = nullptr;  // SceneComponent.GetChildrenComponents
 bool g_lookup_logged = false;
 bool g_opt_logged = false;
 
@@ -363,21 +364,53 @@ bool head_location(FVector& out) {
     return true;
 }
 
+// Mesh components of other actors attached to the character's meshes (the sword on the
+// back): SceneComponent.GetChildrenComponents(true, Children) on each mesh. Params: bool at
+// +0, TArray<USceneComponent*> at +8 (filled by the engine; its small allocation is not
+// freed, once per first-person start).
+std::vector<void*> attached_meshes(void* pawn, const std::vector<void*>& meshes) {
+    std::vector<void*> out;
+    for (void* m : meshes) {
+        alignas(16) std::uint8_t params[32]{};
+        params[0] = 1;
+        if (!g_child_lookup || !g_child_lookup->ready()) break;
+        ++g.calls;
+        if (!uobj::call(m, g_child_lookup->get(0), params)) {
+            ++g.call_failures;
+            continue;
+        }
+        void** data = nullptr;
+        std::int32_t num = 0;
+        std::memcpy(&data, params + 8, sizeof(data));
+        std::memcpy(&num, params + 16, sizeof(num));
+        if (!data || num <= 0 || num > 512 || !uobj::readable(data, sizeof(void*) * static_cast<std::size_t>(num))) continue;
+        for (int i = 0; i < num; ++i) {
+            void* c = data[i];
+            if (!uobj::alive(c) || uobj::outer_of(c) == pawn) continue;
+            if (uobj::object_name(uobj::class_of(c)).find("MeshComponent") == std::string::npos) continue;
+            if (std::find(out.begin(), out.end(), c) == out.end()) out.push_back(c);
+        }
+    }
+    return out;
+}
+
 void hide_meshes(void* pawn) {
     if (g.hidden_pawn != pawn) {
         restore_meshes();
         g.hidden_pawn = pawn;
-        const auto meshes = pawn_meshes(pawn);
+        std::vector<void*> meshes = pawn_meshes(pawn);
+        const std::size_t own = meshes.size();
+        for (void* a : attached_meshes(pawn, meshes)) meshes.push_back(a);
         std::string names;
         for (void* m : meshes) {
-            names += " " + uobj::object_name(m);
+            names += " " + uobj::path_of(m);
             if (is_visible(m)) {
                 set_visible(m, false);
                 g.hidden.push_back(m);
             }
         }
-        log::info("player: first person: hid {} of {} skeletal mesh(es) of {} ({}):{}", g.hidden.size(), meshes.size(),
-                  uobj::object_name(pawn), uobj::object_name(uobj::class_of(pawn)), names);
+        log::info("player: first person: hid {} of {} mesh(es) ({} skeletal of {} ({}), {} attached):{}", g.hidden.size(), meshes.size(), own,
+                  uobj::object_name(pawn), uobj::object_name(uobj::class_of(pawn)), meshes.size() - own, names);
         return;
     }
     // The game may show a mesh again (equipment, animation events): hide it again.
@@ -523,6 +556,7 @@ void init(std::uint8_t* object_array, std::uint8_t* name_pool, void** gengine) {
         {"GetBoneName", "SkinnedMeshComponent", "Function"},
         {"GetSocketLocation", "SceneComponent", "Function"},
     });
+    g_child_lookup = new uobj::Lookup({{"GetChildrenComponents", "SceneComponent", "Function"}});
     if (!g_battle_class.empty()) g_battle_lookup = new uobj::Lookup({{g_battle_function, g_battle_class, "Function"}});
 }
 
@@ -531,6 +565,7 @@ void tick(bool stereo, float delta_seconds) {
     ++g.frame;
     g.dt = std::clamp(delta_seconds, 0.0001f, 0.25f);
     if (g_lookup->ready()) run_work();
+    if (g_child_lookup && !g_child_lookup->ready()) g_child_lookup->step();
     if (g_opt_lookup && !g_opt_lookup->ready()) {
         g_opt_lookup->step();
         if (g_opt_lookup->passes() >= 2 && !g_opt_logged) {
@@ -582,7 +617,7 @@ void tick(bool stereo, float delta_seconds) {
     if (req >= 0) g.first_person = req == 1;
 
     // Battle: third person for its duration, the default mode afterwards.
-    const bool combat = s.auto_combat.load() && combat_now();
+    const bool combat = s.fp_available.load() && s.auto_combat.load() && combat_now();
     if (combat != g.combat) {
         g.combat = combat;
         ++g.auto_switches;

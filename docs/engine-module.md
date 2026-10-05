@@ -178,7 +178,35 @@ that the player was lifted up to 2.4 m (camera pitched down) or lowered to count
 height behind the character at the boom's current length (shortened by the game's camera
 collision as before) while the right stick or mouse orbits; pitch input only changes where
 the game camera points, which decoupled pitch drops, so looking up and down is done with the
-head. Measured: see "Camera modes: evidence".
+head. Measured: see "Camera modes: evidence" below.
+
+### Camera modes: evidence
+
+Street and first room of the Sector 7 slums save, Null backend, Quest 3 class asymmetric
+FOV, 2064x2208 per eye; eye positions from `stereo views`, the pawn's from `fp status`.
+Captures in `captures/camera/runE` (Null) and `captures/camera/runF` (SteamVR null driver).
+
+| Game camera pitch | Game camera Z (`boom = game`) | Eye Z with the level boom | Eye distance behind the pawn (level) |
+|---|---|---|---|
+| -10.0 (rest) | 215.5 | 156.6 | 342 cm |
+| +12.8 (looking up) | 123.2 | 166.0 | 194 cm (the game's camera collision shortened the boom near the floor; kept) |
+| -35.9 (looking down from above) | 342.9 | 157.8 | 317 cm |
+| -9.5 after walking backwards | 204.4 | 162.1 | |
+
+With the game's boom the eyes moved over 2.2 m with pitch input; with the level boom they
+stay within 10 cm of the pivot's height (156 cm here, about shoulder height) while the boom
+length and the yaw follow the game. Pairs: `e04_level_pup` / `e03_game_pup`,
+`e05_level_pdown` / `e06_game_pdown`, `e07_level_backed` / `e08_game_backed`. Seen in
+`e05_level_pdown`: the eyes are where the game camera would be at zero pitch, so whatever
+stands there (an NPC behind the character in the first room) is close in front of the
+eyes, as it would be for the game's own camera at that angle. Whether the level position
+can end up inside an obstacle that the pitched camera passed over (a counter, a low wall)
+has not been seen; the game's collision only shortens the boom along the pitched direction.
+
+First person (`e10_first_stand`, `e11_first_turned`, `e12_first_walking`): the eyes at Cloud's
+eye bones, 74.8 cm above the pawn's location (175.9 standing in the first room), facing the
+game camera's yaw; turning with the mouse turns the view, walking moves it with the
+character. `e13_first_nohide` shows the view with nothing hidden.
 
 ### First person
 
@@ -186,20 +214,22 @@ head. Measured: see "Camera modes: evidence".
   game window has the focus), the gamepad combination View/Back + right stick click
   (`pad_toggle`), or `fp toggle` on the dev pipe. A manual toggle holds until the next
   automatic switch.
-- **Default**: third person (`default = 0`). `default = 1` starts in first person and
-  returns to it after every battle; it should become the default once the battle signal
-  exists.
-- **Eye**: the character's head bone, found once per pawn by name over its skeletal meshes
-  (`SkinnedMeshComponent.GetNumBones` / `GetBoneName`; a bone named `head` or containing
-  `head`, not an end or helper bone) and read every frame after the world has ticked
-  (`SceneComponent.GetSocketLocation`). Its offset from the pawn's location is smoothed over
+- **Default**: first person outside battles (`default = 1`): stereo starts in first person
+  and returns to it after every battle. `default = 0` starts in third person and returns to
+  third person after a battle.
+- **Eye**: the point between the character's eye bones (`L_Eye` and `R_Eye`; without them
+  a bone named `head` or containing `head`, not an end or helper bone), found once per pawn
+  by name over its skeletal meshes (`SkinnedMeshComponent.GetNumBones` / `GetBoneName`) and
+  read every frame after the world has ticked (`SceneComponent.GetSocketLocation`). Its offset from the pawn's location is smoothed over
   about 80 ms so animation jitter does not shake the view, while the pawn's own movement is
   followed without delay. `head_offset` (forward, right, up, in the camera's yaw frame) is
   added. When the bone cannot be read (no such bone, a call fails, a location more than
   2.5 m from the pawn) the eyes go to the pawn's location plus `eye_offset` for that frame.
 - **Body**: with `hide = meshes` (default) every skeletal mesh component owned by the pawn
-  that is visible is hidden (`SetVisibility(false)`, not propagated to attached components)
-  when the first-person blend passes half way; exactly those are shown again when first
+  that is visible is hidden (`SetVisibility(false)`, not propagated to attached components),
+  and so is every mesh component of another actor attached to those meshes (Cloud's sword
+  is one: `SceneComponent.GetChildrenComponents(true)`), when the first-person blend passes
+  half way; exactly those are shown again when first
   person stops applying (toggle, authored camera, battle, stereo off) or when the controlled
   pawn changes. A mesh the game shows again while hidden is hidden again the next frame.
   Finding the meshes scans the object array each time first person starts (a one-off cost
@@ -209,8 +239,29 @@ head. Measured: see "Camera modes: evidence".
   `blend_seconds` (smoothstep); a switch to or from an authored camera is a cut, as the
   game's own camera cuts there.
 - **Combat**: with `auto_combat = 1` the mode switches to third person while a battle is in
-  progress and back to the default afterwards. The battle signal is not implemented yet
-  (`fp combat 1|0|auto` simulates it); see "Known problems".
+  progress and back to the default afterwards (a manual toggle holds until then). The
+  signal is `battle_signal`, read once per frame on the game thread; every change of its
+  value is logged (`player: battle signal 0 -> 1`) together with the switch it causes
+  (`player: battle started: third person`). `fp combat 1|0|auto` overrides it for tests.
+
+  The default signal is `EndBattleAPI.GetBattleSceneID` (Square Enix's static battle
+  function library, `/Script/EndGame`): no parameters, returns an FName, the ID of the
+  current battle scene; the module treats a non-zero name index (anything but `None`) as a
+  battle. **Confidence: moderate, not verified in a battle.** What is verified: the function
+  exists, is called without faults every frame, and returns `None` in exploration (street
+  and first room of the Sector 7 slums). What is inferred: that it returns a battle scene
+  ID during a battle and `None` again afterwards. It was chosen over the other candidates
+  found in the object and name tables because it needs no object of a battle class (it is
+  static) and its name and the game's data tables (`BattleSceneID`, `BattleScenePhase`,
+  `GetBattleSceneCount(Name)`) describe battles as "battle scenes". Other candidates, all 0
+  in exploration, if this one turns out wrong: `EndBattleAIController.GetBattleInSituation`
+  (enum, on the party members' AI controllers such as `PC0000_00_Cloud_Standard_AI_C`) and
+  `EndBattleAIController.IsInDummyBattle` (bool); `EndMenuAPI.SetFieldMenuInBattle(bool)` is
+  the game telling its menus that a battle started (a setter, so not readable). A different
+  function can be tried without rebuilding: `battle_signal = Class.Function [world]
+  [result=<offset>:<size>]` (`world` passes the pawn as a world-context argument; the result
+  offset and size in the parameter block default to 0 and 1 byte), or `fp signal ...` on the
+  dev pipe.
 
 ### Gamepad toggle
 
@@ -259,13 +310,13 @@ feeds a button state through the same filter for a test without a pad.
 | Key | Default | Meaning |
 |---|---|---|
 | `enabled` | `1` | first person can be used at all; `0` switches it off completely (toggle, pad combination and automatic switching) |
-| `default` | `0` | `1`: first person outside combat from the start. Off by default until the battle signal exists: without it a battle would be played in first person |
-| `auto_combat` | `1` | third person while a battle is in progress (battle signal not implemented yet) |
-| `eye` | `head` | `head`: the eyes at the character's head bone (below); `offset`: at the pawn's location plus `eye_offset` |
-| `head_offset` | `10 0 8` | forward, right, up in cm from the head bone, turned with the camera's yaw |
+| `default` | `1` | `1`: first person outside battles, from the start and after every battle; `0`: third person |
+| `auto_combat` | `1` | third person while `battle_signal` reports a battle |
+| `eye` | `head` | `head`: the eyes between the character's eye bones (`L_Eye`, `R_Eye`), or at its head bone if it has no eye bones; `offset`: at the pawn's location plus `eye_offset` |
+| `head_offset` | `2 0 0` | forward, right, up in cm from the eye bones (or head bone), turned with the camera's yaw |
 | `eye_offset` | `10 0 75` | forward, right, up in cm from the pawn's location (capsule centre), turned with the camera's yaw; used with `eye = offset` and whenever the head bone cannot be read |
-| `battle_signal` | see "Combat" | `Class.Function`: a reflected function without parameters returning bool, read every frame on a live object of that class; empty = no automatic switch |
-| `hide` | `meshes` | `meshes`: hide the character's skeletal meshes while in first person; `none`: hide nothing |
+| `battle_signal` | `EndBattleAPI.GetBattleSceneID result=0:4` | `Class.Function [world] [result=<offset>:<size>]`: a reflected function read every frame on a live object of that class (or its class default object for a static function); a non-zero result means a battle; empty = no automatic switch (see "Combat") |
+| `hide` | `meshes` | `meshes`: hide the character's skeletal meshes, and the mesh components of other actors attached to them (the sword), while in first person; `none`: hide nothing |
 | `toggle_key` | `36` | virtual-key code of the keyboard toggle (36 = Home); `0` = none |
 | `pad_toggle` | `1` | View/Back + right stick click toggles, and is hidden from the game |
 | `blend_seconds` | `0.35` | duration of the move between third and first person |

@@ -35,7 +35,7 @@ struct Settings {
     std::atomic<float> aim_tolerance{75.0f}; // [camera] aim_tolerance: the pivot's largest distance from the camera's line of sight (cm)
     std::atomic<float> follow_distance{1500.0f};  // camera farther than this from the pawn: not the follow camera (cm)
     std::atomic<bool> fp_available{true};    // [first_person] enabled
-    std::atomic<bool> fp_default{false};     // [first_person] default: first person outside combat (off until a battle signal exists)
+    std::atomic<bool> fp_default{true};      // [first_person] default: first person outside battles
     std::atomic<bool> auto_combat{true};     // [first_person] auto_combat
     std::atomic<float> eye_forward{10.0f}, eye_right{0.0f}, eye_up{75.0f};  // [first_person] eye_offset (cm, from the pawn's location; fallback)
     std::atomic<bool> eye_head{true};        // [first_person] eye = head (the head bone) | offset
