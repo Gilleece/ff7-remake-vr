@@ -36,13 +36,13 @@ enum class Passes { Scene, NoGBuffer, All };
 
 struct Settings {
     bool enabled = true;
-    std::string preset = "balanced";
+    std::string preset = "quality";
     // Ring radii as fractions of half the eye's width, measured from the eye's
     // optical centre as angle tangents (so a ring is a circle of constant angle
     // from the view axis, whatever the FOV's asymmetry).
-    float radius[3] = {0.55f, 0.80f, 1.05f};
+    float radius[3] = {0.70f, 0.90f, 1.15f};
     // Shading rate between radius[0] and [1], between [1] and [2], beyond [2].
-    NV_PIXEL_SHADING_RATE rate[3] = {NV_PIXEL_X1_PER_2X2_RASTER_PIXELS, NV_PIXEL_X1_PER_2X2_RASTER_PIXELS, NV_PIXEL_X1_PER_4X4_RASTER_PIXELS};
+    NV_PIXEL_SHADING_RATE rate[3] = {NV_PIXEL_X1_PER_2X1_RASTER_PIXELS, NV_PIXEL_X1_PER_2X2_RASTER_PIXELS, NV_PIXEL_X1_PER_2X2_RASTER_PIXELS};
     Corners corners = Corners::Coarse;
     Passes passes = Passes::Scene;
     std::vector<int> skipFormats{35};  // DXGI formats of render target 0 that never get the mask (35: velocity)
@@ -153,6 +153,7 @@ std::atomic<bool> g_traceRequested{false};
 // The scene markers keep running (GPU timing of the scene only, no mask) after `fov off` in a
 // session that had it on, so on and off can be compared in one run.
 std::atomic<bool> g_measure{false};
+std::atomic<bool> g_simulateUnsupported{false};  // [debug] foveation_unsupported: test of the fallback
 
 // Indices in the shading-rate surface.
 constexpr uint8_t kIndexFull = 0, kIndexHidden = 4;
@@ -585,6 +586,7 @@ bool EnsureInit(ID3D11Device* device, ID3D11DeviceContext* ctx) {
     }
     NV_D3D1x_GRAPHICS_CAPS caps{};
     st = NvAPI_D3D1x_GetGraphicsCapabilities(device, NV_D3D1x_GRAPHICS_CAPS_VER, &caps);
+    if (g_simulateUnsupported.load()) caps.bVariablePixelRateShadingSupported = 0;
     if (st != NVAPI_OK || !caps.bVariablePixelRateShadingSupported) {
         LogOff(st != NVAPI_OK ? std::format("NvAPI_D3D1x_GetGraphicsCapabilities failed ({})", static_cast<int>(st))
                               : std::string("the GPU or driver does not support variable rate shading"));
@@ -703,9 +705,11 @@ void SetStatusLine() {
 
 void Configure(const Config& c) {
     Settings s;
-    s.enabled = c.get_bool("foveation", "enabled", false);
-    const std::string preset = Lower(c.get_string("foveation", "preset", "balanced"));
-    if (!ApplyPreset(s, preset)) log::warn("foveation: [foveation] preset = '{}' is unknown; using balanced", preset);
+    // Default on with the quality preset: in captures at headset resolution it was not
+    // distinguishable from full-rate shading outside the outermost ring (docs/render.md).
+    s.enabled = c.get_bool("foveation", "enabled", true);
+    const std::string preset = Lower(c.get_string("foveation", "preset", "quality"));
+    if (!ApplyPreset(s, preset)) log::warn("foveation: [foveation] preset = '{}' is unknown; using quality", preset);
     if (preset == "off") s.enabled = false;
     // Explicit values override the preset's.
     const std::string radii = c.get_string("foveation", "radii", "");
@@ -737,6 +741,7 @@ void Configure(const Config& c) {
     s.passes = passes == "all" ? Passes::All : passes == "no-gbuffer" ? Passes::NoGBuffer : Passes::Scene;
     // Default: the velocity buffer (R16G16_UNORM, 35): temporal data read per pixel by
     // temporal AA and motion blur, and almost free to shade at full rate.
+    s.skipFormats.clear();
     for (const auto& f : Split(c.get_string("foveation", "skip_formats", "35"))) {
         int v = 0;
         auto [p, ec] = std::from_chars(f.data(), f.data() + f.size(), v);
@@ -749,6 +754,7 @@ void Configure(const Config& c) {
     g_settingsVersion.fetch_add(1);
     g_enabled = s.enabled;
     g_measure = s.enabled;
+    g_simulateUnsupported = c.get_bool("debug", "foveation_unsupported", false);
     log::info("foveation: {}", Describe(s));
 }
 
