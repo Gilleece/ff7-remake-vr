@@ -16,6 +16,24 @@ $script:BenchDir        = $PSScriptRoot
 $script:BenchResultsDir = Join-Path $script:CapturesDir 'bench'       # captures/ is gitignored
 $script:UevrStatePath   = Join-Path $script:StateDir 'uevr-profile-run.txt'
 
+# ------------------------------------------------------------------ locks
+# Takes the game lock and, if $steamVr, the SteamVR lock, never holding one
+# while waiting for the other (so two runs that need both cannot deadlock).
+# Returns $true when every requested lock is held.
+function Lock-BenchResources([string]$owner, [bool]$steamVr, [int]$waitSeconds) {
+    $deadline = (Get-Date).AddSeconds($waitSeconds)
+    while ($true) {
+        if (Lock-Game -owner $owner -waitSeconds 0) {
+            if (-not $steamVr) { return $true }
+            if (Lock-SteamVr -owner $owner -waitSeconds 0) { return $true }
+            [void](Unlock-Game -owner $owner)
+        }
+        if ((Get-Date) -ge $deadline) { return $false }
+        Write-Step 'Waiting 30 s for the game/SteamVR locks'
+        Start-Sleep -Seconds 30
+    }
+}
+
 # ------------------------------------------------------------------ DLL injection
 # What UEVR's own injector (UEVRInjector.exe) does when "Inject" is pressed,
 # reproduced without its GUI: LoadLibraryW in the game through a remote
@@ -366,6 +384,33 @@ function Invoke-UevrInject([int]$gamePid, [string]$uevrDir, [switch]$noNullify) 
     Write-Step ("UEVR: UEVRBackend.dll loaded at 0x{0:x}" -f $u.ToInt64())
 }
 
+# Save games (Steam\<account>\*) compared with the newest verified save
+# backup. The UE4 crash reporter's per-start ini under Saved\Config is
+# ignored (the engine writes one on every start). Returns a list of
+# differences (empty = identical).
+function Compare-SavesToBackup {
+    $b = @(Get-SaveBackups)
+    if ($b.Count -eq 0) { return @('no save backup found') }
+    $m = Read-BackupManifest $b[0]
+    $root = Get-SaveRoot
+    $out = @()
+    $want = @{}
+    foreach ($e in @($m.files)) { if ($e.path -like 'Steam\*') { $want[$e.path] = $e.sha256 } }
+    foreach ($k in $want.Keys) {
+        $p = Join-Path $root $k
+        if (-not (Test-Path -LiteralPath $p)) { $out += "missing: $k" }
+        elseif ((Get-FileSha256 $p) -ne $want[$k]) { $out += "changed: $k" }
+    }
+    $steam = Join-Path $root 'Steam'
+    if (Test-Path -LiteralPath $steam) {
+        foreach ($f in @(Get-ChildItem -LiteralPath $steam -Recurse -File -Force)) {
+            $rel = Get-RelativePath $root $f.FullName
+            if (-not $want.ContainsKey($rel)) { $out += "new: $rel" }
+        }
+    }
+    return $out
+}
+
 # ------------------------------------------------------------------ OpenXR runtime for a run
 
 function Get-SteamVrRuntimeJson {
@@ -496,6 +541,106 @@ function Stop-GpuSampler($sampler, [string]$csvPath) {
     return $rows
 }
 
+# Per-thread CPU time of a process, with thread names where the program set
+# one (SetThreadDescription). Used to see whether one thread (game thread,
+# render thread) is saturated, which a process-wide CPU figure hides.
+if (-not ('FF7VR.Threads' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+namespace FF7VR {
+public class ThreadTime { public int Id; public string Name; public double CpuMs; }
+public static class Threads {
+    [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr OpenThread(uint access, bool inherit, int id);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+    [DllImport("kernel32.dll")] static extern int GetThreadDescription(IntPtr h, out IntPtr desc);
+    [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr p);
+    public static ThreadTime[] Snapshot(int pid) {
+        var list = new List<ThreadTime>();
+        Process p;
+        try { p = Process.GetProcessById(pid); p.Refresh(); } catch { return list.ToArray(); }
+        foreach (ProcessThread t in p.Threads) {
+            var tt = new ThreadTime(); tt.Id = t.Id;
+            try { tt.CpuMs = t.TotalProcessorTime.TotalMilliseconds; } catch { continue; }
+            IntPtr h = OpenThread(0x1000, false, t.Id); // THREAD_QUERY_LIMITED_INFORMATION
+            if (h != IntPtr.Zero) {
+                IntPtr d;
+                if (GetThreadDescription(h, out d) >= 0 && d != IntPtr.Zero) { tt.Name = Marshal.PtrToStringUni(d); LocalFree(d); }
+                CloseHandle(h);
+            }
+            list.Add(tt);
+        }
+        return list.ToArray();
+    }
+}
+}
+'@
+}
+
+# Busiest threads between two snapshots: [{ id, name, busyPct }] (100 = one core all the time).
+function Get-BusiestThreads($before, $after, [double]$wallMs, [int]$top = 6) {
+    $b = @{}
+    foreach ($t in $before) { $b[$t.Id] = $t.CpuMs }
+    $rows = @()
+    foreach ($t in $after) {
+        if (-not $b.ContainsKey($t.Id)) { continue }
+        $rows += [pscustomobject]@{ id = $t.Id; name = $t.Name; busyPct = [math]::Round(100.0 * ($t.CpuMs - $b[$t.Id]) / $wallMs, 1) }
+    }
+    return @($rows | Sort-Object busyPct -Descending | Select-Object -First $top)
+}
+
+# Captures the largest visible window of a process (PrintWindow) to a PNG.
+function Save-ProcessWindow([string]$processName, [string]$path) {
+    $best = [IntPtr]::Zero; $bestArea = 0
+    foreach ($p in @(Get-Process -Name $processName -ErrorAction SilentlyContinue)) {
+        foreach ($h in [FF7VR.Native]::WindowsOfProcess([uint32]$p.Id, $true)) {
+            $r = New-Object FF7VR.Native+RECT
+            [void][FF7VR.Native]::GetWindowRect($h, [ref]$r)
+            $a = ($r.Right - $r.Left) * ($r.Bottom - $r.Top)
+            if ($a -gt $bestArea) { $best = $h; $bestArea = $a }
+        }
+    }
+    if ($best -eq [IntPtr]::Zero) { return $null }
+    $shot = Save-GameScreenshot -path $path -hwnd $best
+    return [pscustomobject]@{ path = $shot.Path; title = [FF7VR.Native]::Title($best); width = $shot.Width; height = $shot.Height; mean = $shot.Mean; blank = $shot.Blank }
+}
+
+# Scripted camera motion for the 'pan' scene: relative mouse moves sent with
+# SendInput at a fixed rate from a background thread (the game turns the
+# camera with the mouse). Input only reaches the game while its window is in
+# the foreground.
+if (-not ('FF7VR.MousePan' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Threading;
+namespace FF7VR {
+public class MousePan {
+    [StructLayout(LayoutKind.Sequential)] struct MOUSEINPUT { public int dx, dy; public uint mouseData, dwFlags, time; public IntPtr dwExtraInfo; }
+    [StructLayout(LayoutKind.Sequential)] struct INPUT { public uint type; public MOUSEINPUT mi; }
+    [DllImport("user32.dll", SetLastError=true)] static extern uint SendInput(uint n, INPUT[] inputs, int size);
+    Thread thread; volatile bool stop; int dx, dy, interval; public long Sent;
+    public void Start(int stepX, int stepY, int intervalMs) {
+        dx = stepX; dy = stepY; interval = intervalMs;
+        thread = new Thread(Run); thread.IsBackground = true; thread.Start();
+    }
+    void Run() {
+        var inp = new INPUT[1];
+        inp[0].type = 0; inp[0].mi.dwFlags = 0x0001; // MOUSEEVENTF_MOVE (relative)
+        while (!stop) {
+            inp[0].mi.dx = dx; inp[0].mi.dy = dy;
+            Sent += SendInput(1, inp, Marshal.SizeOf(typeof(INPUT)));
+            Thread.Sleep(interval);
+        }
+    }
+    public long Stop() { stop = true; if (thread != null) thread.Join(2000); return Sent; }
+}
+}
+'@
+}
+
 # ------------------------------------------------------------------ statistics
 
 function Get-Percentile([double[]]$sorted, [double]$p) {
@@ -550,7 +695,7 @@ function Get-FrameStats([string]$csvPath) {
 }
 
 function Get-MeanStd([double[]]$v) {
-    if ($v.Count -eq 0) { return [pscustomobject]@{ mean = 0; std = 0; min = 0; max = 0; n = 0 } }
+    if ($v.Count -eq 0) { return [pscustomobject]@{ mean = $null; std = $null; min = $null; max = $null; n = 0 } }
     $m = ($v | Measure-Object -Average -Minimum -Maximum)
     $s = 0.0
     foreach ($x in $v) { $s += ($x - $m.Average) * ($x - $m.Average) }

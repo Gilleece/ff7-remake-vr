@@ -34,8 +34,9 @@ param(
     [string]$ConfigFile = '',
     [int]$WarmupSeconds = 20,
     [int]$RecordSeconds = 45,
-    [ValidateSet('idle')]
+    [ValidateSet('idle', 'pan')]
     [string]$Scene = 'idle',
+    [int]$PanStep = 6,
     [string]$OutDir = '',
     [string]$BuildDir = '',
     [string]$UevrDir = '',
@@ -68,6 +69,7 @@ $haveSvLock = $false
 $svEnabled = $false
 $uevrRun = $false
 $uevr = $null
+$pan = $null
 $result = [ordered]@{
     config = $Config; description = (Get-Cfg Description); kind = $kind; label = $Label; scene = $Scene
     started = (Get-Date).ToString('o'); warmupSeconds = $WarmupSeconds; recordSeconds = $RecordSeconds
@@ -82,9 +84,23 @@ function Invoke-DevScript([string]$name, [string[]]$arguments) {
 }
 
 function Send-Bench([string]$cmd) {
-    $r = @(Send-DevCommand @($cmd) 5000)
-    if ($r.Count -eq 0) { return '' }
-    return [string]$r[0]
+    for ($try = 1; ; $try++) {
+        try {
+            $r = @(Send-DevCommand @($cmd) 5000)
+            if ($r.Count -eq 0) { return '' }
+            return [string]$r[0]
+        } catch {
+            if ($try -ge 3) { throw "dev pipe command '$cmd' failed: $_" }
+            Start-Sleep -Seconds 2
+        }
+    }
+}
+
+# Fails when the game has stopped presenting frames (hung or crashed).
+function Get-PresentTotal {
+    $kv = ConvertFrom-KvReply (Send-Bench 'bench status')
+    if ($kv.Contains('total')) { return [int64]$kv['total'] }
+    return -1
 }
 
 function ConvertFrom-KvReply([string]$reply) {
@@ -100,13 +116,14 @@ $cvarNames = @('r.ScreenPercentage', 'r.DynamicRes.OperationMode', 'r.DynamicRes
 
 try {
     # ---------------------------------------------------------------- locks
-    if (-not (Lock-Game -owner $owner -waitSeconds $LockWaitSeconds)) { Write-Step 'Could not get the game lock'; exit 3 }
-    $haveGameLock = $true
-    if (@(Get-GameProcesses).Count -gt 0) { throw 'ff7remake_ is already running' }
-    if ($isVr) {
-        if (-not (Lock-SteamVr -owner $owner -waitSeconds $LockWaitSeconds)) { throw 'Could not get the SteamVR lock' }
-        $haveSvLock = $true
+    if (-not (Lock-BenchResources -owner $owner -steamVr $isVr -waitSeconds $LockWaitSeconds)) {
+        Write-Step 'Could not get the game/SteamVR locks'
+        exit 3
     }
+    $haveGameLock = $true
+    $haveSvLock = $isVr
+    if (@(Get-GameProcesses).Count -gt 0) { throw 'ff7remake_ is already running' }
+    if ($isVr -and (@(Get-SteamVrProcesses).Count -gt 0)) { throw 'SteamVR is already running (someone else may be using it without the lock)' }
 
     # ---------------------------------------------------------------- SteamVR null driver
     $gameEnv = @()
@@ -118,6 +135,12 @@ try {
         if ($sv.RefreshHz) { $svArgs += @('-RefreshHz', [string]$sv.RefreshHz) }
         $svEnabled = $true
         if ((Invoke-DevScript 'steamvr-null-enable.ps1' $svArgs) -ne 0) { throw 'steamvr-null-enable.ps1 failed' }
+        # No SteamVR dashboard over the game (it opens on its own and costs compositor time).
+        # The file was backed up by steamvr-null-enable.ps1 and is restored byte for byte afterwards.
+        $vrs = Get-VrSettingsPath
+        $vj = Get-Content -LiteralPath $vrs -Raw | ConvertFrom-Json
+        Set-VrSetting $vj 'dashboard' 'enableDashboard' $false
+        Write-JsonNoBom $vrs ($vj | ConvertTo-Json -Depth 32)
         if ((Invoke-DevScript 'steamvr-start.ps1' @('-Owner', $owner)) -ne 0) { throw 'steamvr-start.ps1 failed' }
         $runtimeJson = Get-SteamVrRuntimeJson
         $gameEnv += "XR_RUNTIME_JSON=$runtimeJson"
@@ -147,7 +170,10 @@ try {
     if ((Get-Cfg Set)) { $set += @((Get-Cfg Set)) }
     $launchArgs = @('-Until', 'gameplay', '-KeepRunning', '-Ini', $benchIni, '-Width', [string]$cfg.Width, '-Height', [string]$cfg.Height,
                     '-LockWaitSeconds', '0')
-    if ($BuildDir) { $launchArgs += @('-BuildDir', $BuildDir) }
+    $bd = $BuildDir
+    if (-not $bd -and (Get-Cfg BuildDir)) { $bd = (Get-Cfg BuildDir) }
+    if ($bd) { $launchArgs += @('-BuildDir', $bd) }
+    $result.buildDir = Resolve-BuildDir $bd
     if ($set.Count -gt 0) { $launchArgs += @('-Set', ($set -join ';')) }
     if ($gameEnv.Count -gt 0) { $launchArgs += @('-GameEnv', ($gameEnv -join ';')) }
     $t0 = Get-Date
@@ -189,9 +215,25 @@ try {
     Write-Step "Warm-up $WarmupSeconds s"
     [void](Set-GameForeground (Get-GameWindow))
     $end = (Get-Date).AddSeconds($WarmupSeconds)
+    # Injected tools can block the game for a few seconds while they start
+    # (UEVR scans all UObjects); only a longer silence counts as a hang. The
+    # warm-up period starts again after such a pause.
+    $lastTotal = Get-PresentTotal
+    $lastProgress = Get-Date
     while ((Get-Date) -lt $end) {
+        Start-Sleep -Seconds 2
         if (@(Get-GameProcesses).Count -eq 0) { throw 'The game exited during warm-up' }
-        Start-Sleep -Milliseconds 500
+        $t = Get-PresentTotal
+        if ($t -gt $lastTotal) {
+            if (((Get-Date) - $lastProgress).TotalSeconds -gt 4) {
+                Write-Step ("Game paused presenting for {0:N0} s; warm-up restarts" -f ((Get-Date) - $lastProgress).TotalSeconds)
+                $end = (Get-Date).AddSeconds($WarmupSeconds)
+            }
+            $lastTotal = $t
+            $lastProgress = Get-Date
+        } elseif (((Get-Date) - $lastProgress).TotalSeconds -gt 15) {
+            throw "The game stopped presenting frames during warm-up (Present count stuck at $t for 15 s)"
+        }
     }
     $cvBefore = Send-Bench ('bench cvars ' + ($cvarNames -join ' '))
     $hwnd = Get-GameWindow
@@ -200,9 +242,15 @@ try {
     $frameCsv = Join-Path $OutDir 'frames.csv'
     $proc = Get-Process -Id $game.Id
     $cpu0 = $proc.TotalProcessorTime.TotalMilliseconds
+    $threads0 = [FF7VR.Threads]::Snapshot($game.Id)
     $sampler = Start-GpuSampler 250
     $r = Send-Bench 'bench start'
     if ($r -notlike 'ok*') { throw "bench start failed: $r" }
+    $pan = $null
+    if ($Scene -eq 'pan') {
+        $pan = New-Object FF7VR.MousePan
+        $pan.Start($PanStep, 0, 10)
+    }
     $w0 = [Diagnostics.Stopwatch]::StartNew()
     Write-Step "Recording $RecordSeconds s (scene: $Scene)"
     $fgSamples = 0; $fgHits = 0
@@ -213,9 +261,11 @@ try {
         Start-Sleep -Milliseconds 1000
     }
     $r = Send-Bench "bench stop $frameCsv"
+    if ($pan) { $result.panInputs = $pan.Stop(); $pan = $null }
     $wall = $w0.Elapsed.TotalMilliseconds
     $proc.Refresh()
     $cpu1 = $proc.TotalProcessorTime.TotalMilliseconds
+    $threads1 = [FF7VR.Threads]::Snapshot($game.Id)
     $gpu = @(Stop-GpuSampler $sampler $gpuCsv)
     if ($r -notlike 'ok*') { throw "bench stop failed: $r" }
     $status = ConvertFrom-KvReply (Send-Bench 'bench status')
@@ -224,6 +274,15 @@ try {
         $shot = Save-GameScreenshot -path (Join-Path $OutDir 'game.png')
         $result.screenshot = [ordered]@{ path = $shot.Path; mean = $shot.Mean; blank = $shot.Blank }
     } catch { $notes += "screenshot failed: $_" }
+    if ($isVr) {
+        # What the runtime shows: SteamVR's null driver draws the composited frame into a desktop window.
+        foreach ($pn in @('vrcompositor', 'vrserver')) {
+            try {
+                $c = Save-ProcessWindow $pn (Join-Path $OutDir "steamvr-$pn.png")
+                if ($c) { $result["steamvrWindow_$pn"] = $c }
+            } catch { $notes += "SteamVR window capture ($pn) failed: $_" }
+        }
+    }
 
     # ---------------------------------------------------------------- numbers
     $fs = Get-FrameStats $frameCsv
@@ -245,6 +304,7 @@ try {
         coresBusy = [math]::Round(($cpu1 - $cpu0) / $wall, 2)          # 1.0 = one logical core fully busy
         machinePct = [math]::Round(100.0 * ($cpu1 - $cpu0) / $wall / $nCpu, 1)
         logicalCores = $nCpu
+        busiestThreads = @(Get-BusiestThreads $threads0 $threads1 $wall 6)
     }
     $result.foregroundPct = [math]::Round(100.0 * $fgHits / [math]::Max(1, $fgSamples), 0)
     if ($result.foregroundPct -lt 100) { $notes += "game window was in the foreground for $($result.foregroundPct)% of the recording" }
@@ -280,6 +340,7 @@ catch {
 finally {
     # ---------------------------------------------------------------- cleanup, always
     Write-Step 'Cleaning up'
+    if ($pan) { try { [void]$pan.Stop() } catch { } }
     try {
         if ($uevrRun -and (Test-Path -LiteralPath (Join-Path (Get-UevrProfileDir) 'log.txt')) -and -not (Test-Path -LiteralPath (Join-Path $OutDir 'uevr-log.txt'))) {
             Copy-Item -LiteralPath (Join-Path (Get-UevrProfileDir) 'log.txt') -Destination (Join-Path $OutDir 'uevr-log.txt') -Force
@@ -301,11 +362,12 @@ finally {
         $result.uevrProfileRestored = ($p.Count -eq 0)
         if ($p.Count -gt 0) { $failures += "UEVR profile not restored: $($p -join ', ')" }
     }
-    if ($isVr) {
+    if ($svEnabled) {
+        # Only SteamVR that this run configured and started is stopped.
         if ((Invoke-DevScript 'steamvr-stop.ps1' @('-Owner', $owner)) -ne 0) { $failures += 'steamvr-stop.ps1 failed' }
-        if ($svEnabled -and (Invoke-DevScript 'steamvr-null-restore.ps1' @()) -ne 0) { $failures += 'steamvr-null-restore.ps1 failed' }
-        if ($haveSvLock) { [void](Unlock-SteamVr -owner $owner) }
+        if ((Invoke-DevScript 'steamvr-null-restore.ps1' @()) -ne 0) { $failures += 'steamvr-null-restore.ps1 failed' }
     }
+    if ($haveSvLock) { [void](Unlock-SteamVr -owner $owner) }
     $result.finished = (Get-Date).ToString('o')
     $result.failures = $failures
     $result.notes = $notes

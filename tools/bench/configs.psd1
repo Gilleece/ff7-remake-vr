@@ -11,7 +11,10 @@
 #                 mod   - this project's own VR modes (ini keys in Set)
 #   Width, Height window client size (-ResX/-ResY, windowed). The game's saved
 #                 settings are not touched.
-#   Set           extra ini keys for the mod DLL, "section.key=value"
+#   Set           extra ini keys for the mod DLL, "section.key=value". They are
+#                 appended to tools/bench/bench.ini (frame timer on, nothing else)
+#   BuildDir      build directory whose DLL is deployed (default: -BuildDir of
+#                 bench-run.ps1, else build\<FF7VR_DEV_NAME>)
 #   SteamVR       for VR kinds: SteamVR null driver settings for the run
 #                 (RenderWidth/RenderHeight = the runtime's recommended
 #                 per-eye size, RefreshHz). Applied with
@@ -65,12 +68,35 @@
             SteamVR = @{ RenderWidth = 3568; RenderHeight = 3735; RefreshHz = 90 }
             UevrConfig = @{}
         }
+        'mod-screen-720p' = @{
+            Description = 'ff7vr virtual screen mode (flat game on a quad layer), 1280x720 window, no frame cap'
+            Kind = 'mod'
+            Width = 1280; Height = 720
+            BuildDir = 'build\full'
+            SteamVR = @{ RenderWidth = 2900; RenderHeight = 3010; RefreshHz = 90 }
+            Set = @('stereo.enabled=0', 'render.mode=screen', 'xr.enabled=1', 'xr.backend=openxr', 'xr.runtime=inherit')
+            Cvars = @{ 't.MaxFPS' = '0' }
+        }
         'uevr-2496-hzb' = @{
-            Description = 'UEVR, owner profile with HZB occlusion left on, about 2496x2592 per eye'
+            Description = 'UEVR, owner profile but VR_DisableHZBOcclusion=false, about 2496x2592 per eye'
             Kind = 'uevr'
             Width = 1280; Height = 720
             SteamVR = @{ RenderWidth = 2900; RenderHeight = 3010; RefreshHz = 90 }
             UevrConfig = @{ VR_DisableHZBOcclusion = 'false' }
+        }
+        'uevr-2496-nofix' = @{
+            Description = 'UEVR, owner profile but VR_NativeStereoFix=false (one render of both views), about 2496x2592 per eye'
+            Kind = 'uevr'
+            Width = 1280; Height = 720
+            SteamVR = @{ RenderWidth = 2900; RenderHeight = 3010; RefreshHz = 90 }
+            UevrConfig = @{ VR_NativeStereoFix = 'false' }
+        }
+        'uevr-2496-early' = @{
+            Description = 'UEVR, owner profile but VR_SynchronizationMode=0 (Early), about 2496x2592 per eye'
+            Kind = 'uevr'
+            Width = 1280; Height = 720
+            SteamVR = @{ RenderWidth = 2900; RenderHeight = 3010; RefreshHz = 90 }
+            UevrConfig = @{ VR_SynchronizationMode = '0' }
         }
     }
 }
