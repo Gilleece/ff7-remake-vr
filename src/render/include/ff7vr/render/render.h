@@ -1,0 +1,99 @@
+#pragma once
+// ff7vr render module: owns D3D11 inside the game process and drives the XR
+// session (src/xr). See docs/render.md for modes, ini keys and dev commands.
+//
+// Screen mode (default, and the fallback whenever stereo is not active): every
+// frame the game's back buffer is shown in the headset on a flat virtual
+// screen (a world-locked quad layer).
+//
+// Stereo mode: the engine renders both eyes side by side and hands the image
+// over with SubmitStereoFrame. The interface for that is below.
+//
+// ============================ STEREO INTERFACE =============================
+// Threads: GT = the engine's game thread, RT = the thread that calls
+// IDXGISwapChain::Present (the render thread in this build; logged as
+// "Present on <tid>" at start-up). All D3D11 work of this module happens on
+// the RT inside its Present hook, where the frame's commands have been
+// executed on the immediate context.
+//
+//   SetMode(Mode::Stereo)                 any thread, when the engine wants stereo
+//   GT, frame start:
+//     StereoFrame f = BeginGameFrame();   blocks for XR frame pacing (xrWaitFrame)
+//     if (!f.stereo) render mono;         the screen layer shows the back buffer
+//     else render 2 x EyeSetup::eyeWidth by eyeHeight side by side, eye e
+//          with f.views[e] (tracking space; xr_math.h converts to Unreal),
+//          and carry f.frameId along with the frame to the RT
+//   RT, after the frame's scene was submitted to the RHI and before Present
+//   (e.g. in IStereoRendering::RenderTexture_RenderThread):
+//     SubmitStereoFrame({f.frameId, sideBySideTexture, ...});   only records it
+//   RT, Present (this module): copies the eye rects into the XR swapchains and
+//     ends the XR frame.
+//
+// Rules:
+//   * Every frame BeginGameFrame returned with stereo == true is ended by one
+//     of the following Presents, in order: with the stereo image if
+//     SubmitStereoFrame named that frame, otherwise with the screen layer
+//     showing the back buffer. A frame never blocks the runtime for long.
+//   * BeginGameFrame returns stereo == false (without blocking) when the mode
+//     is Screen, no XR session is running, or earlier frames have not been
+//     presented for a while (game paused, minimised, loading without Present).
+//   * The texture given to SubmitStereoFrame must stay alive until the next
+//     Present on the RT returns (the module keeps a reference until then).
+//   * Mode changes take effect at frame boundaries; both directions are safe
+//     at any time (menus, movies and cutscenes switch back to Screen).
+// ===========================================================================
+
+#include "ff7vr/core/startup_context.h"
+#include "ff7vr/xr/xr.h"
+
+#include <cstdint>
+
+struct ID3D11Texture2D;
+
+namespace ff7vr::render {
+
+// Loader entry points (src/loader/startup.cpp). start() installs the D3D11
+// hooks and starts the XR thread; it returns quickly and never blocks on the game.
+bool start(const StartupContext& ctx);
+void stop();
+
+enum class Mode { Screen, Stereo };
+
+// Any thread.
+void SetMode(Mode mode);
+Mode GetMode();
+
+// What the engine needs to size its render target and build projections.
+struct EyeSetup {
+    uint32_t eyeWidth = 0, eyeHeight = 0;  // per-eye render size (runtime recommendation x [xr] resolution_scale)
+    xr::Fov fov[2]{};                      // from the most recent frame (or the runtime's first frame)
+    float refreshHz = 0;
+};
+// Any thread. False while no XR session is initialised.
+bool GetEyeSetup(EyeSetup* out);
+
+struct StereoFrame {
+    bool stereo = false;      // false: render mono this frame
+    uint64_t frameId = 0;     // pass to SubmitStereoFrame
+    bool shouldRender = true; // false: the runtime will not show this frame (render cheaply or skip the scene)
+    xr::View views[2]{};      // eye poses and FOVs, tracking space after recenter
+    xr::Pose head{};
+    int64_t predictedDisplayTime = 0;    // runtime clock, ns
+    int64_t predictedDisplayPeriod = 0;  // ns
+};
+// GT, once per frame at frame start.
+StereoFrame BeginGameFrame();
+
+struct StereoSubmit {
+    uint64_t frameId = 0;                          // from BeginGameFrame
+    ID3D11Texture2D* texture = nullptr;            // side-by-side image (e.g. B8G8R8A8_TYPELESS)
+    DXGI_FORMAT viewFormat = DXGI_FORMAT_UNKNOWN;  // required for typeless textures (B8G8R8A8_UNORM for the engine's target)
+    xr::ColorEncoding encoding = xr::ColorEncoding::Srgb;
+    xr::Rect eyeRects[2]{};                        // width/height 0 = left / right half
+    bool haveRenderedViews = false;                // true: renderedViews are what the image was rendered with
+    xr::View renderedViews[2]{};                   // (default: the views BeginGameFrame returned)
+};
+// RT, before the frame's Present. Records the image; the Present hook submits it.
+void SubmitStereoFrame(const StereoSubmit& submit);
+
+}  // namespace ff7vr::render

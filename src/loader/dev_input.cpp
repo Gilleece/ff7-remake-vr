@@ -2,6 +2,7 @@
 
 #include "xinput_proxy.h"
 
+#include "ff7vr/core/dev_commands.h"
 #include "ff7vr/core/log.h"
 
 #if FF7VR_HAVE_DEV
@@ -90,6 +91,11 @@ std::string handle(const std::string& line) {
         if (ff7vr::dev::handle_command(line, reply)) return reply;
     }
 #endif
+    {
+        // Commands registered by modules (ff7vr/core/dev_commands.h).
+        std::string reply;
+        if (dev_commands::dispatch(line, reply)) return reply;
+    }
     if (cmd == "mark") {
         std::string text = line.size() > 5 ? line.substr(5) : "";
         log::info("MARK {}", text);

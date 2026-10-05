@@ -1,0 +1,172 @@
+// Entry points of the render module: configuration, hooks, dev commands.
+
+#include "d3d11_hooks.h"
+#include "xr_controller.h"
+
+#include "ff7vr/core/dev_commands.h"
+#include "ff7vr/core/hook.h"
+#include "ff7vr/core/log.h"
+#include "ff7vr/render/render.h"
+
+#include <algorithm>
+#include <atomic>
+#include <cctype>
+#include <charconv>
+
+namespace ff7vr::render {
+namespace {
+
+std::atomic<bool> g_started{false};
+hook::InlineHook g_exitProcess, g_terminateProcess;
+
+std::string Lower(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return s;
+}
+
+RenderConfig LoadConfig(const StartupContext& ctx) {
+    const Config& c = *ctx.config;
+    RenderConfig r;
+    r.statsIntervalS = std::clamp(c.get_float("render", "stats_interval", r.statsIntervalS), 1.0, 3600.0);
+    r.gpuTiming = c.get_bool("render", "gpu_timing", r.gpuTiming);
+    const std::string dir = c.get_string("render", "capture_dir", "");
+    r.captureDir = dir.empty() ? ctx.dll_dir / L"ff7vr-captures" : std::filesystem::path(log::widen(dir));
+    if (r.captureDir.is_relative()) r.captureDir = ctx.dll_dir / r.captureDir;
+    r.stereoTest = Lower(c.get_string("render", "mode", "screen")) == "stereo-test";
+
+    r.xrEnabled = c.get_bool("xr", "enabled", r.xrEnabled);
+    const std::string backend = Lower(c.get_string("xr", "backend", "openxr"));
+    if (backend == "null") {
+        r.backend = xr::BackendType::Null;
+    } else if (backend != "openxr") {
+        log::warn("render: [xr] backend = '{}' is unknown; using openxr", backend);
+    }
+    r.runtime = c.get_string("xr", "runtime", r.runtime);
+    r.resolutionScale = static_cast<float>(std::clamp(c.get_float("xr", "resolution_scale", r.resolutionScale), 0.1, 4.0));
+    r.eyeWidth = static_cast<uint32_t>(std::clamp<long long>(c.get_int("xr", "eye_width", 0), 0, 16384));
+    r.eyeHeight = static_cast<uint32_t>(std::clamp<long long>(c.get_int("xr", "eye_height", 0), 0, 16384));
+    r.disableImplicitLayers = c.get_bool("xr", "disable_implicit_layers", r.disableImplicitLayers);
+    r.debugUtils = c.get_bool("xr", "debug_utils", r.debugUtils);
+    r.retryIntervalS = std::clamp(c.get_float("xr", "retry_interval", r.retryIntervalS), 0.5, 600.0);
+    r.reconnectAfterExit = c.get_bool("xr", "reconnect_after_exit", r.reconnectAfterExit);
+    const std::string wait = Lower(c.get_string("xr", "frame_wait", "thread"));
+    r.waitOnPresentThread = wait == "present";
+    r.nullRefreshHz = static_cast<float>(std::clamp(c.get_float("xr", "null_refresh_hz", r.nullRefreshHz), 10.0, 500.0));
+    r.nullPace = c.get_bool("xr", "null_pace", r.nullPace);
+    const std::string motion = Lower(c.get_string("xr", "null_motion", "static"));
+    r.nullMotion = motion == "yaw"       ? xr::NullMotion::YawSweep
+                   : motion == "sway"    ? xr::NullMotion::Sway
+                   : motion == "yawsway" ? xr::NullMotion::YawAndSway
+                                         : xr::NullMotion::Static;
+
+    r.screenDistance = static_cast<float>(std::clamp(c.get_float("screen", "distance", r.screenDistance), 0.3, 50.0));
+    r.screenWidth = static_cast<float>(std::clamp(c.get_float("screen", "width", r.screenWidth), 0.1, 100.0));
+    r.screenOffsetY = static_cast<float>(std::clamp(c.get_float("screen", "offset_y", r.screenOffsetY), -10.0, 10.0));
+    r.screenFollowHead = c.get_bool("screen", "follow_head", r.screenFollowHead);
+    r.recenterOnStart = c.get_bool("screen", "recenter_on_start", r.recenterOnStart);
+    return r;
+}
+
+void OnPresentCb(const PresentInfo& p) { XrController::Get().OnPresent(p); }
+void OnResizeCb(IDXGISwapChain* sc) { XrController::Get().OnResize(sc); }
+
+// The game leaves through ExitProcess (or TerminateProcess on itself). Ending the
+// XR session there, while every thread still exists, lets the runtime see a clean exit.
+void ShutdownForExit(const char* how) {
+    static std::atomic<bool> once{false};
+    if (once.exchange(true)) return;
+    log::info("render: {}: ending the XR session", how);
+    // Bounded: a runtime that hangs must not keep the game from exiting.
+    HANDLE t = CreateThread(
+        nullptr, 0,
+        [](void*) -> DWORD {
+            XrController::Get().StopForExit();
+            return 0;
+        },
+        nullptr, 0, nullptr);
+    if (t) {
+        if (WaitForSingleObject(t, 4000) != WAIT_OBJECT_0) log::warn("render: XR shutdown did not finish within 4 s; exiting anyway");
+        CloseHandle(t);
+    }
+}
+
+void WINAPI ExitProcessDetour(UINT code) {
+    ShutdownForExit("ExitProcess");
+    g_exitProcess.original<void(WINAPI*)(UINT)>()(code);
+}
+
+BOOL WINAPI TerminateProcessDetour(HANDLE process, UINT code) {
+    if (process == GetCurrentProcess() || GetProcessId(process) == GetCurrentProcessId()) ShutdownForExit("TerminateProcess");
+    return g_terminateProcess.original<BOOL(WINAPI*)(HANDLE, UINT)>()(process, code);
+}
+
+void RegisterCommands() {
+    dev_commands::add("status", "log the render and XR status; reply with a summary", [](std::string_view) {
+        return XrController::Get().Status();
+    });
+    dev_commands::add("capture", "capture <path prefix> [timeout ms]: write what each eye sees to <prefix>_L.png / _R.png",
+                      [](std::string_view args) {
+                          std::string a(args);
+                          uint32_t timeout = 5000;
+                          // Optional trailing timeout: "capture C:\dir\shot 8000"
+                          const size_t sp = a.find_last_of(' ');
+                          if (sp != std::string::npos) {
+                              uint32_t v = 0;
+                              const char* b = a.data() + sp + 1;
+                              auto [ptr, ec] = std::from_chars(b, a.data() + a.size(), v);
+                              if (ec == std::errc() && ptr == a.data() + a.size()) {
+                                  timeout = std::clamp(v, 100u, 60000u);
+                                  a.resize(sp);
+                              }
+                          }
+                          while (!a.empty() && a.back() == ' ') a.pop_back();
+                          if (a.size() >= 2 && a.front() == '"' && a.back() == '"') a = a.substr(1, a.size() - 2);
+                          return XrController::Get().Capture(a, timeout);
+                      });
+    dev_commands::add("recenter", "recenter: the current head position and yaw become the origin", [](std::string_view) {
+        return XrController::Get().Recenter();
+    });
+    dev_commands::add("xr-restart", "xr-restart: end the XR session (if any) and start a new one now", [](std::string_view) {
+        return XrController::Get().Restart();
+    });
+    dev_commands::add("mode", "mode screen|stereo|stereo-test: switch the presentation mode", [](std::string_view args) {
+        return XrController::Get().SetModeCommand(Lower(std::string(args)));
+    });
+}
+
+}  // namespace
+
+bool start(const StartupContext& ctx) {
+    if (g_started.exchange(true)) return true;
+    const RenderConfig cfg = LoadConfig(ctx);
+    log::info("render: xr {} (backend {}, runtime '{}', frame wait on the {} thread), screen {:.2f} m wide at {:.2f} m, captures in {}",
+              cfg.xrEnabled ? "enabled" : "disabled", cfg.backend == xr::BackendType::Null ? "null" : "openxr", cfg.runtime,
+              cfg.waitOnPresentThread ? "present" : "xr", cfg.screenWidth, cfg.screenDistance, log::narrow(cfg.captureDir.wstring()));
+    HookCallbacks cb;
+    cb.onPresent = &OnPresentCb;
+    cb.onResize = &OnResizeCb;
+    if (!InstallD3D11Hooks(cb)) {
+        log::error("render: D3D11 hooks failed; the render module stays off");
+        return false;
+    }
+    if (HMODULE k32 = GetModuleHandleW(L"kernel32.dll")) {
+        if (void* p = GetProcAddress(k32, "ExitProcess")) g_exitProcess.create(p, &ExitProcessDetour);
+        if (void* p = GetProcAddress(k32, "TerminateProcess")) g_terminateProcess.create(p, &TerminateProcessDetour);
+    }
+    RegisterCommands();
+    XrController::Get().Start(cfg);
+    return true;
+}
+
+void stop() {
+    // Process exit with the loader lock held: nothing safe to do here. The
+    // session is ended earlier from the ExitProcess hook.
+}
+
+void SetMode(Mode mode) { XrController::Get().SetMode(mode); }
+Mode GetMode() { return XrController::Get().GetMode(); }
+bool GetEyeSetup(EyeSetup* out) { return XrController::Get().GetEyeSetup(out); }
+StereoFrame BeginGameFrame() { return XrController::Get().BeginGameFrame(); }
+void SubmitStereoFrame(const StereoSubmit& submit) { XrController::Get().SubmitStereoFrame(submit); }
+
+}  // namespace ff7vr::render
