@@ -55,14 +55,14 @@
             Cvars = @{ 't.MaxFPS' = '0' }
         }
         'uevr-2496' = @{
-            Description = 'UEVR, owner profile, about 2496x2592 per eye'
+            Description = 'UEVR, the installed UEVR profile, about 2496x2592 per eye'
             Kind = 'uevr'
             Width = 1280; Height = 720
             SteamVR = @{ RenderWidth = 2900; RenderHeight = 3010; RefreshHz = 90 }
             UevrConfig = @{}
         }
         'uevr-3072' = @{
-            Description = 'UEVR, owner profile, about 3072x3216 per eye'
+            Description = 'UEVR, the installed UEVR profile, about 3072x3216 per eye'
             Kind = 'uevr'
             Width = 1280; Height = 720
             SteamVR = @{ RenderWidth = 3568; RenderHeight = 3735; RefreshHz = 90 }
@@ -78,21 +78,21 @@
             Cvars = @{ 't.MaxFPS' = '0' }
         }
         'uevr-2496-hzb' = @{
-            Description = 'UEVR, owner profile but VR_DisableHZBOcclusion=false, about 2496x2592 per eye'
+            Description = 'UEVR, the installed UEVR profile but VR_DisableHZBOcclusion=false, about 2496x2592 per eye'
             Kind = 'uevr'
             Width = 1280; Height = 720
             SteamVR = @{ RenderWidth = 2900; RenderHeight = 3010; RefreshHz = 90 }
             UevrConfig = @{ VR_DisableHZBOcclusion = 'false' }
         }
         'uevr-2496-nofix' = @{
-            Description = 'UEVR, owner profile but VR_NativeStereoFix=false (one render of both views), about 2496x2592 per eye'
+            Description = 'UEVR, the installed UEVR profile but VR_NativeStereoFix=false (one render of both views), about 2496x2592 per eye'
             Kind = 'uevr'
             Width = 1280; Height = 720
             SteamVR = @{ RenderWidth = 2900; RenderHeight = 3010; RefreshHz = 90 }
             UevrConfig = @{ VR_NativeStereoFix = 'false' }
         }
         'uevr-2496-early' = @{
-            Description = 'UEVR, owner profile but VR_SynchronizationMode=0 (Early), about 2496x2592 per eye'
+            Description = 'UEVR, the installed UEVR profile but VR_SynchronizationMode=0 (Early), about 2496x2592 per eye'
             Kind = 'uevr'
             Width = 1280; Height = 720
             SteamVR = @{ RenderWidth = 2900; RenderHeight = 3010; RefreshHz = 90 }
