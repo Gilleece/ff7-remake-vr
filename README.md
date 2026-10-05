@@ -59,6 +59,7 @@ desktop. It contains:
 | `xinput1_3.dll` | the mod itself |
 | `ff7vr-launcher.ps1` | the script the `.cmd` files run |
 | `README.md`, `VERSION.txt` | this guide; which version of the mod this is |
+| `LICENSE`, `THIRD-PARTY-NOTICES.md` | the mod's licence; the components built into it and their licences |
 | `logs\` | one folder per session with the mod's log (created on the first session) |
 
 **To play:** start Virtual Desktop's Streamer and connect the headset in Virtual

@@ -12,6 +12,8 @@
        collect-diagnostics.cmd  zips the last session's log, the settings and system facts
        ff7vr-launcher.ps1   what the .cmd files run
        README.md            the user guide
+       LICENSE              the mod's licence
+       THIRD-PARTY-NOTICES.md  the licences of the components built into the mod
        VERSION.txt          commit and build time
      and a .zip of that folder next to it.
   An existing folder of the same name is refreshed; its logs\ folder is kept.
@@ -80,6 +82,8 @@ $items = [ordered]@{
     'restore.cmd'        = (Join-Path $PSScriptRoot 'launcher\restore.cmd')
     'collect-diagnostics.cmd' = (Join-Path $PSScriptRoot 'launcher\collect-diagnostics.cmd')
     'README.md'          = (Join-Path $repo 'README.md')
+    'LICENSE'            = (Join-Path $repo 'LICENSE')
+    'THIRD-PARTY-NOTICES.md' = (Join-Path $repo 'THIRD-PARTY-NOTICES.md')
 }
 foreach ($k in $items.Keys) {
     if (-not (Test-Path -LiteralPath $items[$k])) { throw "Missing $($items[$k])" }
