@@ -25,6 +25,7 @@ struct Settings {
     std::atomic<bool> positional{true};        // apply head position (false: rotation and IPD only)
     std::atomic<int> mirror{static_cast<int>(mirror::Mode::Crop)};
     std::atomic<int> log_frames{0};            // log the eye cameras of the next N stereo frames
+    std::atomic<bool> swap_rects{false};       // test: right eye in the left half of the target, left eye in the right half
 };
 Settings& settings();
 

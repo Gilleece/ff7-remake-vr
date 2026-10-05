@@ -872,6 +872,30 @@
       },
       "expect": "0x251c230",
       "desc": "Post-processing of one view, called per view at the end of FDeferredShadingSceneRenderer::Render after the UI pass (this = GPostProcessing at 0x582893e). The UI composite happens inside it. Name INFERRED (UE 4.18 call shape)."
+    },
+    {
+      "name": "Bloom reduce pass Process",
+      "kind": "function",
+      "pattern": "48 8B C4 55 53 56 57 41 54 41 55 41 56 41 57 48 8D 6C 24 B8 48 81 EC 48 01 00 00 0F 29 70 A8 48 8B F2",
+      "resolve": {
+        "type": "match",
+        "offset": 0
+      },
+      "expect": "0x22861b0",
+      "desc": "Process() of Square Enix's bloom reduce pass (pooled targets 'BloomReduce', output size = scene buffer size >> (level + 1); vtable 0x4d5fd90 slot 5, ComputeOutputDesc 0x2286700). this+0xA8 = level, this+0xAC = first level. The first level reads the view's rect at FViewInfo+0x70 (C++ side and vertex constants carry the offset) but its pixel shader samples the input relative to the origin: for the right eye it reduces the left eye's image (the right-eye ghost). Levels and the 'BloomBlur' upsample chain (Process 0x2286a60) all sit at the origin; the tonemapper reads the result at the origin.",
+      "howto": "The chain builder 0x2287ba0 (called from FPostProcessing::Process when view+0xE70 > 0) allocates ten passes with this vtable and nine with 0x4d5fe18; slot 5 of the vtable is Process. The function checks +0x85 (level/first-level loads) and +0xD5 (`mov r10d,[r9+0x70]`)."
+    },
+    {
+      "name": "FRenderTargetPool::FindFreeElement",
+      "kind": "function",
+      "pattern": "40 55 53 41 56 41 57 48 8D AC 24 D8 FE FF FF",
+      "resolve": {
+        "type": "match",
+        "offset": 0
+      },
+      "expect": "0x253d6b0",
+      "desc": "bool FindFreeElement(RHICmdList (rdx), const FPooledRenderTargetDesc& (r8), TRefCountPtr<IPooledRenderTarget>& Out (r9), const TCHAR* DebugName (5th argument), ...). RCX is not used. IPooledRenderTarget: +0x08 TargetableTexture, +0x10 ShaderResourceTexture; FRHITexture vtable slot 7 = GetNativeResource. Hooked by the GPU trace to name textures.",
+      "howto": "Called with L\"CustomGlare\" from FSceneRenderTargets::BeginRenderingCustomGlare (0x2544ed0) and with every other pooled target name (about 100 callers)."
     }
   ]
 }

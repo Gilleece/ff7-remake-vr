@@ -40,6 +40,10 @@ struct Addresses {
     std::uint8_t* LightSortKeyImm = nullptr;       // immediate byte of `mov esi, 0x40` in RenderLights
     std::uint8_t* ViewRectOverrideJump = nullptr;  // `jne` opcode in CalcSceneView that skips the windowed-fullscreen rect
     std::uint8_t* SceneTargetFormat = nullptr;     // EPixelFormat the engine uses for the separate target
+    std::uint8_t* GUObjectArray = nullptr;         // FUObjectArray (movie detection)
+    std::uint8_t* FNamePool = nullptr;             // static FNamePool (movie detection)
+    std::uintptr_t BloomReduceProcess = 0;         // first pass of Square Enix's bloom (stereo fix)
+    std::uintptr_t FindFreeElement = 0;            // FRenderTargetPool::FindFreeElement (GPU trace names)
 
     bool stereo_ok = false;      // every required entry resolved and every layout check passed
     std::string failure;         // first reason stereo_ok is false

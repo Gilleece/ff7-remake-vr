@@ -1,7 +1,9 @@
 #include "stereo_device.h"
 
 #include "fixed_host.h"
+#include "bloom_fix.h"
 #include "fixes.h"
+#include "gpu_trace.h"
 #include "rhi_command.h"
 #include "ue_math.h"
 
@@ -207,7 +209,8 @@ bool EnableStereo(void*, bool stereo) {
 void AdjustViewRect(const void*, EStereoscopicPass pass, std::int32_t* x, std::int32_t* y, std::uint32_t* sx,
                     std::uint32_t* sy) {
     ++g_count.adjust_rect;
-    *x = pass == eSSP_RIGHT_EYE ? static_cast<std::int32_t>(g.eye_w) : 0;
+    const bool second_half = (pass == eSSP_RIGHT_EYE) != g_settings.swap_rects.load();
+    *x = second_half ? static_cast<std::int32_t>(g.eye_w) : 0;
     *y = 0;
     *sx = g.eye_w;
     *sy = g.eye_h;
@@ -303,6 +306,8 @@ unsigned g_frame_end_next = 0;  // render thread only
 void frame_end_execute(void*, rhi::Command* self) {
     auto* c = reinterpret_cast<FrameEndCommand*>(self);
     try {
+        gpu_trace::frame_boundary(c->eyes.texture);
+        bloom_fix::frame(c->eyes.texture);
         if (StereoHost* h = g_host.load()) h->eye_texture_ready(c->eyes);
         if (c->mirror != mirror::Mode::Off)
             mirror::draw(c->eyes.texture, c->back_buffer, c->eyes.eyes[0], c->eyes.eyes[1], c->mirror);

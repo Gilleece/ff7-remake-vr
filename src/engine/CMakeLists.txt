@@ -14,6 +14,9 @@ add_library(ff7vr_engine STATIC
     src/fixes.cpp
     src/commands.cpp
     src/ui_layer.cpp
+    src/gpu_trace.cpp
+    src/movie_watch.cpp
+    src/bloom_fix.cpp
 )
 target_include_directories(ff7vr_engine
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include

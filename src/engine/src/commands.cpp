@@ -15,13 +15,21 @@
 //   stereo lightfix <0|1>         light sort-key patch
 //   stereo log <n>                log the eye cameras of the next n stereo frames
 //   stereo host <render|fixed>    switch where eye size and views come from
+//   stereo bloomfix [0|1]         right-eye bloom fix (bloom_fix.h), with its counters
+//   stereo movie [on|off]         movie detection (movie_watch.h), with its state
+//   stereo swap <0|1>             test: right eye rendered into the left half and vice versa, to tell
+//                                 bugs that follow the view's position from bugs that follow its index
+//   re peek <rva> <n>, re poke <rva> <hex bytes>
 //   cvar get <name>
 //   cvar set <name> <value>
 
 #include "ff7vr/engine/cvars.h"
 #include "ff7vr/engine/engine.h"
 
+#include "bloom_fix.h"
+#include "engine_internal.h"
 #include "fixes.h"
+#include "movie_watch.h"
 #include "stereo_device.h"
 
 #if FF7VR_ENGINE_WITH_RENDER
@@ -31,14 +39,73 @@
 #define FF7VR_HOST_RENDER_HELP ""
 #endif
 
+#include "ff7vr/core/hook.h"
 #include "ff7vr/core/log.h"
+#include "ff7vr/core/module.h"
 
+#include <windows.h>
+
+#include <atomic>
+#include <cstring>
 #include <format>
 #include <sstream>
 #include <vector>
 
 namespace ff7vr::engine {
 namespace {
+
+// ------------------------------------------------------------------ reverse-engineering probes
+// `re peek <rva> <n>`, `re poke <rva> <hex bytes>`: read or patch the game image (RVAs
+// relative to the exe's base), for trying a patch in a running game before writing it.
+namespace probe {
+
+std::uintptr_t base() {
+    static const std::uintptr_t b = module::main_module().base;
+    return b;
+}
+
+bool read_guarded(const void* p, void* out, std::size_t n) {
+    __try {
+        std::memcpy(out, p, n);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+std::string hex_bytes(const std::uint8_t* p, std::size_t n) {
+    std::string s;
+    for (std::size_t i = 0; i < n; ++i) s += std::format("{}{:02x}", i ? " " : "", p[i]);
+    return s;
+}
+
+std::string command(const std::vector<std::string>& a) {
+    try {
+        if (a.size() == 4 && a[1] == "peek") {
+            const std::uintptr_t rva = std::stoull(a[2], nullptr, 16);
+            const std::size_t n = std::min<std::size_t>(std::stoul(a[3]), 256);
+            std::vector<std::uint8_t> buf(n);
+            if (!read_guarded(reinterpret_cast<const void*>(base() + rva), buf.data(), n)) return "err not readable";
+            return std::format("ok {:#x}: {}", rva, hex_bytes(buf.data(), n));
+        }
+        if (a.size() >= 4 && a[1] == "poke") {
+            const std::uintptr_t rva = std::stoull(a[2], nullptr, 16);
+            std::vector<std::uint8_t> bytes;
+            for (std::size_t i = 3; i < a.size(); ++i) bytes.push_back(static_cast<std::uint8_t>(std::stoul(a[i], nullptr, 16)));
+            std::vector<std::uint8_t> old(bytes.size());
+            void* p = reinterpret_cast<void*>(base() + rva);
+            if (!read_guarded(p, old.data(), old.size())) return "err not readable";
+            if (!hook::write_memory(p, bytes.data(), bytes.size())) return "err write failed";
+            log::info("probe: poke {:#x}: {} -> {}", rva, hex_bytes(old.data(), old.size()), hex_bytes(bytes.data(), bytes.size()));
+            return std::format("ok {:#x}: was {}", rva, hex_bytes(old.data(), old.size()));
+        }
+    } catch (const std::exception& e) {
+        return std::string("err ") + e.what();
+    }
+    return "err usage: re peek <rva> <n> | re poke <rva> <hex bytes>";
+}
+
+}  // namespace probe
 
 std::vector<std::string> split(const std::string& line) {
     std::istringstream in(line);
@@ -146,6 +213,19 @@ std::string stereo_command(const std::vector<std::string>& a) {
         s.log_frames = static_cast<int>(v[0]);
         return "ok";
     }
+    if (c == "bloomfix") {
+        if (a.size() == 3) bloom_fix::set_enabled(a[2] == "1");
+        return "ok " + bloom_fix::status();
+    }
+    if (c == "movie") {
+        if (a.size() == 3 && (a[2] == "on" || a[2] == "off")) movie::set_enabled(a[2] == "on");
+        if (a.size() == 4 && a[2] == "menu") movie::set_include_menu(a[3] == "1");
+        return "ok " + movie::status();
+    }
+    if (c == "swap" && a.size() == 3) {
+        s.swap_rects = a[2] == "1";
+        return std::format("ok swap_rects {}", s.swap_rects.load() ? 1 : 0);
+    }
     return "err unknown stereo command (status|views|on|off|mirror|eye|fov|ipd|motion|scale|pitch|positional|lightfix|log)";
 }
 
@@ -177,6 +257,10 @@ bool handle_command(const std::string& line, std::string& reply) {
         }
         if (a[0] == "cvar") {
             reply = cvar_command(a);
+            return true;
+        }
+        if (a[0] == "re") {
+            reply = probe::command(a);
             return true;
         }
         return false;

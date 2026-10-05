@@ -3,7 +3,10 @@
 #include "addresses.h"
 #include "engine_internal.h"
 #include "fixes.h"
+#include "gpu_trace.h"
 #include "rhi_command.h"
+#include "bloom_fix.h"
+#include "movie_watch.h"
 #include "stereo_device.h"
 
 #if FF7VR_ENGINE_WITH_RENDER
@@ -33,6 +36,8 @@ struct Options {
     bool start_in_stereo = true;
     bool allow_unknown_build = false;
     bool light_fix = false;
+    bool movie_screen = false;
+    bool bloom_fix = true;
     std::string host;  // render | fixed
     // [cvars] section: console variables set when the device is installed (game thread,
     // inside UEngine::Init, before the game creates its viewport and UI).
@@ -127,6 +132,7 @@ void __fastcall tick_detour(void* engine, float delta_seconds, bool idle) {
     cvar::apply_pending();
     const bool installed = g_installed.load();
     if (installed) {
+        movie::tick();
         device::tick_begin();
         if (!g_view_states_logged) log_view_states(engine);
     }
@@ -140,6 +146,8 @@ void resolve_and_prepare() {
     rhi::verify_layout(g_addr.base);
     if (g_addr.stereo_ok) {
         device::init(g_addr.GNearClippingPlane, g_opt.start_in_stereo, fixed_options());
+        movie::init({g_addr.GUObjectArray, g_addr.FNamePool}, g_opt.movie_screen);
+        bloom_fix::init(g_addr.BloomReduceProcess, g_opt.bloom_fix);
         if (!g_tick_hook->create(g_addr.GameEngineVtable, g_addr.slot_Tick / sizeof(void*), &tick_detour)) {
             g_addr.stereo_ok = false;
             g_addr.failure = "could not hook UGameEngine::Tick";
@@ -167,6 +175,8 @@ bool start(const StartupContext& ctx) {
         g_opt.start_in_stereo = cfg.get_bool("stereo", "start_in_stereo", true);
         g_opt.allow_unknown_build = cfg.get_bool("stereo", "allow_unknown_build", false);
         g_opt.light_fix = cfg.get_bool("stereo", "light_fix", false);
+        g_opt.movie_screen = cfg.get_bool("stereo", "movie_screen", false);
+        g_opt.bloom_fix = cfg.get_bool("stereo", "bloom_fix", true);
         device::Settings& s = device::settings();
         s.world_scale = static_cast<float>(cfg.get_float("stereo", "world_scale", 1.0));
         s.decouple_pitch = cfg.get_bool("stereo", "decoupled_pitch", true);
@@ -207,6 +217,14 @@ bool start(const StartupContext& ctx) {
             handle_command("cvar " + std::string(args), reply);
             return reply;
         });
+        dev_commands::add("gpu", "gpu status | gpu names on | gpu trace <prefix> [dump <from> <to>] [scale <n>]: one-frame GPU trace",
+                          [](std::string_view args) { return gpu_trace::command(std::string(args)); });
+        dev_commands::add("re", "re peek <rva> <n> | re poke <rva> <hex bytes>: read or patch the game image",
+                          [](std::string_view args) {
+                              std::string reply;
+                              handle_command("re " + std::string(args), reply);
+                              return reply;
+                          });
 
         if (!ctx.is_game) {
             log::info("engine: host is not the game, nothing to do");

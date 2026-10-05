@@ -76,6 +76,23 @@ constexpr Sig kViewRectOverride{"CalcSceneView windowed-fullscreen view rect", "
 constexpr Sig kSceneTargetFormat{"FSceneViewport separate target format",
                                  "FF 50 ?? 84 C0 75 47 44 0F B6 05 ?? ?? ?? ??", Rule::Rip, 7, 4, 8, 0x53e1c78};
 
+// The anchor reads GUObjectArray+0x10 (the object item pointer); the global is 0x10 lower.
+constexpr Sig kGUObjectArray{"GUObjectArray", "48 8B 05 ?? ?? ?? ?? 48 8D 14 C8 EB 03 49 8B D4 81 4A 08 00 00 00 40", Rule::Rip, 0, 3, 7,
+                             0x53bd480};
+constexpr Sig kFNamePool{"FNamePool", "48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B D0 C6 05 ?? ?? ?? ?? 01 48 8B 44 24 30 48 C1 E8 20 03 C0",
+                         Rule::Rip, 0, 3, 7, 0x5981300};
+
+// Process function of the bloom chain's reduce pass ("BloomReduce" targets). The fields it
+// reads (level +0xA8, first level +0xAC, the view's source rect +0x70..+0x7C) are checked at
+// +0x85 and +0xD5.
+constexpr Sig kBloomReduceProcess{"Bloom reduce pass Process",
+                                  "48 8B C4 55 53 56 57 41 54 41 55 41 56 41 57 48 8D 6C 24 B8 48 81 EC 48 01 00 00 0F 29 70 A8 48 8B F2",
+                                  Rule::Match, 0, 0, 0, 0x22861b0};
+constexpr std::uint8_t kBloomReduceFields[] = {0x41, 0x8b, 0x8e, 0xa8, 0x00, 0x00, 0x00, 0x45, 0x0f, 0xb6, 0xae, 0xac, 0x00, 0x00, 0x00};
+constexpr std::uint8_t kBloomReduceRect[] = {0x45, 0x8b, 0x51, 0x70};
+constexpr Sig kFindFreeElement{"FRenderTargetPool::FindFreeElement", "40 55 53 41 56 41 57 48 8D AC 24 D8 FE FF FF", Rule::Match, 0, 0, 0,
+                               0x253d6b0};
+
 // Call sites whose vtable displacement must equal the slot our device implements.
 struct SlotCheck {
     Sig sig;
@@ -304,6 +321,16 @@ Addresses resolve_addresses(bool allow_unknown_build, const void* hmd_detour) {
     a.ViewRectOverrideJump = reinterpret_cast<std::uint8_t*>(addr(kViewRectOverride, false));
     if (!a.ViewRectOverrideJump) log::warn("engine: stereo in windowed fullscreen will show wrong eye rects (patch site not found)");
     a.SceneTargetFormat = reinterpret_cast<std::uint8_t*>(addr(kSceneTargetFormat, false));
+    if (std::uintptr_t p = addr(kGUObjectArray, false)) a.GUObjectArray = reinterpret_cast<std::uint8_t*>(p - 0x10);
+    a.FNamePool = reinterpret_cast<std::uint8_t*>(addr(kFNamePool, false));
+    a.FindFreeElement = addr(kFindFreeElement, false);
+    if (std::uintptr_t p = addr(kBloomReduceProcess, false)) {
+        if (std::memcmp(reinterpret_cast<const void*>(p + 0x85), kBloomReduceFields, sizeof(kBloomReduceFields)) == 0 &&
+            std::memcmp(reinterpret_cast<const void*>(p + 0xd5), kBloomReduceRect, sizeof(kBloomReduceRect)) == 0)
+            a.BloomReduceProcess = p;
+        else
+            log::warn("engine: bloom reduce pass found, but its field offsets differ from this build's");
+    }
 
     a.stereo_ok = a.failure.empty();
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
