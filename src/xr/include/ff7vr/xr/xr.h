@@ -155,6 +155,9 @@ struct NullOptions {
     float ipdMetres = 0.064f;
     NullMotion motion = NullMotion::Static;
     bool paceToRefresh = false;  // WaitFrame sleeps to emulate vsync at refreshHz
+    // Report a hidden area (GetHiddenAreaMesh): the image corners outside an ellipse
+    // around the view axis, like a headset's visibility mask.
+    bool hiddenArea = true;
     // Format of the Null backend's emulated swapchain images.
     DXGI_FORMAT swapchainFormat = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
 };
@@ -333,6 +336,15 @@ struct SubmitDesc {
     uint32_t quadCount = 0;
 };
 
+// The part of an eye's image the headset cannot show (lens edges, display corners),
+// from XR_KHR_visibility_mask: a triangle mesh covering the hidden area. Vertices are
+// tangents of the angles from the eye's view axis on the plane z = -1 (x right, y up),
+// the same units as Fov tangents, so they map onto the image through the eye's FOV.
+struct HiddenAreaMesh {
+    std::vector<float> xy;          // vertex positions, x0 y0 x1 y1 ...
+    std::vector<uint32_t> indices;  // three per triangle
+};
+
 struct CaptureRequest {
     std::string pathPrefix;  // writes <pathPrefix>_L.png and <pathPrefix>_R.png (UTF-8 path)
 };
@@ -416,6 +428,12 @@ public:
     virtual std::vector<CaptureResult> WaitForCaptures(uint32_t timeoutMs) = 0;
 
     virtual FrameStats GetStats() const = 0;
+
+    // Any thread. The hidden area of an eye's image (XR_KHR_visibility_mask; the Null
+    // backend emulates one). False when the runtime offers none (or an empty mesh).
+    // The version changes whenever the runtime reports a new mask.
+    virtual bool GetHiddenAreaMesh(Eye eye, HiddenAreaMesh* out) const = 0;
+    virtual uint32_t HiddenAreaMeshVersion() const = 0;
 
     // Any thread. With InitDesc::gpuTiming: GPU milliseconds of the copies into
     // the swapchains, one value per submitted frame, collected since the last call

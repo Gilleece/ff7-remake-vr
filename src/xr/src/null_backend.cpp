@@ -43,6 +43,51 @@ void SleepPrecise(int64_t ns) {
     while (QpcNowNs() < end) std::this_thread::yield();
 }
 
+// A plausible hidden area for the emulated headset: everything outside an ellipse
+// centred on the view axis whose semi-axes are 5 % larger than the FOV's larger
+// half-extent in each direction. That keeps the middle of every edge visible and
+// hides the image corners, the region a real headset's lenses cannot show. The mesh
+// fills the space between the ellipse and the image border (tangent space).
+HiddenAreaMesh EmulatedHiddenArea(const Fov& fov) {
+    const float l = std::tan(fov.angleLeft), r = std::tan(fov.angleRight);
+    const float u = std::tan(fov.angleUp), d = std::tan(fov.angleDown);
+    const float a = 1.05f * std::max(-l, r), b = 1.05f * std::max(u, -d);
+    // Radial projection of a direction from the axis onto the image border; edge 0..3 = right, top, left, bottom.
+    auto border = [&](float x, float y, int* edge) {
+        float t = 1e30f;
+        if (x > 0 && r / x < t) t = r / x, *edge = 0;
+        if (y > 0 && u / y < t) t = u / y, *edge = 1;
+        if (x < 0 && l / x < t) t = l / x, *edge = 2;
+        if (y < 0 && d / y < t) t = d / y, *edge = 3;
+        return std::pair{x * t, y * t};
+    };
+    const float corners[4][2] = {{r, u}, {l, u}, {l, d}, {r, d}};  // corner after edge i (counter-clockwise)
+    HiddenAreaMesh m;
+    auto add = [&](float x, float y) {
+        m.xy.push_back(x);
+        m.xy.push_back(y);
+        return static_cast<uint32_t>(m.xy.size() / 2 - 1);
+    };
+    constexpr int kSegments = 96;
+    for (int i = 0; i < kSegments; ++i) {
+        const float a0 = kTwoPi * float(i) / kSegments, a1 = kTwoPi * float(i + 1) / kSegments;
+        int e0 = 0, e1 = 0;
+        const auto [qx0, qy0] = border(std::cos(a0), std::sin(a0), &e0);
+        const auto [qx1, qy1] = border(std::cos(a1), std::sin(a1), &e1);
+        // Ellipse points, clamped to the border where the ellipse lies outside the image.
+        float px0 = a * std::cos(a0), py0 = b * std::sin(a0), px1 = a * std::cos(a1), py1 = b * std::sin(a1);
+        if (px0 * px0 + py0 * py0 > qx0 * qx0 + qy0 * qy0) px0 = qx0, py0 = qy0;
+        if (px1 * px1 + py1 * py1 > qx1 * qx1 + qy1 * qy1) px1 = qx1, py1 = qy1;
+        const uint32_t p0 = add(px0, py0), p1 = add(px1, py1), q0 = add(qx0, qy0), q1 = add(qx1, qy1);
+        m.indices.insert(m.indices.end(), {p0, q0, q1, p0, q1, p1});
+        if (e0 != e1) {
+            const uint32_t c = add(corners[e0][0], corners[e0][1]);
+            m.indices.insert(m.indices.end(), {q0, c, q1});
+        }
+    }
+    return m;
+}
+
 class NullBackend final : public BackendBase {
 public:
     ~NullBackend() override { Shutdown(); }
@@ -109,6 +154,15 @@ public:
             info_.runtimeFormats = {fmt};
             info_.orientationTracking = info_.positionTracking = true;
             info_.lastPredictedDisplayPeriod = Period();
+        }
+        if (opt_.hiddenArea) {
+            Pose none;
+            View v[2];
+            ComputeViews(none, v);
+            for (int e = 0; e < 2; ++e) SetHiddenAreaMesh(e == 0 ? Eye::Left : Eye::Right, EmulatedHiddenArea(v[e].fov));
+        } else {
+            SetHiddenAreaMesh(Eye::Left, {});
+            SetHiddenAreaMesh(Eye::Right, {});
         }
         nextDeadline_ = 0;
         initialized_ = true;

@@ -16,14 +16,21 @@
 //     layer (render.h, "UI LAYER").
 // Mono frames, screen mode and a game without our stereo device are left untouched.
 // See docs/engine-module.md ("UI layer") and docs/re/engine.md ("In-game UI").
+//
+// The same file marks the scene of each stereo frame for the render module's foveated
+// rendering (render.h, "FIXED FOVEATED RENDERING"): hooks on the scene renderer's
+// Render and on FPostProcessing::Process append RHI commands that tell it, in the
+// order of the frame's GPU work, where the scene starts (with both eyes' view rects and
+// projections) and where it ends (before the UI pass and post-processing).
 
 #include "ff7vr/core/startup_context.h"
 
 namespace ff7vr::engine {
 
 // Called once by the loader, after engine::start. Resolves the UI functions by signature
-// and installs two inline hooks when [stereo] enabled = 1. Never throws; returns false
-// (and logs why) when the UI stays in the eye images.
+// and installs two inline hooks when [stereo] enabled = 1, then the two scene markers
+// (independently: either can fail alone). Never throws; returns false (and logs why)
+// when the UI stays in the eye images.
 bool start_ui_layer(const StartupContext& ctx);
 
 }  // namespace ff7vr::engine

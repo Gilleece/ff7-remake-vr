@@ -135,4 +135,28 @@ bool UiDumpRequested();
 // Presenting thread, before the frame's Present (after the frame's UI was drawn).
 void SubmitUiLayer(const UiLayerSource& source);
 
+// ======================== FIXED FOVEATED RENDERING =========================
+// In stereo the periphery of each eye is shaded at a lower rate than its centre
+// (NVIDIA variable rate shading through NVAPI; docs/render.md, "Foveated
+// rendering"). The engine module marks, in the order of the frame's GPU work
+// (RHI commands, executed on the presenting thread), where the scene of a stereo
+// view family is rendered; only render targets bound in between get the mask:
+//
+//   presenting thread, before the scene's first draw:   FoveationSceneBegin(eyes)
+//   presenting thread, before the UI pass / post-processing: FoveationSceneEnd()
+//
+// Nothing else is affected: mono frames, screen mode, the UI pass, the
+// post-processing chain, the desktop mirror and this module's own work.
+// ===========================================================================
+struct FoveationEye {
+    xr::Rect rect{};               // the eye's view rect in the scene render targets, pixels
+    float projScaleX = 0, projScaleY = 0;    // projection matrix [0][0], [1][1]
+    float projOffsetX = 0, projOffsetY = 0;  // [2][0], [2][1]: where the view axis is, in NDC
+};
+// Any thread. True while foveated rendering is switched on and not known to be unsupported.
+bool FoveationWanted();
+// Presenting thread (inside the frame's command stream).
+void FoveationSceneBegin(const FoveationEye eyes[2]);
+void FoveationSceneEnd();
+
 }  // namespace ff7vr::render

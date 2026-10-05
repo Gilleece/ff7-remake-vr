@@ -24,6 +24,15 @@
 //       presenting thread. It runs after the UI pass has executed on the D3D11 context and
 //       before the frame's Present, so the texture holds exactly this frame's UI.
 // Everything else (mono frames, screen mode, the plain game) runs the engine's code unchanged.
+//
+// Scene markers for foveated rendering (render.h, "FIXED FOVEATED RENDERING"), only while
+// the render module wants them:
+//   FDeferredShadingSceneRenderer::Render: for a stereo view family (two views, left and
+//       right eye) an RHI command is appended before the engine's own work that hands the
+//       render module both eyes' view rects and projections (FoveationSceneBegin).
+//   BeginRenderingInGameUI / FPostProcessing::Process / the end of Render: the first of
+//       them appends FoveationSceneEnd. So the scene's draws are marked, and the UI pass,
+//       post-processing and everything after are not.
 
 #include "ff7vr/engine/ui_layer.h"
 
@@ -43,6 +52,7 @@
 #include <d3d11.h>
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -54,7 +64,7 @@ namespace {
 
 // ------------------------------------------------------------------ signatures
 // Names, patterns and rules as in tools/re/signatures.json; expect = value for file version 1.0.0.7.
-enum class Rule { Match, I32, U8 };
+enum class Rule { Match, I32, U8, Call };
 struct Sig {
     const char* name;
     const char* pattern;
@@ -82,6 +92,16 @@ constexpr std::uint8_t kFamilyFlagBit = 0x80;
 // The same flag tested by every InGameUITexture binding (`test byte ptr [r14+3Ch], 80h`, about 320 sites).
 constexpr const char* kBindingSitePattern = "41 F6 46 3C 80";
 constexpr Sig kStereoPass{"FSceneView::StereoPass", "83 BF ?? ?? ?? ?? 00 74 0E 48 8B 01", Rule::I32, 2, 0x970};
+// Scene markers (tools/re/signatures.json).
+constexpr Sig kRender{"FDeferredShadingSceneRenderer::Render", "40 55 53 56 57 41 56 48 8D AC 24 80 FD FF FF", Rule::Match, 0, 0x21e64a0};
+// Its call in Render's per-view loop (`call rel32` at +14 of the pattern).
+constexpr Sig kProcess{"FPostProcessing::Process",
+                       "48 8D 0D ?? ?? ?? ?? 4C 03 87 D0 00 00 00 E8 ?? ?? ?? ?? FF C3 3B 9F D8 00 00 00 7C D1 48 8B CE", Rule::Call, 14,
+                       0x251c230};
+// The UI loop in Render walks Views: `imul r8, rax, 28B0h` ... `add r8, [rdi+0D0h]`.
+constexpr const char* kViewsPattern = "48 8D 0D ?? ?? ?? ?? 4C 69 C0 B0 28 00 00 48 8B D6 4C 03 87 D0 00 00 00 E8 ?? ?? ?? ?? 84 C0";
+constexpr Sig kViewStride{"FViewInfo size", kViewsPattern, Rule::I32, 10, 0x28b0};
+constexpr Sig kRendererViews{"FSceneRenderer::Views", kViewsPattern, Rule::I32, 20, 0xd0};
 // IPooledRenderTarget: FSceneRenderTargetItem at +8 {TargetableTexture, ShaderResourceTexture, ...}
 // (EndRenderingInGameUI reads both).
 constexpr std::size_t kPooledTargetable = 0x08;
@@ -108,6 +128,20 @@ std::atomic<std::uint64_t> g_passes{0}, g_redirected{0}, g_skipped{0}, g_reports
 std::atomic<std::uint32_t> g_lastW{0}, g_lastH{0};
 std::atomic<int> g_lastFormat{0};
 std::atomic<int> g_projScans{0};  // `uihook proj`: views still to scan for projection matrices
+
+// ------------------------------------------------------------------ scene markers
+struct MarkOffsets {
+    std::size_t views = 0, viewStride = 0, stereoPass = 0;
+    int rect = -1, proj = -1;  // inside FViewInfo, found at the first stereo frame
+};
+MarkOffsets g_mark;
+hook::InlineHook g_renderHook, g_processHook;
+std::atomic<bool> g_marksReady{false};
+bool g_layoutSearched = false;  // render thread
+bool g_sceneOpen = false;       // render thread: a begin was appended and no end yet
+std::atomic<std::uint64_t> g_marksBegun{0}, g_marksEnded{0};
+
+void close_scene(void* cmdList);
 
 using BeginFn = bool(__fastcall*)(void* sceneTargets, void* cmdList, void* view);
 using EndFn = void(__fastcall*)(void* sceneTargets, void* cmdList);
@@ -241,6 +275,7 @@ void log_projections(const std::uint8_t* view) {
 bool __fastcall begin_detour(void* sceneTargets, void* cmdList, void* view) {
     const auto original = g_beginHook.original<BeginFn>();
     g_pass = Pass{};
+    if (g_sceneOpen) close_scene(cmdList);  // the scene is done: the UI pass gets no foveation
     if (!g_ready.load(std::memory_order_relaxed) || !view) return original(sceneTargets, cmdList, view);
     ++g_passes;
     auto* v = static_cast<std::uint8_t*>(view);
@@ -278,6 +313,123 @@ void __fastcall end_detour(void* sceneTargets, void* cmdList) {
     g_pass = Pass{};
 }
 
+// ------------------------------------------------------------------ scene markers
+#if FF7VR_ENGINE_WITH_RENDER
+struct MarkCommand : rhi::Command {
+    bool begin = false;
+    render::FoveationEye eyes[2]{};
+};
+constexpr int kMarkRing = 32;
+MarkCommand g_marks[kMarkRing];
+int g_markNext = 0;
+
+void execute_mark(void*, rhi::Command* self) {
+    // Presenting thread (RHI thread), in the frame's command order.
+    auto* c = static_cast<MarkCommand*>(self);
+    if (c->begin)
+        render::FoveationSceneBegin(c->eyes);
+    else
+        render::FoveationSceneEnd();
+}
+
+bool append_mark(void* cmdList, bool begin, const render::FoveationEye* eyes) {
+    MarkCommand& c = g_marks[g_markNext];
+    g_markNext = (g_markNext + 1) % kMarkRing;
+    c.execute = &execute_mark;
+    c.begin = begin;
+    if (eyes) std::copy(eyes, eyes + 2, c.eyes);
+    return rhi::enqueue(cmdList, &c);
+}
+
+// This engine's reversed-Z infinite projection: [xs 0 0 0; 0 ys 0 0; ox oy 0 1; 0 0 n 0].
+bool is_projection(const float* m) {
+    return m[1] == 0 && m[2] == 0 && m[3] == 0 && m[4] == 0 && m[6] == 0 && m[7] == 0 && m[10] == 0 && m[11] == 1.0f && m[12] == 0 &&
+           m[13] == 0 && m[15] == 0 && m[0] > 0.05f && m[0] < 20.0f && m[5] > 0.05f && m[5] < 20.0f && m[14] > 0.0f && m[14] < 1000.0f &&
+           std::fabs(m[8]) < 1.0f && std::fabs(m[9]) < 1.0f;
+}
+
+// Finds, once, where FViewInfo keeps the view rect and the projection matrix: the first
+// FIntRect that reads (0, 0, W, H) in the left eye and (W, 0, 2W, H) in the right eye, and
+// the first matrix of the projection's form in both. Logged; the markers stay off if either
+// is missing.
+void find_view_layout(const std::uint8_t* left, const std::uint8_t* right) {
+    g_layoutSearched = true;
+    const std::size_t span = g_mark.viewStride - 64;
+    if (!readable(left, span) || !readable(right, span)) return;
+    for (std::size_t o = 0; o + 16 <= span && g_mark.rect < 0; o += 4) {
+        const auto* a = reinterpret_cast<const std::int32_t*>(left + o);
+        const auto* b = reinterpret_cast<const std::int32_t*>(right + o);
+        if (a[0] == 0 && a[1] == 0 && a[2] >= 64 && a[2] <= 16384 && a[3] >= 64 && a[3] <= 16384 && b[0] == a[2] && b[1] == 0 &&
+            b[2] == 2 * a[2] && b[3] == a[3])
+            g_mark.rect = static_cast<int>(o);
+    }
+    for (std::size_t o = 0; o + 64 <= span && g_mark.proj < 0; o += 16)
+        if (is_projection(reinterpret_cast<const float*>(left + o)) && is_projection(reinterpret_cast<const float*>(right + o)))
+            g_mark.proj = static_cast<int>(o);
+    if (g_mark.rect < 0 || g_mark.proj < 0) {
+        log::warn("foveation: view rect (+0x{:x}) or projection (+0x{:x}) not found in the eye views; no foveated rendering", g_mark.rect,
+                  g_mark.proj);
+        return;
+    }
+    const float* m = reinterpret_cast<const float*>(left + g_mark.proj);
+    const auto* r = reinterpret_cast<const std::int32_t*>(left + g_mark.rect);
+    log::info("foveation: eye views: rect at +0x{:x} ({}x{}), projection at +0x{:x} (left eye scale {:.4f} {:.4f}, axis at NDC {:.4f} {:.4f})",
+              g_mark.rect, r[2], r[3], g_mark.proj, m[0], m[5], m[8], m[9]);
+}
+
+// Both eyes of a stereo view family, or false.
+bool stereo_eyes(void* renderer, render::FoveationEye out[2]) {
+    auto* r = static_cast<std::uint8_t*>(renderer);
+    auto* views = *reinterpret_cast<std::uint8_t**>(r + g_mark.views);
+    const std::int32_t num = *reinterpret_cast<std::int32_t*>(r + g_mark.views + 8);
+    if (!views || num != 2) return false;
+    const std::uint8_t* v[2] = {views, views + g_mark.viewStride};
+    if (*reinterpret_cast<const std::int32_t*>(v[0] + g_mark.stereoPass) != 1 || *reinterpret_cast<const std::int32_t*>(v[1] + g_mark.stereoPass) != 2)
+        return false;
+    if (!g_layoutSearched) find_view_layout(v[0], v[1]);
+    if (g_mark.rect < 0 || g_mark.proj < 0) return false;
+    for (int e = 0; e < 2; ++e) {
+        const auto* rc = reinterpret_cast<const std::int32_t*>(v[e] + g_mark.rect);
+        const float* m = reinterpret_cast<const float*>(v[e] + g_mark.proj);
+        if (rc[2] <= rc[0] || rc[3] <= rc[1] || rc[0] < 0 || rc[1] < 0 || !(m[0] > 0.0f) || !(m[5] > 0.0f)) return false;
+        out[e].rect = xr::Rect{rc[0], rc[1], static_cast<std::uint32_t>(rc[2] - rc[0]), static_cast<std::uint32_t>(rc[3] - rc[1])};
+        out[e].projScaleX = m[0];
+        out[e].projScaleY = m[5];
+        out[e].projOffsetX = m[8];
+        out[e].projOffsetY = m[9];
+    }
+    return true;
+}
+
+void close_scene(void* cmdList) {
+    g_sceneOpen = false;
+    if (append_mark(cmdList, false, nullptr)) ++g_marksEnded;
+}
+
+using RenderFn = void(__fastcall*)(void* renderer, void* cmdList);
+using ProcessFn = void(__fastcall*)(void* self, void* cmdList, void* view, void* velocity);
+
+void __fastcall render_detour(void* renderer, void* cmdList) {
+    if (g_sceneOpen) close_scene(cmdList);
+    render::FoveationEye eyes[2];
+    if (g_marksReady.load(std::memory_order_relaxed) && render::FoveationWanted() && stereo_eyes(renderer, eyes) && append_mark(cmdList, true, eyes)) {
+        g_sceneOpen = true;
+        ++g_marksBegun;
+    }
+    g_renderHook.original<RenderFn>()(renderer, cmdList);
+    if (g_sceneOpen) close_scene(cmdList);  // no UI pass and no post-processing ran
+}
+
+void __fastcall process_detour(void* self, void* cmdList, void* view, void* velocity) {
+    if (g_sceneOpen) close_scene(cmdList);
+    g_processHook.original<ProcessFn>()(self, cmdList, view, velocity);
+}
+
+void start_scene_marks(std::uintptr_t base, bool known);
+#else
+void close_scene(void*) {}
+#endif
+
 // ------------------------------------------------------------------ start-up
 bool resolve(std::uintptr_t base, bool known, const Sig& s, std::int64_t* out, std::string* why) {
     const auto r = pattern::scan_module(base, s.pattern, pattern::Sections::Executable, 2);
@@ -290,6 +442,9 @@ bool resolve(std::uintptr_t base, bool known, const Sig& s, std::int64_t* out, s
         case Rule::Match: v = static_cast<std::int64_t>(r.first() + s.offset - base); break;
         case Rule::I32: v = *reinterpret_cast<const std::int32_t*>(r.first() + s.offset); break;
         case Rule::U8: v = *reinterpret_cast<const std::uint8_t*>(r.first() + s.offset); break;
+        case Rule::Call:
+            v = static_cast<std::int64_t>(r.first() + s.offset + 5 + *reinterpret_cast<const std::int32_t*>(r.first() + s.offset + 1) - base);
+            break;
     }
     if (known && v != s.expect) {
         *why = std::format("{}: 0x{:x}, expected 0x{:x} for this build", s.name, v, s.expect);
@@ -302,10 +457,39 @@ bool resolve(std::uintptr_t base, bool known, const Sig& s, std::int64_t* out, s
 
 std::string status() {
     return std::format("ok ui hooks {}; once per frame {}; UI passes {} redirected {} skipped (second eye) {} reports {} failed {}; last UI "
-                       "target {}x{} DXGI format {}",
+                       "target {}x{} DXGI format {}; foveation scene markers {}, scenes begun {} ended {}",
                        g_ready.load() ? "installed" : "off", g_oncePerFrame.load() ? "on" : "off", g_passes.load(), g_redirected.load(),
-                       g_skipped.load(), g_reports.load(), g_reportFailures.load(), g_lastW.load(), g_lastH.load(), g_lastFormat.load());
+                       g_skipped.load(), g_reports.load(), g_reportFailures.load(), g_lastW.load(), g_lastH.load(), g_lastFormat.load(),
+                       g_marksReady.load() ? "installed" : "off", g_marksBegun.load(), g_marksEnded.load());
 }
+
+#if FF7VR_ENGINE_WITH_RENDER
+void start_scene_marks(std::uintptr_t base, bool known) {
+    std::string why;
+    std::int64_t render = 0, process = 0, stride = 0, views = 0, pass = 0;
+    if (!(resolve(base, known, kRender, &render, &why) && resolve(base, known, kProcess, &process, &why) &&
+          resolve(base, known, kViewStride, &stride, &why) && resolve(base, known, kRendererViews, &views, &why) &&
+          resolve(base, known, kStereoPass, &pass, &why))) {
+        log::warn("foveation: scene markers not available: {} (no foveated rendering)", why);
+        return;
+    }
+    if (!rhi::verify_layout(base)) {
+        log::warn("foveation: RHI command list layout not confirmed (no foveated rendering)");
+        return;
+    }
+    g_mark.views = static_cast<std::size_t>(views);
+    g_mark.viewStride = static_cast<std::size_t>(stride);
+    g_mark.stereoPass = static_cast<std::size_t>(pass);
+    if (!g_renderHook.create(reinterpret_cast<void*>(base + render), &render_detour) ||
+        !g_processHook.create(reinterpret_cast<void*>(base + process), &process_detour)) {
+        log::warn("foveation: scene marker hooks could not be installed (no foveated rendering)");
+        return;
+    }
+    g_marksReady = true;
+    log::info("foveation: scene markers installed (Render +0x{:x}, FPostProcessing::Process +0x{:x}, views at renderer +0x{:x}, 0x{:x} bytes each)",
+              render, process, views, stride);
+}
+#endif
 
 }  // namespace
 
@@ -319,6 +503,9 @@ bool start_ui_layer(const StartupContext& ctx) {
     const std::uintptr_t base = ctx.game_base ? ctx.game_base : module::main_module().base;
     const bool known = ctx.game_size == ue::rva_1_0_0_7::SizeOfImage && module::timestamp(base) == ue::rva_1_0_0_7::TimeDateStamp;
     const auto t0 = GetTickCount64();
+    // Independent of the UI layer: foveated rendering needs only the scene markers. They
+    // pass straight through while it is off ([foveation] enabled, `fov on|off`).
+    start_scene_marks(base, known);
     std::string why;
     std::int64_t begin = 0, end = 0, uiTarget = 0, uiSize = 0, flag = 0, stereoPass = 0, endTarget = 0;
     bool ok = resolve(base, known, kBegin, &begin, &why) && resolve(base, known, kUiTarget, &uiTarget, &why) &&

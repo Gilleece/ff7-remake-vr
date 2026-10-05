@@ -46,8 +46,13 @@ public:
     bool GetQuadLayerInfo(LayerHandle layer, SwapchainInfo* out) const override;
     bool DrawOverlay(const QuadLayer& q, ID3D11Texture2D* target, DXGI_FORMAT targetFormat, ColorEncoding targetEncoding,
                      const Rect& targetRect) override;
+    bool GetHiddenAreaMesh(Eye eye, HiddenAreaMesh* out) const override;
+    uint32_t HiddenAreaMeshVersion() const override { return hiddenVersion_.load(std::memory_order_acquire); }
 
 protected:
+    // Stores an eye's hidden area (empty mesh = none) and bumps the version.
+    void SetHiddenAreaMesh(Eye eye, HiddenAreaMesh mesh);
+
     struct FrameRecord {
         uint64_t id = 0;
         uint64_t epoch = 0;
@@ -140,6 +145,8 @@ protected:
 
     mutable std::mutex infoMutex_;
     RuntimeInfo info_;
+    HiddenAreaMesh hidden_[2];  // under infoMutex_
+    std::atomic<uint32_t> hiddenVersion_{0};
     std::atomic<SessionState> state_{SessionState::Uninitialized};
 
     std::mutex frameMutex_;

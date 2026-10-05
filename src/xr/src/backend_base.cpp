@@ -108,6 +108,23 @@ RuntimeInfo BackendBase::GetRuntimeInfo() const {
     return info_;
 }
 
+bool BackendBase::GetHiddenAreaMesh(Eye eye, HiddenAreaMesh* out) const {
+    const int e = eye == Eye::Right ? 1 : 0;
+    std::lock_guard lk(infoMutex_);
+    if (hidden_[e].indices.size() < 3) return false;
+    if (out) *out = hidden_[e];
+    return true;
+}
+
+void BackendBase::SetHiddenAreaMesh(Eye eye, HiddenAreaMesh mesh) {
+    const int e = eye == Eye::Right ? 1 : 0;
+    {
+        std::lock_guard lk(infoMutex_);
+        hidden_[e] = std::move(mesh);
+    }
+    hiddenVersion_.fetch_add(1, std::memory_order_acq_rel);
+}
+
 FrameStats BackendBase::GetStats() const {
     std::lock_guard lk(statsMutex_);
     return stats_;

@@ -83,6 +83,8 @@ private:
     void DestroyAll();
     void PollEvents();
     void HandleSessionState(XrSessionState s);
+    // Reads an eye's hidden area mesh (XR_KHR_visibility_mask) into the base class.
+    void QueryHiddenArea(uint32_t eye);
     bool LocateViews(int64_t time, View raw[2], bool* orientationValid, bool* positionValid);
     Result EndFrameLocked(int64_t displayTime, const XrCompositionLayerBaseHeader* const* layers, uint32_t layerCount);
     Result StaleOrUnknown(uint64_t frameId);
@@ -113,7 +115,8 @@ private:
     XrSessionState xrState_ = XR_SESSION_STATE_UNKNOWN;  // GT
     bool exitRequested_ = false;                         // GT
 
-    bool hasRefreshRate_ = false, hasDepth_ = false, hasDebugUtils_ = false;
+    bool hasRefreshRate_ = false, hasDepth_ = false, hasDebugUtils_ = false, hasVisibilityMask_ = false;
+    PFN_xrGetVisibilityMaskKHR pfnGetVisibilityMask_ = nullptr;
     PFN_xrGetD3D11GraphicsRequirementsKHR pfnGetD3D11Req_ = nullptr;
     PFN_xrGetDisplayRefreshRateFB pfnGetRefresh_ = nullptr;
     PFN_xrEnumerateDisplayRefreshRatesFB pfnEnumRefresh_ = nullptr;
@@ -251,6 +254,10 @@ Result OpenXrBackend::InitImpl(const InitDesc& desc) {
         enable.push_back(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
         hasRefreshRate_ = true;
     }
+    if (has(XR_KHR_VISIBILITY_MASK_EXTENSION_NAME)) {
+        enable.push_back(XR_KHR_VISIBILITY_MASK_EXTENSION_NAME);
+        hasVisibilityMask_ = true;
+    }
     if (desc.enableDebugUtils && has(XR_EXT_DEBUG_UTILS_EXTENSION_NAME)) {
         enable.push_back(XR_EXT_DEBUG_UTILS_EXTENSION_NAME);
         hasDebugUtils_ = true;
@@ -288,6 +295,7 @@ Result OpenXrBackend::InitImpl(const InitDesc& desc) {
     if (hasRefreshRate_) {
         hasRefreshRate_ = getProc("xrGetDisplayRefreshRateFB", &pfnGetRefresh_) && getProc("xrEnumerateDisplayRefreshRatesFB", &pfnEnumRefresh_);
     }
+    if (hasVisibilityMask_) hasVisibilityMask_ = getProc("xrGetVisibilityMaskKHR", &pfnGetVisibilityMask_);
     if (hasDebugUtils_ && getProc("xrCreateDebugUtilsMessengerEXT", &pfnCreateMessenger_) &&
         getProc("xrDestroyDebugUtilsMessengerEXT", &pfnDestroyMessenger_)) {
         XrDebugUtilsMessengerCreateInfoEXT ci{XR_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};
@@ -466,6 +474,7 @@ Result OpenXrBackend::InitImpl(const InitDesc& desc) {
         std::lock_guard lk(infoMutex_);
         info_ = std::move(info);
     }
+    for (uint32_t e = 0; e < 2; ++e) QueryHiddenArea(e);
     xrState_ = XR_SESSION_STATE_UNKNOWN;
     exitRequested_ = false;
     sessionRunning_ = false;
@@ -531,7 +540,7 @@ void OpenXrBackend::DestroyAll() {
     instance_ = XR_NULL_HANDLE;
     systemId_ = XR_NULL_SYSTEM_ID;
     sessionRunning_ = false;
-    hasRefreshRate_ = hasDepth_ = hasDebugUtils_ = false;
+    hasRefreshRate_ = hasDepth_ = hasDebugUtils_ = hasVisibilityMask_ = false;
     pfnGetD3D11Req_ = nullptr;
     pfnGetRefresh_ = nullptr;
     pfnEnumRefresh_ = nullptr;
@@ -573,6 +582,11 @@ void OpenXrBackend::PollEvents() {
                 info_.refreshHz = e.toDisplayRefreshRate;
                 break;
             }
+            case XR_TYPE_EVENT_DATA_VISIBILITY_MASK_CHANGED_KHR: {
+                const auto& e = reinterpret_cast<const XrEventDataVisibilityMaskChangedKHR&>(ev);
+                if (e.viewIndex < 2) QueryHiddenArea(e.viewIndex);
+                break;
+            }
             case XR_TYPE_EVENT_DATA_EVENTS_LOST: {
                 const auto& e = reinterpret_cast<const XrEventDataEventsLost&>(ev);
                 log_.Warn("OpenXR: {} events lost", e.lostEventCount);
@@ -581,6 +595,37 @@ void OpenXrBackend::PollEvents() {
             default: log_.Debug("OpenXR event type {}", static_cast<int>(ev.type)); break;
         }
     }
+}
+
+void OpenXrBackend::QueryHiddenArea(uint32_t eye) {
+    const Eye which = eye == 0 ? Eye::Left : Eye::Right;
+    if (!hasVisibilityMask_ || session_ == XR_NULL_HANDLE) {
+        SetHiddenAreaMesh(which, {});
+        return;
+    }
+    XrVisibilityMaskKHR m{XR_TYPE_VISIBILITY_MASK_KHR};
+    XrResult r = pfnGetVisibilityMask_(session_, kViewConfig, eye, XR_VISIBILITY_MASK_TYPE_HIDDEN_TRIANGLE_MESH_KHR, &m);
+    HiddenAreaMesh mesh;
+    if (XR_SUCCEEDED(r) && m.vertexCountOutput && m.indexCountOutput) {
+        std::vector<XrVector2f> v(m.vertexCountOutput);
+        mesh.indices.resize(m.indexCountOutput);
+        m.vertexCapacityInput = m.vertexCountOutput;
+        m.indexCapacityInput = m.indexCountOutput;
+        m.vertices = v.data();
+        m.indices = mesh.indices.data();
+        r = pfnGetVisibilityMask_(session_, kViewConfig, eye, XR_VISIBILITY_MASK_TYPE_HIDDEN_TRIANGLE_MESH_KHR, &m);
+        mesh.indices.resize(XR_SUCCEEDED(r) ? m.indexCountOutput : 0);
+        for (uint32_t i = 0; i < m.vertexCountOutput && XR_SUCCEEDED(r); ++i) {
+            mesh.xy.push_back(v[i].x);
+            mesh.xy.push_back(v[i].y);
+        }
+        // Drop triangles that reference missing vertices.
+        const uint32_t nv = static_cast<uint32_t>(mesh.xy.size() / 2);
+        if (std::any_of(mesh.indices.begin(), mesh.indices.end(), [&](uint32_t i) { return i >= nv; })) mesh.indices.clear();
+    }
+    if (XR_FAILED(r)) log_.Warn("xrGetVisibilityMaskKHR(eye {}) failed: {}", eye, Name(r));
+    log_.Info("eye {} hidden area mesh: {} triangles", eye, mesh.indices.size() / 3);
+    SetHiddenAreaMesh(which, std::move(mesh));
 }
 
 void OpenXrBackend::HandleSessionState(XrSessionState s) {

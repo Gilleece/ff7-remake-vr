@@ -1,5 +1,7 @@
 #include "xr_controller.h"
 
+#include "foveation.h"
+
 #include "ff7vr/core/log.h"
 
 #include <algorithm>
@@ -238,6 +240,7 @@ void XrController::TryInit() {
         eyeValid_ = true;
     }
     sessionStarted_ = false;
+    hiddenBackendVersion_ = ~0u;
     lastFrameStats_ = xr::FrameStats{};
     lastStereoQpc_ = 0;
     ready_ = true;
@@ -270,6 +273,17 @@ bool XrController::WaitOne(bool fromGameThread, xr::FrameInfo* out) {
         std::lock_guard lk(eyeMutex_);
         eye_.fov[0] = out->views[0].fov;
         eye_.fov[1] = out->views[1].fov;
+    }
+    if (const uint32_t v = backend_->HiddenAreaMeshVersion(); v != hiddenBackendVersion_) {
+        hiddenBackendVersion_ = v;
+        xr::HiddenAreaMesh m[2];
+        for (int e = 0; e < 2; ++e) backend_->GetHiddenAreaMesh(e == 0 ? xr::Eye::Left : xr::Eye::Right, &m[e]);
+        {
+            std::lock_guard lk(eyeMutex_);
+            hidden_[0] = std::move(m[0]);
+            hidden_[1] = std::move(m[1]);
+        }
+        hiddenVersion_.fetch_add(1);
     }
     {
         std::lock_guard lk(queueMutex_);
@@ -385,6 +399,7 @@ void XrController::LogStats() {
         const std::string line = s->TakeSummary();
         if (!line.empty()) log::info("timing:   {}", line);
     }
+    for (const std::string& line : foveation::TakeTimingLines()) log::info("timing:   {}", line);
     if (!runtimeCalls.empty()) log::info("timing:   {}", runtimeCalls);
 }
 
@@ -721,6 +736,15 @@ void XrController::OnPresent(const PresentInfo& p) {
 // ---------------------------------------------------------------------------
 // Engine interface
 // ---------------------------------------------------------------------------
+bool XrController::GetHiddenArea(int eye, xr::HiddenAreaMesh* out, uint32_t* version) {
+    std::lock_guard lk(eyeMutex_);
+    if (version) *version = hiddenVersion_.load();
+    const xr::HiddenAreaMesh& m = hidden_[eye == 1 ? 1 : 0];
+    if (!eyeValid_ || m.indices.size() < 3) return false;
+    if (out) *out = m;
+    return true;
+}
+
 bool XrController::GetEyeSetup(EyeSetup* out) {
     std::lock_guard lk(eyeMutex_);
     if (out) *out = eye_;
@@ -897,6 +921,7 @@ std::string XrController::Status() {
     log::info("status: {}", counters);
     if (ready) log::info("status: screen layer for a {}x{} {} back buffer", screenW_, screenH_, xr::DxgiFormatName(screenFmt_));
     log::info("status: {}", UiCommand("status").substr(3));
+    log::info("status: {}", foveation::Status());
     Timing& t = GetTiming();
     if (ready)
         for (float ms : backend_->TakeGpuCopyTimes()) t.gpuCopy.Add(ms);

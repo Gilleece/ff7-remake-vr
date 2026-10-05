@@ -1,6 +1,7 @@
 // Entry points of the render module: configuration, hooks, dev commands.
 
 #include "d3d11_hooks.h"
+#include "foveation.h"
 #include "xr_controller.h"
 
 #include "ff7vr/core/dev_commands.h"
@@ -95,7 +96,10 @@ RenderConfig LoadConfig(const StartupContext& ctx) {
     return r;
 }
 
-void OnPresentCb(const PresentInfo& p) { XrController::Get().OnPresent(p); }
+void OnPresentCb(const PresentInfo& p) {
+    foveation::OnPresent(p);  // first: switches variable rate shading off before any of our own work
+    XrController::Get().OnPresent(p);
+}
 void OnResizeCb(IDXGISwapChain* sc) { XrController::Get().OnResize(sc); }
 
 // The game leaves through ExitProcess (or TerminateProcess on itself). Ending the
@@ -175,6 +179,10 @@ void RegisterCommands() {
                       "stereo-test pause <ms> | drop <n>: in mode stereo-test, stop starting frames for <ms> (like a game thread "
                       "blocked by a load) or leave every n-th frame without a stereo image (0 = off)",
                       [](std::string_view args) { return XrController::Get().StereoTestCommand(Lower(std::string(args))); });
+    dev_commands::add("fov",
+                      "fov status | on | off | preset quality|balanced|performance|off | radii <r1> <r2> <r3> | rates <a> <b> <c> | hidden "
+                      "off|coarse|cull | passes scene|all | skip [dxgi formats] | trace | timing: fixed foveated rendering in stereo",
+                      [](std::string_view args) { return foveation::Command(std::string(args)); });
     dev_commands::add("ui",
                       "ui status | on | off | dump <png path> | distance <m> | size <m> | offset <x m> <y m> | follow <0|1> | mirror <0|1>: the in-game "
                       "UI's own layer in stereo",
@@ -198,6 +206,7 @@ bool start(const StartupContext& ctx) {
               cfg.waitOnPresentThread ? "present" : "xr", cfg.screenWidth, cfg.screenDistance, log::narrow(cfg.captureDir.wstring()));
     log::info("render: UI layer in stereo {}: {:.2f} m high at {:.2f} m, offset {:.2f} {:.2f}, {}, image width {}", cfg.uiLayer ? "on" : "off",
               cfg.uiSize, cfg.uiDistance, cfg.uiOffsetX, cfg.uiOffsetY, cfg.uiFollowHead ? "head-locked" : "world-locked", cfg.uiLayerWidth);
+    foveation::Configure(*ctx.config);
     HookCallbacks cb;
     cb.onPresent = &OnPresentCb;
     cb.onResize = &OnResizeCb;
@@ -227,5 +236,8 @@ void SubmitStereoFrame(const StereoSubmit& submit) { XrController::Get().SubmitS
 bool UiLayerWanted() { return g_started.load(std::memory_order_relaxed) && XrController::Get().UiLayerWanted(); }
 bool UiDumpRequested() { return g_started.load(std::memory_order_relaxed) && XrController::Get().UiDumpRequested(); }
 void SubmitUiLayer(const UiLayerSource& source) { XrController::Get().SubmitUiLayer(source); }
+bool FoveationWanted() { return g_started.load(std::memory_order_relaxed) && foveation::Wanted(); }
+void FoveationSceneBegin(const FoveationEye eyes[2]) { foveation::SceneBegin(eyes); }
+void FoveationSceneEnd() { foveation::SceneEnd(); }
 
 }  // namespace ff7vr::render

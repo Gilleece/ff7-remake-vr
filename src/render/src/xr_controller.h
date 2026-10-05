@@ -106,6 +106,9 @@ public:
     StereoFrame BeginGameFrame();
     void SubmitStereoFrame(const StereoSubmit& s);
     bool UiLayerWanted() const;
+    // Any thread. The runtime's hidden area of an eye (cached from the backend; false: none).
+    // `version` changes whenever the mesh does; `out` may be null.
+    bool GetHiddenArea(int eye, xr::HiddenAreaMesh* out, uint32_t* version);
     bool UiDumpRequested() const { return uiDumpRequested_.load(); }
     void SubmitUiLayer(const UiLayerSource& s);
     std::string UiCommand(const std::string& args);
@@ -234,6 +237,9 @@ private:
     std::mutex eyeMutex_;
     EyeSetup eye_{};
     bool eyeValid_ = false;
+    xr::HiddenAreaMesh hidden_[2];       // under eyeMutex_
+    uint32_t hiddenBackendVersion_ = ~0u;  // waiting threads, under waitMutex_
+    std::atomic<uint32_t> hiddenVersion_{0};
 
     // Counters.
     std::atomic<uint64_t> presents_{0}, submittedScreen_{0}, submittedStereo_{0}, presentsWithoutFrame_{0}, submitErrors_{0};
