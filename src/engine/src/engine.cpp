@@ -42,6 +42,7 @@ struct Options {
     bool light_fix = false;
     bool movie_screen = false;
     bool bloom_fix = true;
+    bool ao_fix = true;
     std::string host;  // render | fixed
     // [cvars] section: console variables set when the device is installed (game thread,
     // inside UEngine::Init, before the game creates its viewport and UI).
@@ -199,7 +200,7 @@ void resolve_and_prepare() {
         device::init(g_addr.GNearClippingPlane, g_opt.start_in_stereo, fixed_options());
         movie::init({g_addr.GUObjectArray, g_addr.FNamePool}, g_opt.movie_screen);
         player::init(g_addr.GUObjectArray, g_addr.FNamePool, g_addr.GEngine);
-        bloom_fix::init(g_addr.BloomReduceProcess, g_opt.bloom_fix);
+        bloom_fix::init(g_addr.BloomReduceProcess, g_opt.bloom_fix, g_opt.ao_fix);
         if (!g_tick_hook->create(g_addr.GameEngineVtable, g_addr.slot_Tick / sizeof(void*), &tick_detour)) {
             g_addr.stereo_ok = false;
             g_addr.failure = "could not hook UGameEngine::Tick";
@@ -229,6 +230,7 @@ bool start(const StartupContext& ctx) {
         g_opt.light_fix = cfg.get_bool("stereo", "light_fix", false);
         g_opt.movie_screen = cfg.get_bool("stereo", "movie_screen", false);
         g_opt.bloom_fix = cfg.get_bool("stereo", "bloom_fix", true);
+        g_opt.ao_fix = cfg.get_bool("stereo", "ao_fix", true);
         fixes::set_vr_window_size(cfg.get_string("stereo", "vr_window", "1280x720"));
         device::Settings& s = device::settings();
         s.world_scale = static_cast<float>(cfg.get_float("stereo", "world_scale", 1.0));

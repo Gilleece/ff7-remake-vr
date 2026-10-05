@@ -29,12 +29,22 @@ struct ID3D11Texture2D;
 namespace ff7vr::engine::bloom_fix {
 
 // reduce_process: the first-level reduce pass's Process function (signature
-// "Bloom reduce pass Process"). Installs the render-thread hook.
-bool init(std::uintptr_t reduce_process, bool enabled);
+// "Bloom reduce pass Process"). Installs the render-thread hook. ao_enabled: the ambient
+// occlusion fix below, which needs no address.
+bool init(std::uintptr_t reduce_process, bool enabled, bool ao_enabled);
 void set_enabled(bool on);
 bool enabled();
 // RHI thread, once per stereo frame: makes sure the context hooks are in place.
 void frame(ID3D11Texture2D* any_texture);
 std::string status();
+
+// Square Enix's ambient occlusion has the same fault (its half-size pass at the origin read
+// the right view's full-size setup texture relative to the origin, so the right eye got the
+// left eye's occlusion: a dark copy of nearby objects at the left eye's image positions).
+// Fixed with the same scratch copy, recognised on the RHI thread from the draw sequence
+// (bloom_fix.cpp, ao_fix). [stereo] ao_fix, dev command "stereo aofix".
+void set_ao_enabled(bool on);
+bool ao_enabled();
+std::string ao_status();
 
 }  // namespace ff7vr::engine::bloom_fix

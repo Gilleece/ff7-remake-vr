@@ -50,10 +50,31 @@ struct Armed {
     std::int32_t x = 0, y = 0, w = 0, h = 0;
 };
 Armed g_armed;
-ID3D11Texture2D* g_scratch = nullptr;
-ID3D11ShaderResourceView* g_scratch_srv = nullptr;
-D3D11_TEXTURE2D_DESC g_scratch_desc{};
-D3D11_SHADER_RESOURCE_VIEW_DESC g_scratch_srv_desc{};
+
+// Scratch textures (RHI thread): the size and format of the input they stand in for. Two
+// slots, so the bloom input and the ambient occlusion input do not evict each other when
+// their formats differ.
+struct Scratch {
+    ID3D11Texture2D* tex = nullptr;
+    ID3D11ShaderResourceView* srv = nullptr;
+    D3D11_TEXTURE2D_DESC desc{};
+    D3D11_SHADER_RESOURCE_VIEW_DESC view{};
+    std::uint64_t last_use = 0;
+};
+Scratch g_scratch[2];
+std::uint64_t g_use_clock = 0;
+
+// Ambient occlusion fix (RHI thread): the last full-screen draw's render target and viewport.
+std::atomic<bool> g_ao_enabled{false};
+struct LastFullscreen {
+    ID3D11Resource* target = nullptr;  // compared only, no reference held
+    D3D11_VIEWPORT vp{};
+};
+LastFullscreen g_last;
+struct AoCounters {
+    std::atomic<std::uint64_t> applied{0}, failed{0};
+};
+AoCounters g_ao;
 
 void execute(void*, rhi::Command* self) {
     auto* c = reinterpret_cast<Command*>(self);
@@ -111,20 +132,24 @@ void __fastcall process_detour(void* pass, void* context) {
     g_hook.original<ProcessFn>()(pass, context);
 }
 
-void release_scratch() {
-    if (g_scratch_srv) g_scratch_srv->Release();
-    if (g_scratch) g_scratch->Release();
-    g_scratch_srv = nullptr;
-    g_scratch = nullptr;
+void release_scratch(Scratch& s) {
+    if (s.srv) s.srv->Release();
+    if (s.tex) s.tex->Release();
+    s = Scratch{};
 }
 
 // RHI thread: a scratch texture like the input with one mip, and a view of it like the
 // engine's view of the input.
-bool ensure_scratch(ID3D11Device* dev, const D3D11_TEXTURE2D_DESC& src, const D3D11_SHADER_RESOURCE_VIEW_DESC& view) {
-    if (g_scratch && g_scratch_desc.Width == src.Width && g_scratch_desc.Height == src.Height && g_scratch_desc.Format == src.Format &&
-        g_scratch_srv_desc.Format == view.Format)
-        return true;
-    release_scratch();
+Scratch* ensure_scratch(ID3D11Device* dev, const D3D11_TEXTURE2D_DESC& src, const D3D11_SHADER_RESOURCE_VIEW_DESC& view) {
+    ++g_use_clock;
+    for (Scratch& s : g_scratch) {
+        if (s.tex && s.desc.Width == src.Width && s.desc.Height == src.Height && s.desc.Format == src.Format && s.view.Format == view.Format) {
+            s.last_use = g_use_clock;
+            return &s;
+        }
+    }
+    Scratch& s = g_scratch[0].last_use <= g_scratch[1].last_use ? g_scratch[0] : g_scratch[1];
+    release_scratch(s);
     D3D11_TEXTURE2D_DESC d{};
     d.Width = src.Width;
     d.Height = src.Height;
@@ -134,32 +159,27 @@ bool ensure_scratch(ID3D11Device* dev, const D3D11_TEXTURE2D_DESC& src, const D3
     d.SampleDesc.Count = 1;
     d.Usage = D3D11_USAGE_DEFAULT;
     d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-    if (FAILED(dev->CreateTexture2D(&d, nullptr, &g_scratch)) || !g_scratch) return false;
+    if (FAILED(dev->CreateTexture2D(&d, nullptr, &s.tex)) || !s.tex) return nullptr;
     D3D11_SHADER_RESOURCE_VIEW_DESC v{};
     v.Format = view.Format;
     v.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
     v.Texture2D.MostDetailedMip = 0;
     v.Texture2D.MipLevels = 1;
-    if (FAILED(dev->CreateShaderResourceView(g_scratch, &v, &g_scratch_srv)) || !g_scratch_srv) {
-        release_scratch();
-        return false;
+    if (FAILED(dev->CreateShaderResourceView(s.tex, &v, &s.srv)) || !s.srv) {
+        release_scratch(s);
+        return nullptr;
     }
-    g_scratch_desc = d;
-    g_scratch_srv_desc = v;
-    log::info("bloom fix: scratch texture {}x{} format {}", d.Width, d.Height, static_cast<int>(d.Format));
-    return true;
+    s.desc = d;
+    s.view = v;
+    s.last_use = g_use_clock;
+    log::info("post-process fix: scratch texture {}x{} format {}", d.Width, d.Height, static_cast<int>(d.Format));
+    return &s;
 }
 
-bool on_draw_indexed(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_trace::DrawIndexedFn original) {
-    if (!g_armed.active) return false;
-    const Armed a = g_armed;
-    g_armed.active = false;
-    ID3D11ShaderResourceView* srv = nullptr;
-    ctx->PSGetShaderResources(0, 1, &srv);
-    if (!srv) {
-        ++g_count.missed;
-        return false;
-    }
+// Runs the draw with shader resource 0 replaced by a scratch copy whose origin holds the
+// rectangle (x, y, w, h) of the bound input. False if the input does not fit.
+bool draw_with_shifted_input(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* srv, std::int32_t x, std::int32_t y, std::int32_t w,
+                             std::int32_t h, UINT count, UINT start, INT base, gpu_trace::DrawIndexedFn original) {
     bool done = false;
     ID3D11Resource* res = nullptr;
     srv->GetResource(&res);
@@ -172,34 +192,97 @@ bool on_draw_indexed(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base,
         srv->GetDesc(&vd);
         ID3D11Device* dev = nullptr;
         ctx->GetDevice(&dev);
-        const bool fits = td.SampleDesc.Count == 1 && a.x >= 0 && a.y >= 0 && static_cast<UINT>(a.x + a.w) <= td.Width &&
-                          static_cast<UINT>(a.y + a.h) <= td.Height && vd.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2D;
-        if (dev && fits && ensure_scratch(dev, td, vd)) {
-            const D3D11_BOX box{static_cast<UINT>(a.x), static_cast<UINT>(a.y), 0, static_cast<UINT>(a.x + a.w), static_cast<UINT>(a.y + a.h), 1};
-            ctx->CopySubresourceRegion(g_scratch, 0, 0, 0, 0, res, D3D11CalcSubresource(vd.Texture2D.MostDetailedMip, 0, td.MipLevels), &box);
-            ctx->PSSetShaderResources(0, 1, &g_scratch_srv);
+        const bool fits = td.SampleDesc.Count == 1 && x >= 0 && y >= 0 && w > 0 && h > 0 && static_cast<UINT>(x + w) <= td.Width &&
+                          static_cast<UINT>(y + h) <= td.Height && vd.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2D;
+        Scratch* s = (dev && fits) ? ensure_scratch(dev, td, vd) : nullptr;
+        if (s) {
+            const D3D11_BOX box{static_cast<UINT>(x), static_cast<UINT>(y), 0, static_cast<UINT>(x + w), static_cast<UINT>(y + h), 1};
+            ctx->CopySubresourceRegion(s->tex, 0, 0, 0, 0, res, D3D11CalcSubresource(vd.Texture2D.MostDetailedMip, 0, td.MipLevels), &box);
+            ctx->PSSetShaderResources(0, 1, &s->srv);
             original(ctx, count, start, base);
             ctx->PSSetShaderResources(0, 1, &srv);
             done = true;
-            ++g_count.applied;
         }
         if (dev) dev->Release();
     }
-    if (!done) ++g_count.missed;
     if (res) res->Release();
+    return done;
+}
+
+// Square Enix's ambient occlusion has the same fault as the bloom: each view's full-size
+// setup pass writes at the view's rectangle, and the next pass, a half-size pass at the origin
+// of its own target, reads that setup texture relative to the origin, so the right view's
+// occlusion was computed from the left view's setup. Recognised on the RHI thread by its
+// shape: a full-screen draw at the origin whose input (shader resource 0) is the target the
+// previous full-screen draw wrote at a rectangle that does not start at the origin, and whose
+// viewport is at most half as wide. Stock passes keep a view at its own rectangle in every
+// intermediate target, so they never draw at the origin for the right view.
+bool ao_fix(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_trace::DrawIndexedFn original) {
+    ID3D11RenderTargetView* rtv = nullptr;
+    ctx->OMGetRenderTargets(1, &rtv, nullptr);
+    ID3D11Resource* target = nullptr;
+    if (rtv) {
+        rtv->GetResource(&target);
+        rtv->Release();
+    }
+    D3D11_VIEWPORT vp{};
+    UINT nvp = 1;
+    ctx->RSGetViewports(&nvp, &vp);
+    const LastFullscreen prev = g_last;
+    g_last = LastFullscreen{target, vp};
+    if (target) target->Release();  // the pointer is only compared
+    if (!target || nvp == 0 || !prev.target || prev.target == target) return false;
+    const bool prev_offset = prev.vp.TopLeftX >= 1.0f && prev.vp.TopLeftY == 0.0f && prev.vp.Width >= 2.0f;
+    const bool at_origin = vp.TopLeftX == 0.0f && vp.TopLeftY == 0.0f && vp.Width * 2.0f <= prev.vp.Width + 2.0f;
+    if (!prev_offset || !at_origin) return false;
+    ID3D11ShaderResourceView* srv = nullptr;
+    ctx->PSGetShaderResources(0, 1, &srv);
+    if (!srv) return false;
+    ID3D11Resource* input = nullptr;
+    srv->GetResource(&input);
+    bool done = false;
+    if (input == prev.target) {
+        done = draw_with_shifted_input(ctx, srv, static_cast<std::int32_t>(prev.vp.TopLeftX), 0, static_cast<std::int32_t>(prev.vp.Width),
+                                       static_cast<std::int32_t>(prev.vp.Height), count, start, base, original);
+        ++(done ? g_ao.applied : g_ao.failed);
+    }
+    if (input) input->Release();
+    srv->Release();
+    return done;
+}
+
+bool on_draw_indexed(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_trace::DrawIndexedFn original) {
+    if (!g_armed.active) {
+        // Full-screen passes are one triangle.
+        if (count == 3 && g_ao_enabled.load(std::memory_order_relaxed) && device::active()) return ao_fix(ctx, count, start, base, original);
+        return false;
+    }
+    const Armed a = g_armed;
+    g_armed.active = false;
+    g_last = LastFullscreen{};
+    ID3D11ShaderResourceView* srv = nullptr;
+    ctx->PSGetShaderResources(0, 1, &srv);
+    if (!srv) {
+        ++g_count.missed;
+        return false;
+    }
+    const bool done = draw_with_shifted_input(ctx, srv, a.x, a.y, a.w, a.h, count, start, base, original);
+    ++(done ? g_count.applied : g_count.missed);
     srv->Release();
     return done;
 }
 
 }  // namespace
 
-bool init(std::uintptr_t reduce_process, bool enabled) {
+bool init(std::uintptr_t reduce_process, bool enabled, bool ao_enabled) {
+    gpu_trace::set_draw_indexed_override(&on_draw_indexed);
+    g_ao_enabled = ao_enabled;
+    log::info("ambient occlusion fix: {}", ao_enabled ? "on" : "off ([stereo] ao_fix = 0)");
     if (!reduce_process) {
         log::warn("bloom fix: reduce pass not found; the right eye keeps the left eye's bloom");
         return false;
     }
     if (!g_hook.create(reinterpret_cast<void*>(reduce_process), &process_detour)) return false;
-    gpu_trace::set_draw_indexed_override(&on_draw_indexed);
     g_enabled = enabled;
     log::info("bloom fix: hook on the bloom reduce pass installed ({})", enabled ? "on" : "off ([stereo] bloom_fix = 0)");
     return true;
@@ -207,17 +290,25 @@ bool init(std::uintptr_t reduce_process, bool enabled) {
 
 void set_enabled(bool on) { g_enabled = on && g_hook.installed(); }
 bool enabled() { return g_enabled.load(); }
+void set_ao_enabled(bool on) { g_ao_enabled = on; }
+bool ao_enabled() { return g_ao_enabled.load(); }
 
 void frame(ID3D11Texture2D* any_texture) {
     // A rectangle that no draw took this frame (hooks not in place yet) is not carried over.
     g_armed.active = false;
-    if (g_enabled.load(std::memory_order_relaxed)) gpu_trace::install_context_hooks(any_texture);
+    g_last = LastFullscreen{};
+    if (g_enabled.load(std::memory_order_relaxed) || g_ao_enabled.load(std::memory_order_relaxed)) gpu_trace::install_context_hooks(any_texture);
 }
 
 std::string status() {
     return std::format("bloom fix {}: reduce passes {} queued {} queue failures {} applied {} missed {}", g_enabled.load() ? "on" : "off",
                        g_count.passes.load(), g_count.queued.load(), g_count.queue_failed.load(), g_count.applied.load(),
                        g_count.missed.load());
+}
+
+std::string ao_status() {
+    return std::format("ambient occlusion fix {}: applied {} failed {}", g_ao_enabled.load() ? "on" : "off", g_ao.applied.load(),
+                       g_ao.failed.load());
 }
 
 }  // namespace ff7vr::engine::bloom_fix
