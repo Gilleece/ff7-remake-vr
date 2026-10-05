@@ -312,9 +312,10 @@ Known problems:
 
 - **The picture looks washed out and too bright in the headset.** Cause not known
   yet. It is there with HDR off in the game's options and the game's brightness
-  setting at 0. Switching bloom off makes it a little better: add a section
-  `[stereo_cvars]` to `ff7vr.ini` with the line `r.BloomQuality = 0` (console
-  variables in that section apply only while 3D runs).
+  setting at 0. Switching bloom off makes it a little better: in `ff7vr.ini`, section
+  `[stereo_cvars]` at the end, remove the `;` at the start of the line
+  `; r.BloomQuality = 0` (console variables in that section apply only while 3D
+  runs).
 - **Indoors, exposed skin on characters shows a white pixelated pattern.** Outdoors
   it looks fine. Seen in the first interior of the save used in testing; cause not
   known yet.
