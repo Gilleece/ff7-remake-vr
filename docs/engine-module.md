@@ -731,7 +731,10 @@ lets the game draw the UI for both eyes again; `uihook status` shows the counter
 
 ## Trying the camera in the headset
 
-What to try first, in this order:
+What to try first, in this order. Throughout: End (View/Back + left stick click) recenters
+when the view is not straight ahead, Insert (View/Back + Start) falls back to the virtual
+screen when something looks wrong in 3D, and pressed again goes back to 3D or reconnects.
+
 
 1. **Third person, walking and orbiting.** Walk around and move the right stick (or the
    mouse) up and down. The player's height should stay at the character's shoulder level
