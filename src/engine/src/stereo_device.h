@@ -26,6 +26,8 @@ struct Settings {
     std::atomic<int> mirror{static_cast<int>(mirror::Mode::Crop)};
     std::atomic<int> log_frames{0};            // log the eye cameras of the next N stereo frames
     std::atomic<bool> swap_rects{false};       // test: right eye in the left half of the target, left eye in the right half
+    std::atomic<int> frame_window_ms{10000};   // length of a frame time measurement window
+    std::atomic<bool> frame_window_reset{false};  // start a new window at the next frame (discards the current one)
 };
 Settings& settings();
 

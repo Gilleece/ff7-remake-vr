@@ -17,6 +17,7 @@
 //   stereo host <render|fixed>    switch where eye size and views come from
 //   stereo bloomfix [0|1]         right-eye bloom fix (bloom_fix.h), with its counters
 //   stereo movie [on|off]         movie detection (movie_watch.h), with its state
+//   stereo frametime <s>          frame time window length in seconds; restarts the window
 //   stereo swap <0|1>             test: right eye rendered into the left half and vice versa, to tell
 //                                 bugs that follow the view's position from bugs that follow its index
 //   re peek <rva> <n>, re poke <rva> <hex bytes>
@@ -221,6 +222,11 @@ std::string stereo_command(const std::vector<std::string>& a) {
         if (a.size() == 3 && (a[2] == "on" || a[2] == "off")) movie::set_enabled(a[2] == "on");
         if (a.size() == 4 && a[2] == "menu") movie::set_include_menu(a[3] == "1");
         return "ok " + movie::status();
+    }
+    if (c == "frametime" && a.size() == 3 && to_float(a[2], v[0]) && v[0] >= 1 && v[0] <= 600) {
+        s.frame_window_ms = static_cast<int>(v[0] * 1000);
+        s.frame_window_reset = true;
+        return std::format("ok frame time window {} s, restarted", v[0]);
     }
     if (c == "swap" && a.size() == 3) {
         s.swap_rects = a[2] == "1";

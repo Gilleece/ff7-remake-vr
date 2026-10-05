@@ -135,6 +135,11 @@ struct FrameTimer {
 
     void tick(bool stereo) {
         const auto now = std::chrono::steady_clock::now();
+        if (g_settings.frame_window_reset.exchange(false)) {
+            samples.clear();
+            window_start = now;
+            window_stereo_all = true;
+        }
         if (last.time_since_epoch().count() != 0) {
             samples.push_back(std::chrono::duration<float, std::milli>(now - last).count());
             window_stereo_all = window_stereo_all && stereo;
@@ -142,7 +147,7 @@ struct FrameTimer {
             window_start = now;
         }
         last = now;
-        if (now - window_start >= std::chrono::seconds(10) && samples.size() >= 10) {
+        if (now - window_start >= std::chrono::milliseconds(g_settings.frame_window_ms.load()) && samples.size() >= 10) {
             std::vector<float> s = samples;
             std::sort(s.begin(), s.end());
             double sum = 0;
