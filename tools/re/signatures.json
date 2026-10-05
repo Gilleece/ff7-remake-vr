@@ -766,6 +766,112 @@
       },
       "expect": "0x53a49e4",
       "desc": "float GNearClippingPlane (engine near plane in cm). Read by the engine's own GetStereoProjectionMatrix and used as the Z term of the reversed-Z infinite projection."
+    },
+    {
+      "name": "FDeferredShadingSceneRenderer::Render",
+      "kind": "function",
+      "pattern": "40 55 53 56 57 41 56 48 8D AC 24 80 FD FF FF",
+      "resolve": {
+        "type": "match",
+        "offset": 0
+      },
+      "expect": "0x21e64a0",
+      "desc": "The scene renderer's Render (render thread). After the scene and before post-processing it runs the in-game UI pass once per view (BeginRenderingInGameUI / UI render delegates / EndRenderingInGameUI), gated by the view family's in-game UI flag. STATIC.",
+      "howto": "The only function that calls both BeginRenderingInGameUI and FPostProcessing::Process; its vtable slot is the only data reference (0x4d56a10)."
+    },
+    {
+      "name": "GSceneRenderTargets",
+      "kind": "global",
+      "pattern": "48 8D 0D ?? ?? ?? ?? 4C 69 C0 B0 28 00 00 48 8B D6 4C 03 87 D0 00 00 00 E8 ?? ?? ?? ?? 84 C0",
+      "resolve": {
+        "type": "rip",
+        "insn": 0,
+        "disp": 3,
+        "len": 7
+      },
+      "expect": "0x5923ad0",
+      "desc": "The FSceneRenderTargets object (static, not per view) passed as `this` to the in-game UI functions; +0x110 is the pooled InGameUIRenderTarget. STATIC.",
+      "howto": "lea rcx before the call to BeginRenderingInGameUI in the per-view UI loop of FDeferredShadingSceneRenderer::Render (views are 0x28B0 bytes, Views.Data at renderer +0xD0)."
+    },
+    {
+      "name": "FSceneRenderTargets::BeginRenderingInGameUI",
+      "kind": "function",
+      "pattern": "40 55 53 56 57 41 57 48 8D AC 24 F0 FE FF FF 48 81 EC 10 02 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 00 01 00 00 45 33 FF 4C 8D 89 10 01 00 00",
+      "resolve": {
+        "type": "match",
+        "offset": 0
+      },
+      "expect": "0x2541670",
+      "desc": "bool (FSceneRenderTargets* this, FRHICommandListImmediate&, const FViewInfo& View) (name ours). Allocates the pooled target InGameUIRenderTarget when this+0x110 is null (FindFreeElement 0x253d6b0, PF_B8G8R8A8, flags TexCreate_SRGB, targetable, 1920x1080 / 3840x2160 when GSystemResolution.ResX > 1920 / r.InGameUI.FixedWidth x FixedHeight), binds its targetable texture with a clear and sets the viewport (0,0,W,H). Returns true. The view argument is not used by this function. STATIC; LIVE (hooked by the mod).",
+      "howto": "The only code reference to L\"InGameUIRenderTarget\"."
+    },
+    {
+      "name": "FSceneRenderTargets::InGameUIRenderTarget",
+      "kind": "offset",
+      "pattern": "40 55 53 56 57 41 57 48 8D AC 24 F0 FE FF FF 48 81 EC 10 02 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 00 01 00 00 45 33 FF 4C 8D 89 10 01 00 00",
+      "resolve": {
+        "type": "i32",
+        "offset": 45
+      },
+      "expect": "0x110",
+      "desc": "TRefCountPtr<IPooledRenderTarget> InGameUIRenderTarget in FSceneRenderTargets (lea r9,[rcx+110h] = FindFreeElement's out parameter). IPooledRenderTarget +8 TargetableTexture, +0x10 ShaderResourceTexture. Every InGameUITexture binding reads it as the global GSceneRenderTargets+0x110 (0x5923be0). STATIC."
+    },
+    {
+      "name": "FSceneRenderTargets::InGameUISize",
+      "kind": "offset",
+      "pattern": "89 87 40 02 00 00 89 8F 44 02 00 00",
+      "resolve": {
+        "type": "i32",
+        "offset": 2
+      },
+      "expect": "0x240",
+      "desc": "FIntPoint size of the in-game UI target in FSceneRenderTargets (+0x240 X, +0x244 Y), written by BeginRenderingInGameUI when it allocates. STATIC."
+    },
+    {
+      "name": "FSceneRenderTargets::EndRenderingInGameUI",
+      "kind": "function",
+      "pattern": "48 8B C4 48 89 58 08 48 89 68 10 48 89 70 18 48 89 78 20 41 56 48 83 EC 50 66 0F 6F 05 ?? ?? ?? ?? 48 8B F2 66 0F 6F 0D ?? ?? ?? ?? 48 8B 5A 30 F3 0F 7F 40 C8 48 83 C3 07 66 0F 6F 05 ?? ?? ?? ?? F3 0F 7F 40 E8 F3 0F 7F 48 D8 48 8B 81 10 01 00 00",
+      "resolve": {
+        "type": "match",
+        "offset": 0
+      },
+      "expect": "0x2541910",
+      "desc": "void (FSceneRenderTargets* this, FRHICommandListImmediate&) (name ours). Ends the UI pass: records a copy-to-resolve of the UI target (targetable -> shader resource; the same texture here). Called after the UI render delegates, once per view that ran the pass. STATIC; LIVE (hooked by the mod)."
+    },
+    {
+      "name": "FSceneViewFamily in-game UI flag",
+      "kind": "offset",
+      "pattern": "F6 47 4C 80 0F 84",
+      "resolve": {
+        "type": "u8",
+        "offset": 2
+      },
+      "expect": "0x4c",
+      "desc": "test byte [renderer+4Ch], 80h in FDeferredShadingSceneRenderer::Render: the renderer's ViewFamily copy starts at +0x10, so the flag is bit 0x80 of the byte at FSceneViewFamily+0x3C. When it is clear the UI pass is skipped, and every material shader's InGameUITexture binding (about 320 inlined sites `test byte ptr [r14+3Ch], 80h` with r14 = View.Family) binds the engine's fallback texture (FTexture* at 0x594c370, TextureRHI +0x30) instead of InGameUIRenderTarget->ShaderResourceTexture, so nothing is composited. STATIC; LIVE (clearing it after the UI pass removes the UI from the eye images)."
+    },
+    {
+      "name": "IRendererModule slot HasInGameUIDelegates (A)",
+      "kind": "slot",
+      "pattern": "49 8B 04 24 49 8B CC FF 90 50 01 00 00 84 C0 74 1A",
+      "resolve": {
+        "type": "i32",
+        "offset": 9
+      },
+      "expect": "0x150",
+      "desc": "Render's UI pass asks the Renderer module (GetRendererModule(), cached at 0x5831000) +0x150 / +0x170 whether UI render delegates are registered and calls +0x148 / +0x168 (View, RHICmdList, SceneContext) to draw them (names ours; the shape of UE 4.18's RenderPostOpaqueExtensions / RenderOverlayExtensions). The game's UMG UI is drawn through these delegates. STATIC."
+    },
+    {
+      "name": "FPostProcessing::Process",
+      "kind": "function",
+      "pattern": "48 8D 0D ?? ?? ?? ?? 4C 03 87 D0 00 00 00 E8 ?? ?? ?? ?? FF C3 3B 9F D8 00 00 00 7C D1 48 8B CE",
+      "resolve": {
+        "type": "rip",
+        "insn": 14,
+        "disp": 1,
+        "len": 5
+      },
+      "expect": "0x251c230",
+      "desc": "Post-processing of one view, called per view at the end of FDeferredShadingSceneRenderer::Render after the UI pass (this = GPostProcessing at 0x582893e). The UI composite happens inside it. Name INFERRED (UE 4.18 call shape)."
     }
   ]
 }
