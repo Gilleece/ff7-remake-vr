@@ -94,7 +94,8 @@ autosaves as usual).
 - **On the monitor:** the game starts as usual. As soon as the 3D view is running in
   the headset, the mod switches the game to a 1280x720 window (the 3D rendering does
   not work in the game's fullscreen modes); the window shows a cropped view of the
-  left eye with the HUD drawn over it.
+  left eye with the HUD drawn over it. This only lasts for the session: the game's
+  display setting is not changed, and the next start is in your normal display mode.
 - **In the headset, title screen, menus and loading screens:** the game on a flat
   virtual screen, 1.8 m wide, 2 m in front of you at eye height.
 - **In the headset, in the world:** the 3D scene around you, **in first person**:
@@ -283,9 +284,12 @@ Known problems:
   (3 to 6 degrees towards the edges). `[ui] size = 1.57` lines them up; the larger
   default is easier to read.
 - **The game window becomes 1280x720 while 3D runs** if the game was in a fullscreen
-  mode, and is not switched back when the game exits. Whether the game remembers the
-  small window for the next flat session is untested; if it does, set the display
-  mode again in the game's options.
+  mode, and stays that way until the game exits (switching 3D off with Insert does not
+  change it back). The game does not remember it: your display setting is not changed,
+  and the next start, with or without the mod, is in your normal display mode. Checked
+  for quitting in 3D, quitting from the virtual screen and the game being killed. Not
+  checked: changing the game's graphics options while the window is switched; leave
+  them alone during a VR session.
 - **Battle detection unverified.** If battles stay in first person, switch with Home
   or View/Back + right stick click, and send the log. If it misfires outside battles,
   set `battle_signal =` (empty) and `default = 0`.

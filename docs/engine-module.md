@@ -683,6 +683,41 @@ while stereo renders and the old mode after `stereo off`; the eye captures `wb_s
 and `wx_stereo_*` are correct). The desktop window is only a mirror in VR, and a small one
 also costs less to draw.
 
+### What the game remembers
+
+The window mode the mod sets is not saved. The game keeps its display options (display
+mode, resolution) in its own options save, `ff7remakedevice.sav` in the Steam save folder
+(next to `ff7remakecommon.sav` and the slots; the function at RVA `0xb27700` builds both
+names from the strings `device` and `common`, inferred, not traced further). The engine's
+`GameUserSettings.ini` is not used: `Saved\Config\WindowsNoEditor` holds only the
+player's own `Engine.ini`. `r.SetRes` changes the live `GSystemResolution` and the window,
+and the game did not write the options save (or any other file) on any exit below, so the
+switched window is not carried over to the next start.
+
+Checked with the game started the way the launcher starts it (`-d3d11` only, no window
+switches, so in the saved mode: windowed fullscreen, `fixes: game window 1920x1080wf ->
+1280x720w`), the Null backend (stereo is active from the title screen, so the switch
+happens there), and every file in the save folder and `Saved\Config` hashed before and
+after each run (`captures/window-persist/`, `steps.txt` and `snap-*.txt` per run):
+
+| Run, in this order | How it ended | Files changed | Mode at the next start |
+|---|---|---|---|
+| A | window closed in 3D (`WM_CLOSE`, as Alt+F4 or the close button): the game's own shutdown, 2 s (`render: ExitProcess: ending the XR session` from the game thread) | none | `1920x1080wf` (run B's log) |
+| B | 3D switched off with Insert (`stereo status`: wanted 0, active 0; the virtual screen; window still 1280x720), then window closed: the same shutdown, 2 s | none | `1920x1080wf` (run C's log) |
+| C | process killed in 3D (as a crash or Task Manager) | none | see D |
+| D | plain game, no mod, Luma in place: window covers the whole monitor (rect -7,-29, 2575x1477 in the 150 % scaled desktop of 2560x1440), capture 3840x2160 | none | — |
+| E | mod with `[stereo] enabled = 0`: no switch, title capture 3840x2160 | — | — |
+
+Nothing was written while the switched game ran either (snapshot taken in 3D before each
+exit). The only file the game creates is the UE4 crash reporter's
+`CrashReportClient.ini` (a new folder on every start, also without the mod). Afterwards
+every file of the save backup taken that morning (slots, `ff7remakedevice.sav`,
+`ff7remakecommon.sav`, `Engine.ini`) still had the same hash. Closing the package
+launcher does not end the game, so it is not an exit of its own. Not covered: the game's
+own Quit menu entry (not reachable with scripted input), and changing a setting in the
+game's graphics options while the window is switched; the game might then save the
+window as the display mode.
+
 The switch also exposed a crash: the desktop mirror kept a view of the back buffer, so any
 `ResizeBuffers` of the game while stereo rendered (window mode or size change) failed with
 `DXGI_ERROR_INVALID_CALL` and the game terminated. The mirror now makes the view for each
