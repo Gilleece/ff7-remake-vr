@@ -10,14 +10,26 @@ It is written for this one game (the Steam build, file version 1.0.0.7, Direct3D
 and talks to the headset through OpenXR. The target setup is a Meta Quest 3 through
 Virtual Desktop.
 
-## State: new, and not yet tried in a headset
+This is an unofficial fan project, not affiliated with or endorsed by Square Enix.
+The game is not included: you need your own copy on Steam.
 
-**Everything described here was built and tested on a PC without a headset.** The
-3D rendering, first and third person, the floating HUD panel, the virtual screen and
-the hand-over between them were checked with a simulated headset (an internal test mode and SteamVR's
-"null" driver, a virtual headset that shows the images in a window) and with
-screenshots of each eye. Nobody has looked at it through a lens yet. Expect rough
-edges, and read [Known problems and what has not been tested](#known-problems-and-what-has-not-been-tested)
+## State: early, played in a headset only on one PC
+
+The mod has been played on a Meta Quest 3 through Virtual Desktop (its OpenXR
+runtime, VDXR), at 3072x3264 pixels per eye and 72 and 90 Hz, on the development PC
+(RTX 5080, Ryzen 7 5800X3D). There the 3D rendering works, with an image for each
+eye at the headset's resolution. A ghost image in the right eye, found from eye
+images captured during a headset session, has been fixed and the fix confirmed in the
+headset: the game's ambient occlusion pass computed the right eye's occlusion from
+the left eye's data (the fix is `[stereo] ao_fix`, on by default).
+
+Much of the rest was built and tested on a PC without a headset, with a simulated
+headset (an internal test mode and SteamVR's "null" driver, a virtual headset that
+shows the images in a window) and with screenshots of each eye. Some faults are known
+in the headset and not solved yet (the picture looks washed out, skin indoors), and
+battles, conversations, cutscenes and movies have not been tried in a headset at all.
+Expect rough edges, and read
+[Known problems and what has not been tested](#known-problems-and-what-has-not-been-tested)
 before the first session.
 
 ## Requirements
@@ -188,8 +200,10 @@ the package folder. The ones you are most likely to touch on day one:
 
 ## Performance
 
-How it performs in a headset has not been measured: no headset was used during
-development. Judge it on your own setup, against whatever you compare it with.
+In the first headset session on the development PC (RTX 5080, Ryzen 7 5800X3D;
+Quest 3 through Virtual Desktop, 3072x3264 per eye) frame times were mostly 11.5 to
+14 ms, and 28 ms during one heavy minute: below 90 Hz at full resolution in places.
+That is one PC and one session; judge it on your own setup.
 
 The mod logs its own frame timing. Every 10 seconds `ff7vr.log` gets a `timing:`
 block: the frame rate over those 10 seconds, the mode (`screen` = virtual screen,
@@ -260,13 +274,14 @@ session it is `ff7vr.log` in the game's `End\Binaries\Win64` folder).
 
 Not tested at all:
 
-- **A real headset.** Nothing has been seen through a lens: not the image sharpness,
-  comfort, scale, stereo depth, the HUD panel's size and distance, or how foveated
-  rendering looks behind the lenses. With Virtual Desktop and no headset connected,
-  only this was checked: the game runs flat and the mod retries every 5 seconds.
+- **Other headsets and PCs.** The mod has been played only on a Meta Quest 3 through
+  Virtual Desktop, on one PC, in the first areas of one save game (Sector 7 slums,
+  indoors and the street). There the 3D
+  rendering works and the right-eye ghost fix was confirmed. Other headsets, Virtual
+  Desktop settings, graphics cards and OpenXR runtimes have not been tried.
 - **Combat, conversations, real-time cutscenes, loading screens between areas,
-  pre-rendered movies, the pause menu.** None of these was reached in testing; they
-  are for you to try. What to look for: a battle should switch to third person and
+  pre-rendered movies, the pause menu.** None of these was reached in testing
+  without a headset or tried in one; they are for you to try. What to look for: a battle should switch to third person and
   back (the battle detection is an educated guess: it reads a battle scene ID that
   is empty outside battles, but it has never been seen in a battle); scripted camera
   shots should be shown as the game frames them (the mod then uses the game's
@@ -293,6 +308,17 @@ Not tested at all:
 
 Known problems:
 
+- **The picture looks washed out and too bright in the headset.** Cause not known
+  yet. It is there with HDR off in the game's options and the game's brightness
+  setting at 0. Switching bloom off makes it a little better: add a section
+  `[stereo_cvars]` to `ff7vr.ini` with the line `r.BloomQuality = 0` (console
+  variables in that section apply only while 3D runs).
+- **Indoors, exposed skin on characters shows a white pixelated pattern.** Outdoors
+  it looks fine. Seen in the first interior of the save used in testing; cause not
+  known yet.
+- **Posters on a sandwich board** in the Sector 7 slums street sat on the board only
+  when looked at directly and drifted off it otherwise. This was seen before the
+  right-eye ghost fix and has not been checked since.
 - **Smooth turning only.** The game camera turns you smoothly, as in the flat game;
   there is no snap turn. This can be uncomfortable for some players.
 - **Markers over enemies and objects are slightly off** on the default HUD panel
@@ -321,9 +347,9 @@ Known problems:
   aberration are switched off while 3D runs.
 - **Square Enix's lens glare effect** may appear in the wrong eye in scenes that use
   it (not seen in testing).
-- Frame pacing with Virtual Desktop is unknown: with SteamVR's virtual headset the
-  runtime sometimes blocked for 6 to 7 ms per frame during the first 15 to 20
-  seconds of a session.
+- Frame pacing with Virtual Desktop has not been measured beyond the mod's own frame
+  times (see "Performance"). With SteamVR's virtual headset the runtime sometimes
+  blocked for 6 to 7 ms per frame during the first 15 to 20 seconds of a session.
 
 ## When something is wrong: what to send
 
