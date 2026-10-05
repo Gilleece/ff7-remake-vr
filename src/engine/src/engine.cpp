@@ -247,6 +247,7 @@ bool start(const StartupContext& ctx) {
         fixed_options() = FixedStereoHost::from_config(cfg);
         read_camera_settings(cfg);
         controls::read_config(cfg);
+        device::configure_render_scale(cfg);
         std::vector<std::pair<std::wstring, std::wstring>> stereo_cvars;
         if (cfg.get_bool("stereo", "comfort_cvars", true))
             for (const auto& [name, value] : kComfortCvars) stereo_cvars.emplace_back(name, value);

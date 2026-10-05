@@ -13,6 +13,14 @@ Timing& GetTiming() {
 void Series::Add(double ms) {
     std::lock_guard lk(m_);
     if (samples_.size() < 1'000'000) samples_.push_back(ms);
+    last_ = ms;
+    ++added_;
+}
+
+double Series::Last(uint64_t* added) const {
+    std::lock_guard lk(m_);
+    if (added) *added = added_;
+    return last_;
 }
 
 size_t Series::Count() const {

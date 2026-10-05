@@ -96,6 +96,10 @@ public:
 
     // Presenting thread, once per rendered stereo frame, before its Present (see above).
     virtual void eye_texture_ready(const EyeTexture& eyes) = 0;
+
+    // Any thread. GPU time of the most recently measured stereo frame, the number of
+    // frames measured so far, and the display's refresh rate; false when not known.
+    virtual bool gpu_frame_time(float& /*gpu_ms*/, std::uint64_t& /*samples*/, float& /*refresh_hz*/) { return false; }
 };
 
 }  // namespace ff7vr::engine

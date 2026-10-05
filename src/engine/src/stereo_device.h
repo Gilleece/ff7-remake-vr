@@ -28,8 +28,17 @@ struct Settings {
     std::atomic<bool> swap_rects{false};       // test: right eye in the left half of the target, left eye in the right half
     std::atomic<int> frame_window_ms{10000};   // length of a frame time measurement window
     std::atomic<bool> frame_window_reset{false};  // start a new window at the next frame (discards the current one)
+    // Rendered share of each eye target (per axis). The eye target and the scene buffers
+    // keep their size; only the view rects shrink, so a change costs no reallocation.
+    std::atomic<float> render_scale{1.0f};        // fixed value, and the upper bound of the dynamic one
+    std::atomic<bool> dynres{false};              // adjust the share each frame to hold the GPU frame time
+    std::atomic<float> dynres_min{0.75f};         // lower bound of the dynamic share
+    std::atomic<float> dynres_target{0.85f};      // GPU frame time to hold, as a share of the display's frame period
 };
 Settings& settings();
+
+// [stereo] render_scale, dynamic_resolution* from the ini, and the `dynres` dev command.
+void configure_render_scale(const Config& cfg);
 
 void init(float* near_plane, bool start_active, const FixedStereoHost::Options& fixed);
 

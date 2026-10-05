@@ -95,6 +95,13 @@ public:
         }
     }
 
+    bool gpu_frame_time(float& gpu_ms, std::uint64_t& samples, float& refresh_hz) override {
+        render::EyeSetup s;
+        if (!render::GetEyeSetup(&s) || !(s.refreshHz > 0)) return false;
+        refresh_hz = s.refreshHz;
+        return render::GetGpuFrameTime(&gpu_ms, &samples);
+    }
+
 private:
     bool mode_stereo_ = false;  // game thread only
 };

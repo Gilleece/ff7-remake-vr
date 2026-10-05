@@ -103,6 +103,12 @@ struct StereoSubmit {
 // RT, before the frame's Present. Records the image; the Present hook submits it.
 void SubmitStereoFrame(const StereoSubmit& submit);
 
+// Any thread. GPU time of the most recently measured stereo frame (from the start of
+// its scene to its Present, timestamp queries; measured by the foveation module, so
+// only while foveated rendering is initialised) and the number of frames measured
+// so far. False while nothing has been measured.
+bool GetGpuFrameTime(float* ms, uint64_t* samples);
+
 // ============================ UI LAYER =====================================
 // In stereo the game's in-game UI (HUD, command menu, menus, dialogue) is drawn
 // once into its own texture and shown on a quad layer floating in front of the

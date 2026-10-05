@@ -8,6 +8,8 @@
 #include "rhi_command.h"
 #include "ue_math.h"
 
+#include "ff7vr/core/config.h"
+#include "ff7vr/core/dev_commands.h"
 #include "ff7vr/core/log.h"
 #include "ff7vr/core/module.h"
 #include "ff7vr/engine/cvars.h"
@@ -72,6 +74,7 @@ bool usable(const HostView& v) {
 struct GameState {
     std::uint32_t eye_w = 0, eye_h = 0;    // committed: what the eye target has or is about to get
     std::uint32_t want_w = 0, want_h = 0;  // what the host asks for
+    std::uint32_t rect_w = 0, rect_h = 0;  // view rect of each eye this frame (render scale applied); 0 = whole half
     GameFrame frame{};
     HostView views[2]{};
     std::uint64_t views_frame_id = 0;
@@ -107,6 +110,7 @@ struct FrameEntry {
     std::uint64_t frame_id = 0;  // 0: rendered with views held from an earlier frame
     bool stereo = false;         // the views were built (the frame was drawn in stereo)
     HostView views[2]{};
+    std::uint32_t rect_w = 0, rect_h = 0;  // eye view rect size the frame was rendered with (0 = whole half)
 };
 std::mutex g_fifo_mutex;
 std::array<FrameEntry, 8> g_fifo{};
@@ -240,8 +244,10 @@ void AdjustViewRect(const void*, EStereoscopicPass pass, std::int32_t* x, std::i
     const bool second_half = (pass == eSSP_RIGHT_EYE) != g_settings.swap_rects.load();
     *x = second_half ? static_cast<std::int32_t>(g.eye_w) : 0;
     *y = 0;
-    *sx = g.eye_w;
-    *sy = g.eye_h;
+    // Each eye starts at the corner of its half; with a render scale below 1 it covers only
+    // part of it (the eye target and the scene buffers keep their size).
+    *sx = g.rect_w && g.rect_w <= g.eye_w ? g.rect_w : g.eye_w;
+    *sy = g.rect_h && g.rect_h <= g.eye_h ? g.rect_h : g.eye_h;
 }
 
 FVector2D* GetTextSafeRegionBounds(const void*, FVector2D* out) {
@@ -387,9 +393,12 @@ void RenderTexture_RenderThread(const void*, FRHICommandListImmediate* cmd_list,
     out.view_format = mirror::typed_view_format(desc_fmt);
     out.srgb_encoded = true;
     const std::uint32_t ew = tw / 2;
-    out.eyes[0] = EyeRect{0, 0, ew, th};
-    out.eyes[1] = EyeRect{static_cast<std::int32_t>(ew), 0, ew, th};
     const FrameEntry fe = fifo_pop();
+    // The part of each half the frame's views rendered (render scale), else the whole half.
+    const std::uint32_t rw = fe.rect_w && fe.rect_w <= ew ? fe.rect_w : ew;
+    const std::uint32_t rh = fe.rect_h && fe.rect_h <= th ? fe.rect_h : th;
+    out.eyes[0] = EyeRect{0, 0, rw, rh};
+    out.eyes[1] = EyeRect{static_cast<std::int32_t>(ew), 0, rw, rh};
     out.frame_id = fe.stereo ? fe.frame_id : 0;
     out.views_valid = fe.stereo;
     out.views[0] = fe.views[0];
@@ -534,7 +543,151 @@ void update_wanted_size() {
     }
 }
 
+// ------------------------------------------------------------------ render scale
+// The share of each eye's half of the target that the views render (per axis). Fixed at
+// [stereo] render_scale, or adjusted every few frames from the GPU time of the frames
+// (dynamic resolution): down as soon as their average exceeds the budget (a share of the
+// display's frame period), up slowly while it stays below 90 % of it. The eye target and
+// the scene buffers keep their size, so a change reallocates nothing; the runtime gets
+// the smaller image as the layer's sub-image and scales it to the display.
+struct DynState {
+    float scale = 1.0f;
+    std::uint64_t last_samples = 0;
+    int skip = 0;       // GPU samples to ignore after a change (they arrive a few frames late)
+    double sum = 0;
+    int n = 0;
+    std::uint64_t last_change_tick = 0;
+};
+DynState g_dyn;  // game thread
+std::atomic<float> g_dyn_scale{1.0f}, g_dyn_avg{0.0f}, g_dyn_budget{0.0f};
+std::atomic<std::uint64_t> g_dyn_changes{0};
+
+constexpr int kDynWindow = 10;         // frames averaged per decision
+constexpr float kDynStep = 0.02f;      // scale granularity
+constexpr float kDynUpHeadroom = 0.90f;
+constexpr std::uint64_t kDynUpHold = 60;  // frames after a change before the scale may rise
+
+void update_render_scale(bool stereo) {
+    const float max_s = std::clamp(g_settings.render_scale.load(), 0.3f, 1.0f);
+    const float min_s = std::clamp(g_settings.dynres_min.load(), 0.3f, max_s);
+    float s = g_dyn.scale;
+    if (!g_settings.dynres.load()) {
+        s = max_s;
+        g_dyn.n = 0;
+        g_dyn.sum = 0;
+    } else if (stereo) {
+        float ms = 0, hz = 0;
+        std::uint64_t samples = 0;
+        StereoHost* h = g_host.load();
+        if (h && h->gpu_frame_time(ms, samples, hz) && samples != g_dyn.last_samples && hz > 0) {
+            g_dyn.last_samples = samples;
+            if (g_dyn.skip > 0) {
+                --g_dyn.skip;
+            } else {
+                g_dyn.sum += ms;
+                ++g_dyn.n;
+            }
+            if (g_dyn.n >= kDynWindow) {
+                const float budget = std::clamp(g_settings.dynres_target.load(), 0.3f, 1.2f) * 1000.0f / hz;
+                const float avg = static_cast<float>(g_dyn.sum / g_dyn.n);
+                g_dyn.sum = 0;
+                g_dyn.n = 0;
+                g_dyn_avg = avg;
+                g_dyn_budget = budget;
+                // GPU time grows roughly with the pixel count, so with the square of the scale.
+                const float fit = s * std::sqrt(budget / std::max(avg, 0.1f));
+                float next = s;
+                if (avg > budget)
+                    next = std::max(fit, s - 0.10f);
+                else if (avg < budget * kDynUpHeadroom && g.ticks - g_dyn.last_change_tick >= kDynUpHold)
+                    next = std::min(fit, s + 0.04f);
+                next = std::floor(next / kDynStep + 0.001f) * kDynStep;
+                next = std::clamp(next, min_s, max_s);
+                if (std::fabs(next - s) >= kDynStep * 0.5f) {
+                    try {
+                        log::info("dynres: scale {:.2f} -> {:.2f} (GPU {:.2f} ms over {} frames, budget {:.2f} ms)", s, next, avg,
+                                  kDynWindow, budget);
+                    } catch (...) {
+                    }
+                    s = next;
+                    g_dyn.last_change_tick = g.ticks;
+                    g_dyn.skip = 4;
+                    ++g_dyn_changes;
+                }
+            }
+        }
+    }
+    s = std::clamp(s, std::min(min_s, max_s), max_s);
+    g_dyn.scale = s;
+    g_dyn_scale = s;
+    if (s >= 0.999f || !g.eye_w || !g.eye_h) {
+        g.rect_w = g.rect_h = 0;
+    } else {
+        auto scaled = [s](std::uint32_t full) {
+            const auto v = static_cast<std::uint32_t>(std::lround(full * s / 8.0) * 8);
+            return std::clamp<std::uint32_t>(v, 64, full);
+        };
+        g.rect_w = scaled(g.eye_w);
+        g.rect_h = scaled(g.eye_h);
+    }
+}
+
+std::string dynres_status() {
+    return std::format("ok dynres {} scale {:.2f} (render_scale {:.2f}, min {:.2f}, target {:.2f} of the frame period) rect {}x{} of {}x{}; "
+                       "last GPU {:.2f} ms budget {:.2f} ms; changes {}",
+                       g_settings.dynres.load() ? "on" : "off", g_dyn_scale.load(), g_settings.render_scale.load(),
+                       g_settings.dynres_min.load(), g_settings.dynres_target.load(), g.rect_w ? g.rect_w : g.eye_w,
+                       g.rect_h ? g.rect_h : g.eye_h, g.eye_w, g.eye_h, g_dyn_avg.load(), g_dyn_budget.load(), g_dyn_changes.load());
+}
+
+std::string dynres_command(std::string_view args) {
+    std::vector<std::string> a;
+    for (std::size_t i = 0; i < args.size();) {
+        while (i < args.size() && args[i] == ' ') ++i;
+        std::size_t j = i;
+        while (j < args.size() && args[j] != ' ') ++j;
+        if (j > i) a.emplace_back(args.substr(i, j - i));
+        i = j;
+    }
+    auto num = [](const std::string& s, float& v) {
+        try {
+            v = std::stof(s);
+            return std::isfinite(v);
+        } catch (...) {
+            return false;
+        }
+    };
+    float v = 0;
+    if (a.empty() || a[0] == "status") return dynres_status();
+    if (a[0] == "on" || a[0] == "off") {
+        g_settings.dynres = a[0] == "on";
+        log::info("dynres: switched {}", a[0]);
+        return dynres_status();
+    }
+    if (a.size() == 2 && num(a[1], v)) {
+        if (a[0] == "scale" && v >= 0.3f && v <= 1.0f) g_settings.render_scale = v;
+        else if (a[0] == "min" && v >= 0.3f && v <= 1.0f) g_settings.dynres_min = v;
+        else if (a[0] == "target" && v >= 0.3f && v <= 1.2f) g_settings.dynres_target = v;
+        else return "err value out of range";
+        log::info("dynres: {} = {:.2f}", a[0], v);
+        return dynres_status();
+    }
+    return "err usage: dynres [status] | on | off | scale <0.3-1> | min <0.3-1> | target <share of the frame period>";
+}
+
 }  // namespace
+
+void configure_render_scale(const Config& cfg) {
+    g_settings.render_scale = static_cast<float>(std::clamp(cfg.get_float("stereo", "render_scale", 1.0), 0.3, 1.0));
+    g_settings.dynres = cfg.get_bool("stereo", "dynamic_resolution", false);
+    g_settings.dynres_min = static_cast<float>(std::clamp(cfg.get_float("stereo", "dynamic_resolution_min", 0.75), 0.3, 1.0));
+    g_settings.dynres_target = static_cast<float>(std::clamp(cfg.get_float("stereo", "dynamic_resolution_target", 0.85), 0.3, 1.2));
+    log::info("dynres: render scale {:.2f}, dynamic resolution {} (min {:.2f}, target {:.2f} of the frame period)",
+              g_settings.render_scale.load(), g_settings.dynres.load() ? "on" : "off", g_settings.dynres_min.load(),
+              g_settings.dynres_target.load());
+    dev_commands::add("dynres", "dynres [status] | on | off | scale <0.3-1> | min <0.3-1> | target <share>: render scale and dynamic resolution in stereo",
+                      [](std::string_view args) { return dynres_command(args); });
+}
 
 Settings& settings() { return g_settings; }
 
@@ -640,6 +793,7 @@ void tick_begin() {
             log::info("stereo: rendering {} from tick {} (eye {}x{}, transition {})", frame_stereo ? "STEREO" : "mono", g.ticks,
                       g.eye_w, g.eye_h, g.transitions);
     }
+    update_render_scale(frame_stereo);
     if (frame_stereo)
         fixes::apply_system_resolution(static_cast<std::int32_t>(2 * g.eye_w), static_cast<std::int32_t>(g.eye_h));
     g_timer.tick(frame_stereo);
@@ -654,6 +808,8 @@ void tick_end() {
         e.stereo = g.views_built;
         e.views[0] = g.views[0];
         e.views[1] = g.views[1];
+        e.rect_w = g.rect_w;
+        e.rect_h = g.rect_h;
         fifo_push(e);
     }
 }

@@ -171,7 +171,8 @@ struct State {
     // Layout of the last stereo scene and the surface built for it.
     FoveationEye eyes[2]{};
     bool haveLayout = false;
-    uint32_t layoutW = 0, layoutH = 0;  // side-by-side extent of the eye rects
+    uint32_t layoutW = 0, layoutH = 0;  // size of the scene targets the eye rects lie in
+    bool layoutScaled = false;          // the rects cover only part of their halves (render scale), layoutH is estimated
     uint32_t hiddenVersion = ~0u;
     bool hiddenPresent = false;
     ComPtr<ID3D11Texture2D> surface;
@@ -217,6 +218,8 @@ std::mutex g_statusMutex;  // guards the copies below, for Status() from the pip
 std::string g_statusLine = "not initialised";
 
 Series g_cpuSeries{"foveation context hooks (CPU per frame)"};
+std::atomic<float> g_gpuFrameMs{0.0f};
+std::atomic<uint64_t> g_gpuFrameSamples{0};
 Series g_sceneSeries{"gpu scene (foveation window)"};
 Series g_afterSeries{"gpu after the scene until Present"};
 
@@ -314,7 +317,9 @@ ViewFacts Facts(ID3D11RenderTargetView* rtv) {
 
 bool SizeMatches(const ViewFacts& f) {
     // The scene targets are the eye target's size, rounded up to a multiple of 4 by the engine.
-    return g.haveLayout && f.w >= g.layoutW && f.w <= g.layoutW + 16 && f.h >= g.layoutH && f.h <= g.layoutH + 16;
+    if (!g.haveLayout || f.w < g.layoutW || f.w > g.layoutW + 16) return false;
+    if (g.layoutScaled) return f.h + 16 >= g.layoutH && f.h <= g.layoutH + 16;
+    return f.h >= g.layoutH && f.h <= g.layoutH + 16;
 }
 
 int NextTraceQuery(ID3D11DeviceContext* ctx) {
@@ -471,8 +476,18 @@ void RetireSurface(ID3D11DeviceContext* ctx) {
 }
 
 bool BuildSurface(ID3D11DeviceContext* ctx) {
-    const uint32_t right = std::max(g.eyes[0].rect.x + g.eyes[0].rect.width, g.eyes[1].rect.x + g.eyes[1].rect.width);
-    const uint32_t bottom = std::max(g.eyes[0].rect.y + g.eyes[0].rect.height, g.eyes[1].rect.y + g.eyes[1].rect.height);
+    uint32_t right = std::max(g.eyes[0].rect.x + g.eyes[0].rect.width, g.eyes[1].rect.x + g.eyes[1].rect.width);
+    uint32_t bottom = std::max(g.eyes[0].rect.y + g.eyes[0].rect.height, g.eyes[1].rect.y + g.eyes[1].rect.height);
+    // With a render scale below 1 each eye covers only the top-left part of its half of the
+    // scene targets (the right eye still starts at the half). The targets keep the full size:
+    // twice the right eye's offset wide, and as high as the half's width at the rects' aspect
+    // (both axes are scaled alike, rounded to 8 pixels; SizeMatches allows for that).
+    g.layoutScaled = false;
+    if (g.eyes[0].rect.x == 0 && g.eyes[1].rect.x > 0 && 2u * g.eyes[1].rect.x > right + 16 && g.eyes[1].rect.width > 0) {
+        bottom = static_cast<uint32_t>(std::lround(double(g.eyes[1].rect.x) * g.eyes[1].rect.height / g.eyes[1].rect.width));
+        right = 2u * g.eyes[1].rect.x;
+        g.layoutScaled = true;
+    }
     g.layoutW = right;
     g.layoutH = bottom;
     // Covers render targets up to 16 pixels larger than the eye rects (the engine rounds up).
@@ -794,6 +809,18 @@ void OnPresent(const PresentInfo& p) {
     std::erase_if(g.retired, [](const State::Retired& r) { return r.presents > 8; });
     g.sceneTimer.Collect(ctx, g_sceneSeries);
     g.afterTimer.Collect(ctx, g_afterSeries);
+    {
+        // The newest stereo frame's GPU time (scene plus everything after it until Present),
+        // for the engine's resolution control (render.h, GetGpuFrameTime).
+        uint64_t nScene = 0, nAfter = 0;
+        const double scene = g_sceneSeries.Last(&nScene), after = g_afterSeries.Last(&nAfter);
+        static uint64_t lastScene = 0;
+        if (nScene != lastScene && nAfter > 0) {
+            lastScene = nScene;
+            g_gpuFrameMs.store(static_cast<float>(scene + after), std::memory_order_relaxed);
+            g_gpuFrameSamples.fetch_add(1, std::memory_order_release);
+        }
+    }
     if (g.cpuTicksThisFrame || g.bindingsThisFrame) {
         g_cpuSeries.Add(QpcToMs(g.cpuTicksThisFrame));
         g.bindings += g.bindingsThisFrame;
@@ -971,3 +998,14 @@ std::vector<std::string> TakeTimingLines() {
 }
 
 }  // namespace ff7vr::render::foveation
+
+namespace ff7vr::render {
+
+bool GetGpuFrameTime(float* ms, uint64_t* samples) {
+    const uint64_t n = foveation::g_gpuFrameSamples.load(std::memory_order_acquire);
+    if (samples) *samples = n;
+    if (ms) *ms = foveation::g_gpuFrameMs.load(std::memory_order_relaxed);
+    return n > 0;
+}
+
+}  // namespace ff7vr::render

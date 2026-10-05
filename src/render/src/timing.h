@@ -27,12 +27,16 @@ public:
     // Same summary without resetting.
     std::string Peek() const;
     size_t Count() const;
+    // The most recent sample and the number of samples added so far (not reset by TakeSummary).
+    double Last(uint64_t* added = nullptr) const;
 
 private:
     static std::string Summarise(const char* name, std::vector<double> v);
     const char* name_;
     mutable std::mutex m_;
     std::vector<double> samples_;
+    double last_ = 0;
+    uint64_t added_ = 0;
 };
 
 struct Timing {
