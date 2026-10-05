@@ -2,8 +2,9 @@
 
 ff7vr is a VR mod for the Steam version of FINAL FANTASY VII REMAKE INTERGRADE. It
 makes the game's own engine render a separate image for each eye at the headset's
-resolution, so you sit inside the normal third-person game in 3D. You keep playing
-with the gamepad or keyboard and mouse; motion controllers are not used.
+resolution, so you are inside the game in 3D: in first person while exploring, in
+third person in battles, and switchable at any time. You keep playing with the
+gamepad or keyboard and mouse; motion controllers are not used.
 
 It is written for this one game (the Steam build, file version 1.0.0.7, Direct3D 11)
 and talks to the headset through OpenXR. The target setup is a Meta Quest 3 through
@@ -12,8 +13,8 @@ Virtual Desktop.
 ## State: new, and not yet tried in a headset
 
 **Everything described here was built and tested on a PC without a headset.** The
-3D rendering, the floating HUD panel, the virtual screen and the hand-over between
-them were checked with a simulated headset (an internal test mode and SteamVR's
+3D rendering, first and third person, the floating HUD panel, the virtual screen and
+the hand-over between them were checked with a simulated headset (an internal test mode and SteamVR's
 "null" driver, a virtual headset that shows the images in a window) and with
 screenshots of each eye. Nobody has looked at it through a lens yet. Expect rough
 edges, and read [Known problems and what has not been tested](#known-problems-and-what-has-not-been-tested)
