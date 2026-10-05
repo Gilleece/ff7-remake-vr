@@ -19,6 +19,8 @@ This page covers:
 3. OpenXR runtime selection
 4. OpenXR against SteamVR's null driver (a virtual headset), including what
    the scripts change on the machine and how to undo it
+5. the same inside the game: backends, dev pipe commands, captures and the
+   failure paths
 
 ## 1. Building
 
@@ -209,6 +211,87 @@ a headset.
 
 Captures show what was written into the runtime's swapchain images, i.e.
 exactly what the runtime received; they do not show the compositor's output.
+
+## 5. In the game
+
+The render module (`docs/render.md`) runs the same XR layer inside the game.
+Everything below works without a headset. Use the dev harness
+(`docs/dev-harness.md`) to launch; it takes the game lock, disables
+ReShade/Luma for the run and restores everything afterwards.
+
+### Choosing the backend for a run
+
+`launch.ps1 -Set` overrides ini keys for one run without editing a file:
+
+```powershell
+# Null backend: no VR software at all, captures show a Quest 3 class view
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev\launch.ps1 -Until gameplay -KeepRunning -Set "dev.pipe=1;xr.backend=null"
+
+# SteamVR's null driver: a real OpenXR session
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev\steamvr-null-enable.ps1 -Owner dev -StopSteamVr
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev\steamvr-start.ps1 -Owner dev
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev\launch.ps1 -Until gameplay -KeepRunning -Set "dev.pipe=1;xr.runtime=steamvr"
+# ... test ...
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev\stop.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev\steamvr-stop.ps1 -Owner dev
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev\steamvr-null-restore.ps1 -Owner dev
+```
+
+Take the game lock before the SteamVR lock (`lock.ps1 -Acquire` first if you
+start SteamVR before `launch.ps1`); the harness's lock is re-entrant for the
+same owner, and taking both locks in the same order everywhere avoids two
+people each holding one and waiting for the other.
+
+The default runtime, `virtualdesktop`, needs a connected headset; without one
+the game runs normally and the log shows the retries (that is itself a useful
+test, see below).
+
+### Driving a run through the dev pipe
+
+With `dev.pipe=1`, `send-input.ps1 -Pipe "<command>"` talks to the running
+game (all commands: `docs/render.md`, "Dev commands"). A typical check:
+
+```powershell
+$p = { param($c) powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev\send-input.ps1 -Pipe $c }
+& $p "mark screen-mode"
+& $p "capture $PWD\captures\xr\check\screen"      # writes screen_L.png / screen_R.png
+& $p "status"                                     # counters, runtime, timing into ff7vr.log
+& $p "mode stereo-test"                           # stereo path through the runtime, no engine needed
+& $p "capture $PWD\captures\xr\check\stereo"
+& $p "stereo-test pause 3000"                     # game thread blocked: the screen takes over
+& $p "mode screen"
+& $p "xr-stop"                                    # idle baseline: hooks and timing only
+& $p "xr-restart"
+```
+
+`mark` lines and the `timing:` blocks (every `[render] stats_interval`
+seconds) in `ff7vr.log` line up the measurements with the steps. The harness
+keeps each run's log in `captures\runs\<time>\ff7vr.log`.
+
+What to look at:
+
+- the eye PNGs: screen mode shows a 16:9 screen ahead of the eye (slightly
+  off-centre in each eye because of the asymmetric FOV and the IPD), stereo
+  test shows the game filling each eye;
+- `status` replies: `submit errors 0`, the frame counters advancing,
+  `image wait timeouts 0`;
+- the `timing:` blocks: `game frame interval` unchanged against a run with
+  `xr-stop`, `present hook` in the tens of microseconds.
+
+### Failure paths
+
+These run without a headset and should all leave the game running normally on
+the desktop, with no change in its frame interval:
+
+| Case | How | Expected log |
+|---|---|---|
+| no headset | `xr.runtime=virtualdesktop` with Virtual Desktop's Streamer running and no headset connected | `no session (SystemUnavailable after ~60 ms); the game continues on the desktop, retrying every 5 s`, then `still no session after 2, 4, 8 ... attempts` |
+| runtime missing | `xr-runtime C:\nowhere\runtime.json`, or a runtime JSON whose DLL is gone | `no session (RuntimeUnavailable ...)`, retried every 30 s |
+| runtime closes during the session | stop SteamVR (`steamvr-stop.ps1`) while the game runs | `the runtime ...`, `session ended`, retries; `xr-restart` once it is back |
+| switching runtimes | `xr-runtime steamvr` / `xr-runtime virtualdesktop` | session ended, new attempt with the new runtime |
+
+Checking the retry for stutter: compare `game frame interval` p99 and max in
+the periods with retries against the periods after `xr-stop`.
 
 ## Conventions the engine side relies on
 
