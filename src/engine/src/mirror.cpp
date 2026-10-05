@@ -52,8 +52,11 @@ struct Resources {
     ComPtr<ID3D11DepthStencilState> ds;
     ID3D11Texture2D* srv_tex = nullptr;  // texture the cached SRV was made for
     ComPtr<ID3D11ShaderResourceView> srv;
-    ID3D11Texture2D* rtv_tex = nullptr;
-    ComPtr<ID3D11RenderTargetView> rtv;
+    // The back buffer's view is made for each draw and released right after it: a view kept
+    // across frames holds a reference to the back buffer, and DXGI then refuses the game's
+    // ResizeBuffers (window mode or size change), which the game does not survive.
+    UINT logged_w = 0, logged_h = 0;
+    DXGI_FORMAT logged_fmt = DXGI_FORMAT_UNKNOWN;
     bool failed = false;
 };
 // RHI thread only. Allocated once and never freed: releasing D3D11 objects from a static
@@ -223,18 +226,23 @@ void blit(const MirrorCommand& cmd) {
             return;
         }
     }
-    if (res.rtv_tex != cmd.back_buffer || !res.rtv) {
-        res.rtv.Reset();
-        res.rtv_tex = cmd.back_buffer;
+    ComPtr<ID3D11RenderTargetView> back_rtv;
+    {
         D3D11_RENDER_TARGET_VIEW_DESC v{};
         v.Format = typed_view_format(ddesc.Format);
         v.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
-        if (v.Format == DXGI_FORMAT_UNKNOWN || FAILED(dev->CreateRenderTargetView(cmd.back_buffer, &v, &res.rtv))) {
-            log::warn("mirror: cannot render to back buffer format {}", static_cast<int>(ddesc.Format));
+        if (v.Format == DXGI_FORMAT_UNKNOWN || FAILED(dev->CreateRenderTargetView(cmd.back_buffer, &v, &back_rtv))) {
+            if (res.logged_fmt != ddesc.Format) log::warn("mirror: cannot render to back buffer format {}", static_cast<int>(ddesc.Format));
+            res.logged_fmt = ddesc.Format;
             return;
         }
-        log::info("mirror: eye texture {}x{} format {}, back buffer {}x{} format {}", sdesc.Width, sdesc.Height,
-                  static_cast<int>(sdesc.Format), ddesc.Width, ddesc.Height, static_cast<int>(ddesc.Format));
+        if (res.logged_w != ddesc.Width || res.logged_h != ddesc.Height || res.logged_fmt != ddesc.Format) {
+            res.logged_w = ddesc.Width;
+            res.logged_h = ddesc.Height;
+            res.logged_fmt = ddesc.Format;
+            log::info("mirror: eye texture {}x{} format {}, back buffer {}x{} format {}", sdesc.Width, sdesc.Height,
+                      static_cast<int>(sdesc.Format), ddesc.Width, ddesc.Height, static_cast<int>(ddesc.Format));
+        }
     }
 
     // Source rectangle in pixels.
@@ -277,7 +285,7 @@ void blit(const MirrorCommand& cmd) {
     saved.save(ctx.Get());
 
     const float black[4] = {0, 0, 0, 1};
-    if (cmd.mode != Mode::Crop) ctx->ClearRenderTargetView(res.rtv.Get(), black);
+    if (cmd.mode != Mode::Crop) ctx->ClearRenderTargetView(back_rtv.Get(), black);
 
     D3D11_MAPPED_SUBRESOURCE m{};
     if (SUCCEEDED(ctx->Map(res.cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
@@ -293,7 +301,7 @@ void blit(const MirrorCommand& cmd) {
     }
     // Output first: the eye texture is usually still bound as the scene's render target here,
     // and D3D11 refuses (silently nulls) a shader input that is bound as an output.
-    ID3D11RenderTargetView* rtv = res.rtv.Get();
+    ID3D11RenderTargetView* rtv = back_rtv.Get();
     ctx->OMSetRenderTargets(1, &rtv, nullptr);
     ctx->IASetInputLayout(nullptr);
     ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
