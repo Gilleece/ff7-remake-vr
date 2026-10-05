@@ -14,6 +14,9 @@
 #if FF7VR_ENGINE_WITH_RENDER
 #include "render_host.h"
 #endif
+#if FF7VR_ENGINE_WITH_DLSS
+#include "dlss.h"
+#endif
 
 #include "ff7vr/core/config.h"
 #include "ff7vr/core/dev_commands.h"
@@ -292,6 +295,11 @@ bool start(const StartupContext& ctx) {
                               handle_command("re " + std::string(args), reply);
                               return reply;
                           });
+#if FF7VR_ENGINE_WITH_DLSS
+        dlss::start(cfg, ctx.dll_dir);
+        dev_commands::add("dlss", "dlss status|on|off|init|preset <default|j|k|l|m>|reset|recreate|dump|timing ...: DLSS in place of the anti-aliasing",
+                          [](std::string_view args) { return dlss::command(std::string(args)); });
+#endif
 
         if (!ctx.is_game) {
             log::info("engine: host is not the game, nothing to do");

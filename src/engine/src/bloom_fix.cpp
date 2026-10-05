@@ -1,5 +1,8 @@
 #include "bloom_fix.h"
 
+#if FF7VR_ENGINE_WITH_DLSS
+#include "dlss.h"
+#endif
 #include "gpu_trace.h"
 #include "rhi_command.h"
 #include "stereo_device.h"
@@ -252,6 +255,9 @@ bool ao_fix(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_trac
 }
 
 bool on_draw_indexed(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_trace::DrawIndexedFn original) {
+#if FF7VR_ENGINE_WITH_DLSS
+    if (!g_armed.active && dlss::on_draw_indexed(ctx, count, start, base, original)) return true;
+#endif
     if (!g_armed.active) {
         // Full-screen passes are one triangle.
         if (count == 3 && g_ao_enabled.load(std::memory_order_relaxed) && device::active()) return ao_fix(ctx, count, start, base, original);
@@ -297,7 +303,12 @@ void frame(ID3D11Texture2D* any_texture) {
     // A rectangle that no draw took this frame (hooks not in place yet) is not carried over.
     g_armed.active = false;
     g_last = LastFullscreen{};
-    if (g_enabled.load(std::memory_order_relaxed) || g_ao_enabled.load(std::memory_order_relaxed)) gpu_trace::install_context_hooks(any_texture);
+    bool hooks = g_enabled.load(std::memory_order_relaxed) || g_ao_enabled.load(std::memory_order_relaxed);
+#if FF7VR_ENGINE_WITH_DLSS
+    dlss::frame(any_texture);
+    hooks = hooks || dlss::wants_hooks();
+#endif
+    if (hooks) gpu_trace::install_context_hooks(any_texture);
 }
 
 std::string status() {
