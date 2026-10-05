@@ -150,7 +150,8 @@ def _parse_num(v):
 def resolve_entry(img: Image, e: dict):
     """Returns (value, matches, error)."""
     hits = scan(img, e["pattern"], limit=4)
-    if len(hits) != 1:
+    # "unique": false marks a check that only has to be present (the first match is used).
+    if len(hits) != 1 and not (hits and e.get("unique", True) is False):
         return None, hits, f"pattern matched {len(hits)} times"
     try:
         return apply_rule(img, hits[0], e["resolve"]), hits, None

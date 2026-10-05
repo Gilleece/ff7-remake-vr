@@ -662,6 +662,31 @@
       "desc": "Call in FSceneViewport::InitDynamicRHI."
     },
     {
+      "name": "FSceneViewport separate target format",
+      "kind": "global",
+      "pattern": "FF 50 ?? 84 C0 75 47 44 0F B6 05 ?? ?? ?? ??",
+      "resolve": {
+        "type": "rip",
+        "insn": 7,
+        "disp": 4,
+        "len": 8
+      },
+      "expect": "0x53e1c78",
+      "desc": "uint8 EPixelFormat that FSceneViewport::InitDynamicRHI passes to RHICreateTargetableShaderResource2D when the stereo render target manager does not allocate the separate render target itself (the movzx right after the AllocateRenderTargetTexture call)."
+    },
+    {
+      "name": "RHI command list append sequence",
+      "kind": "check",
+      "pattern": "48 8B 47 08 FF 47 14 48 89 08 48 8D 05 ?? ?? ?? ?? 48 89 4F 08 48 89 41 08 4C 89 31",
+      "resolve": {
+        "type": "match",
+        "offset": 0
+      },
+      "expect": "0x251e10e",
+      "unique": false,
+      "desc": "How the engine appends a recorded RHI command (rdi = FRHICommandListBase, rcx = command): *CommandLink(+8) = cmd; ++NumCommands(+0x14); CommandLink = cmd; cmd->ExecuteAndDestruct(+8) = fn; cmd->Next(+0) = null. Many copies exist (for example in FFakeStereoRendering::RenderTexture_RenderThread at 0x3317b84); the lowest address is recorded here. Confirms the command list layout the mod relies on to append its own command."
+    },
+    {
       "name": "FViewport slot IsStereoRenderingAllowed",
       "kind": "slot",
       "pattern": "FF 90 ?? ?? ?? ?? 84 C0 74 20 48 8B 05 ?? ?? ?? ??",

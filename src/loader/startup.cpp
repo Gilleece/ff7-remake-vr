@@ -32,6 +32,9 @@
 #if FF7VR_HAVE_DEV
 #include "ff7vr/dev/dev.h"
 #endif
+#if FF7VR_HAVE_ENGINE
+#include "ff7vr/engine/engine.h"
+#endif
 #if FF7VR_HAVE_RENDER
 #include "ff7vr/render/render.h"
 #endif
@@ -45,7 +48,8 @@ void start_modules(const StartupContext& ctx) {
     if (cfg.get_bool("dev", "pipe", false)) dev_input::start();
 
 #if FF7VR_HAVE_ENGINE
-    // if (cfg.get_bool("engine", "enabled", true)) ff7vr::engine::start(ctx);
+    // Stereo device in the engine ([stereo] keys, gated by [stereo] enabled inside the module).
+    ff7vr::engine::start(ctx);
 #endif
 #if FF7VR_HAVE_RENDER
     // D3D11 hooks and the XR session (src/xr is driven by the render module; [xr] keys configure it).

@@ -423,6 +423,64 @@ Cvars named in this document: `r.EnableStereoEmulation`, `r.StereoEmulationFOV/W
 `Slate.DrawToVRRenderTarget` (exists, UEVR found its data at RVA `0x594d908`),
 `r.DefaultBackBufferPixelFormat` (does not exist in this build).
 
+## 8. Render thread details used by the stereo device
+
+### RHI command list (STATIC, LIVE)
+
+This shipping build never bypasses the RHI command list: every RHI wrapper records a
+command (there is no `Bypass()` branch in the wrappers, e.g. in
+`FFakeStereoRendering::RenderTexture_RenderThread`). Square Enix runs D3D11 with an RHI
+thread (LIVE: after start-up the swap chain is presented from a thread named `RHIThread`,
+render module log), so the recorded commands are dispatched to the RHI thread and executed
+there in order, the frame's last ones inside `RHIEndDrawingViewport`, which presents. The
+RHI thread is the only user of the D3D11 immediate context during gameplay. Layout (UE
+4.18, read from the engine's own append sequence, signature `RHI command list append
+sequence`):
+
+```
+FRHICommandBase      { FRHICommandBase* Next; void (*ExecuteAndDestruct)(FRHICommandListBase&, FRHICommandBase*); }
+FRHICommandListBase  { FRHICommandBase* Root; FRHICommandBase** CommandLink (+0x08); bool bExecuting (+0x10);
+                       uint32 NumCommands (+0x14); uint32 UID; IRHICommandContext* Context (+0x20); ...;
+                       FMemStackBase MemManager (+0x30: Top, +0x38: End) }
+append:  *CommandLink = cmd; CommandLink = &cmd->Next; ++NumCommands
+```
+
+The execute function receives the command list in RCX and the command in RDX (checked on
+the `SetViewport` command, `0x1f09590`, which calls `Context->RHISetViewport`, context
+vtable `+0x168`). A command whose memory belongs to someone else is executed like any
+other; the mod appends one from `RenderTexture_RenderThread` (render thread) to draw the
+desktop mirror; it runs on the RHI thread at a point where the frame's scene work has been
+executed on the D3D11 immediate context and before Slate's UI and Present.
+
+### What the engine draws for the window in stereo (STATIC)
+
+`FFakeStereoRendering::RenderTexture_RenderThread` (`0x3317ab0`) does **not** draw the
+source texture: it sets the back buffer as render target (with a clear) and a viewport of
+the back buffer's size, nothing else. With a separate render target the window therefore
+shows only what the device draws plus Slate. The engine has no spectator screen of its own
+in this build.
+
+### Separate render target format (STATIC)
+
+When `AllocateRenderTargetTexture` returns false, `FSceneViewport::InitDynamicRHI`
+allocates the separate target with `RHICreateTargetableShaderResource2D(..., Format = *(uint8*)0x53e1c78, ...)`
+(signature `FSceneViewport separate target format`).
+
+### In-game UI render target and composite (STATIC)
+
+- `0x2541670` (render thread) allocates the pooled target `InGameUIRenderTarget` once (it
+  is kept at `this+0x110` and only allocated while that is null). Size: 1920x1080, or
+  3840x2160 when `GSystemResolution.ResX > 1920`, replaced by `r.InGameUI.FixedWidth` x
+  `r.InGameUI.FixedHeight` when both are non-zero (it reads the two cvars' data directly,
+  `0x582899c` / `0x58289a0`). The size is stored at `this+0x240/+0x244`.
+- `0x1508810` returns the UI layout rectangle with the same rule (1920x1080 / 3840x2160 /
+  the fixed cvars); its callers lay out SE's UI canvas with it.
+- SE added `InGameUITexture` / `InGameUITextureSampler` to the scene texture shader
+  parameters (`FSceneTextureShaderParameters::Bind`, `0x2548ed0`), so the UI is
+  composited into each view by a post-process material reading the scene textures, not
+  by C++ code. How that material maps view pixels to UI pixels decides what each eye
+  shows (see section 6 and the measurements in `docs/re/stereo-hook-plan.md`).
+
 ## Tools
 
 All in `tools/re/`, run with the repo's `.venv` Python. The exe is found through Steam's

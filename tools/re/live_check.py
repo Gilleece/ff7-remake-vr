@@ -207,9 +207,14 @@ def main():
     ctrl = p.u64(gengine + rva["UEngine::StereoRenderingDevice"] + 8)
     line("StereoRenderingDevice", f"{dev:#x}" if dev else "null")
     if dev:
-        line("  device vtable", name_of(p.u64(dev)))
-        fov, unk, w, h = struct.unpack("<fIii", p.read(dev + 8, 16))
-        line("  fake device fields (FOV, +0xC, Width, Height)", (round(fov, 3), unk, w, h))
+        dev_vt = p.u64(dev)
+        line("  device vtable", name_of(dev_vt))
+        if dev_vt and base <= dev_vt < base + exe[2]:
+            fov, unk, w, h = struct.unpack("<fIii", p.read(dev + 8, 16))
+            line("  fake device fields (FOV, +0xC, Width, Height)", (round(fov, 3), unk, w, h))
+        else:
+            # The mod's device: a static object in the mod DLL whose first field is its table.
+            line("  device is the mod's", any(m[1] <= dev_vt < m[1] + m[2] and m[0].lower() == "xinput1_3.dll" for m in mods))
         if ctrl:
             vt, shared, weak, obj = struct.unpack("<QiiQ", p.read(ctrl, 24))
             line("  reference controller", f"vtable {name_of(vt)}, shared {shared}, weak {weak}, object {obj:#x}")
@@ -244,6 +249,10 @@ def main():
 
     rx, ry = p.i32(base + rva["GSystemResolution"]), p.i32(base + rva["GSystemResolution"] + 4)
     line("GSystemResolution (ResX, ResY)", (rx, ry))
+    if "FSceneViewport separate target format" in rva:
+        # EPixelFormat the engine allocates the separate (stereo) render target with when the
+        # render target manager does not allocate it: 2 = PF_B8G8R8A8, 35 = PF_A2B10G10R10.
+        line("separate render target EPixelFormat", p.u8(base + rva["FSceneViewport separate target format"]))
     gi = p.u64(gengine + OFS["UGameEngine::GameInstance"])
     line("GameInstance", f"{gi:#x}" if gi else "null")
     if gi:
