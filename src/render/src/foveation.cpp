@@ -695,6 +695,7 @@ void ReadTrace(ID3D11DeviceContext* ctx) {
 }
 
 void SetStatusLine() {
+    if (g_unsupported.load()) return;  // keeps the reason LogOff wrote
     std::lock_guard lk(g_statusMutex);
     g_statusLine = std::format("{}; {} stereo frames, render target bindings in the scene window {} of which with the mask {}; {}",
                                g.init == State::Init::Ok ? "active" : "waiting for the device", g.frames, g.bindings, g.matched,

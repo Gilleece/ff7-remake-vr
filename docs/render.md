@@ -19,6 +19,9 @@ What it does:
 - **UI layer** in stereo: the game's UI (HUD, command menu, menus, dialogue)
   is drawn once into its own texture and shown on a quad floating in front of
   the user instead of inside each eye, and over the desktop window;
+- **foveated rendering** in stereo: the periphery of each eye is shaded at a
+  lower rate (NVIDIA variable rate shading), on by default with the `quality`
+  preset;
 - in-game captures of what each eye sees, recenter, status and test commands
   through the dev pipe;
 - frame timing of everything the module does, on the CPU and the GPU.
@@ -28,7 +31,7 @@ Contents: [Modes](#modes) · [Switching between stereo and the screen](#switchin
 [Session life cycle](#session-life-cycle) · [Dev commands](#dev-commands) ·
 [Captures](#captures) · [Timing](#timing) · [Measured overhead](#measured-overhead) ·
 [The game's D3D11 usage](#the-games-d3d11-usage) · [D3D11 hooks](#d3d11-hooks) ·
-[Stereo interface](#stereo-interface) · [UI layer](#ui-layer) · [First test on a Quest 3](#first-test-on-a-quest-3-through-virtual-desktop)
+[Stereo interface](#stereo-interface) · [UI layer](#ui-layer) · [Foveated rendering](#foveated-rendering) · [First test on a Quest 3](#first-test-on-a-quest-3-through-virtual-desktop)
 
 ## Modes
 
@@ -164,6 +167,7 @@ All keys are optional. `ff7vr.ini` sits next to the DLL.
 | `[ui] layer_width` | `1920` | width of the quad's image in pixels; a larger game UI texture is scaled down when copied in. `0` = the game's UI texture width |
 | `[ui] mirror` | `1` | also draw the UI over the desktop window in stereo (the window shows an eye image, which no longer has the UI) |
 | `[ui] once_per_frame` | `1` | engine side: draw the UI for the first eye only (`0`: the game draws it for both eyes, as without the mod) |
+| `[foveation] ...` | on, `quality` | foveated rendering in stereo; keys in [Foveated rendering](#foveated-rendering) |
 
 Screen size: 1.8 m at 2 m covers about 48 x 28 degrees for a 16:9 image, so
 the whole picture including the HUD in the corners is visible with small eye
@@ -255,6 +259,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev\send-input.ps1 -Pi
 | `uihook status` | engine side: UI passes seen, redirected, skipped for the second eye, texture size and format |
 | `uihook once <0\|1>` | draw the UI for the first eye only, or for both |
 | `uihook proj` | log the projection matrices of the next two views the UI pass receives (in screen mode: the game camera's FOV) |
+| `fov ...` | foveated rendering: status, settings, one-frame trace, timing ([Foveation dev commands](#foveation-dev-commands)) |
 
 Modules register commands with `ff7vr::dev_commands::add` (`src/core`); the
 pipe passes every line it does not handle itself to `dev_commands::dispatch`.
@@ -579,6 +584,201 @@ Reach gameplay in mono (`stereo.start_in_stereo=0`): the harness recognises the
 title and main menu from the window, which in stereo shows an eye's crop of
 the 3D scene behind the menu.
 
+## Foveated rendering
+
+In stereo the periphery of each eye is shaded at a lower rate than its centre
+(fixed foveated rendering). A headset's lenses blur and compress the
+periphery, and the eyes rarely turn more than 15 to 20 degrees away from
+straight ahead, so the outer parts of the eye image can be shaded once per
+2x1 or 2x2 pixels with little visible difference while saving pixel shader
+work. D3D11 has no vendor-neutral variable rate shading; this uses NVIDIA's
+through NVAPI (`src/render/src/foveation.cpp`, NVAPI SDK R615, MIT, fetched
+into `third_party/_fetched/nvapi-src`). On a GPU or driver without it, the
+feature switches itself off with one log line and nothing else changes.
+
+### How it works
+
+- **Shading-rate surface.** One `R8_UINT` texel per 16x16 pixel tile covers
+  the side-by-side scene targets. Each tile holds a ring index: full rate
+  inside the inner radius, then two rings, then everything beyond, plus an
+  index for tiles the headset cannot show (below). A table maps the indices
+  to NVIDIA shading rates. Tiles that overlap both eyes (an eye width that is
+  not a multiple of 16) take the finer rate of the two.
+- **One centre per eye, at the eye's optical centre.** The ring distance is
+  measured from where the eye's view axis meets the image, which is off-centre
+  because headset FOVs are asymmetric (left eye of the Null backend's Quest 3
+  class FOV: at 58.7 % of the width, 46.5 % of the height; the right eye
+  mirrored). Distances are angle tangents from the view axis in units of half
+  the eye's width, so a ring is a circle of constant angle whatever the
+  asymmetry. The centres and the rects are taken from the views the engine
+  actually renders (view rect and projection of each eye in `FViewInfo`), so
+  they always match the image.
+- **Which draws get it.** The engine module marks where the scene of a stereo
+  frame starts and ends, in the order of the frame's GPU work: hooks on
+  `FDeferredShadingSceneRenderer::Render` and `FPostProcessing::Process` (and
+  the in-game UI pass) append RHI commands that run on the RHI thread just
+  before the scene's first draw (with both eyes' rects and projections) and
+  just before the UI pass and post-processing (`src/engine/src/ui_layer.cpp`,
+  render.h "FIXED FOVEATED RENDERING"). Hooks on the immediate context's
+  `OMSetRenderTargets` and `OMSetRenderTargetsAndUnorderedAccessViews` then
+  switch variable rate shading on while, inside that window, render target 0
+  has the scene targets' size (the eye rects' extent, which the engine rounds
+  up to a multiple of 4) and is not a skipped format, and off for every other
+  binding. The Present hook switches it off before any of this module's own
+  work.
+- **Never affected:** mono frames, screen mode and the plain game (no stereo
+  view family, so no scene is marked), the in-game UI pass (after the scene
+  window), the post-processing chain including temporal AA, bloom and the
+  tonemapper, the desktop mirror and the XR copies (after the scene window),
+  half and quarter resolution buffers, shadow maps, depth-only passes and
+  compute work (wrong size, no colour target, or not affected by VRS at all).
+  The desktop mirror shows a crop of the left eye, so the eye image itself is
+  foveated there too; nothing is drawn coarsely into the window.
+
+### What the scene does per frame and what takes the mask
+
+`fov trace` logs every render target binding of one stereo frame from the
+scene's start to Present, with its size, format, number of targets and GPU
+time. The first room of the benchmark save at 2 x 2496x2592 (Null backend,
+balanced preset), 7.04 ms of GPU time inside the scene window:
+
+| Binding (scene targets 4992x2592) | GPU ms | Mask |
+|---|---|---|
+| depth-only passes (shadow depths, depth prepass) | 1.17 | no colour target |
+| work with no render target bound (compute, unordered access) | 1.54 | not affected by VRS |
+| targets of other sizes (shadow and lighting atlases, mip chains, half resolution) | 0.96 | other size |
+| volume targets (translucency lighting) | 0.79 | not a 2D target |
+| G-buffer base pass (6 targets, `R16G16B16A16_FLOAT` first) | 0.54 | yes |
+| velocity (`R16G16_UNORM`) | 0.03 | skipped by default |
+| small full-size passes (`R8_UNORM`, `R8G8_UNORM`) | 0.23 | yes |
+| screen shadow mask (`B8G8R8A8_UNORM` with depth) | 0.20 | yes |
+| lights, reflections, fog and translucency into scene colour (`R16G16B16A16_FLOAT`) | 1.59 | yes |
+
+So 2.6 ms of the scene's 7.05 ms is shaded on targets the mask applies to;
+the rest (depth-only work, compute, other sizes, volumes) is not pixel shading
+on the scene targets and cannot gain from it. That bounds the saving: the
+`balanced` preset removes about half of those 2.6 ms. Post-processing after the scene costs
+about 0.9 ms at this size and is left at full rate.
+
+Passes that write data later passes read per pixel:
+
+- the **velocity buffer** is skipped by default (`skip_formats = 35`): it is
+  temporal data that temporal AA and motion blur read per pixel, and shading
+  it at full rate costs 0.03 ms;
+- **temporal AA and everything after the scene** are outside the window;
+- **depth** is never coarse: VRS only changes how often the pixel shader runs,
+  depth testing and writing stay per pixel, and depth-only passes have no
+  colour target;
+- the **G-buffer pass** takes the mask. Leaving it at full rate
+  (`passes = no-gbuffer`) gave back 0.2 of the 1.34 ms saved by the balanced
+  preset and did not remove the visible stair-steps on bright edges, which come
+  from the lighting passes as much as from the base pass.
+
+### Settings
+
+| Key | Default | Meaning |
+|---|---|---|
+| `[foveation] enabled` | `1` | `0`: never used in this session (the scene markers pass straight through) |
+| `[foveation] preset` | `quality` | `quality`, `balanced`, `performance` or `off` (table below) |
+| `[foveation] radii` | preset | three increasing ring radii, fractions of half the eye width from the optical centre, e.g. `0.7 0.9 1.15` |
+| `[foveation] rates` | preset | shading rate between the first and second radius, between the second and third, and beyond: `1x1`, `2x1`, `1x2`, `2x2`, `4x2`, `2x4`, `4x4` (pixels per shading sample, width x height) |
+| `[foveation] hidden_area` | `coarse` | tiles inside the runtime's hidden area mesh: `coarse` (4x4), `cull` (not drawn at all), `off` (treated like the outer ring) |
+| `[foveation] passes` | `scene` | `scene`: matching targets inside the scene window; `no-gbuffer`: the same without the G-buffer pass (3 or more targets); `all`: matching targets from the scene's start until Present, including post-processing (for comparison only) |
+| `[foveation] skip_formats` | `35` | DXGI formats of render target 0 that never get the mask (35 = `R16G16_UNORM`, the velocity buffer) |
+| `[debug] foveation_unsupported` | `0` | `1`: behave as on a GPU without variable rate shading (tests the fallback) |
+
+Presets (radius 1.0 is half the eye width; with the Null backend's Quest 3
+class FOV that is a tangent of 1.09, so 0.70 is about 37 degrees from the view
+axis, 0.90 about 44, 1.15 about 51; the image reaches about 1.6 in its outer
+corners):
+
+| Preset | Full rate inside | Then | Then | Beyond | Pixels at full rate | Pixel shading work |
+|---|---|---|---|---|---|---|
+| `quality` (default) | 0.70 | 2x1 to 0.90 | 2x2 to 1.15 | 2x2 | 37.6 % | 57.6 % |
+| `balanced` | 0.55 | 2x2 to 0.80 | 2x2 to 1.05 | 4x4 | 23.3 % | 38.4 % |
+| `performance` | 0.45 | 2x2 to 0.65 | 4x4 to 0.90 | 4x4 | 15.6 % | 23.5 % |
+
+Shares inside both eye rects with the Null backend's FOV and hidden area
+(8.3 % of the pixels, shaded 4x4); the work column is the pixel shader
+invocations relative to full rate on the masked targets.
+
+**Why `quality` is the default.** Captures at headset resolution (first room,
+still and with the head turning, and outdoors) compared with the same view at
+full rate: the fovea is pixel-identical (difference maps are black inside the
+inner ring apart from animated characters, as between two full-rate captures);
+`quality` shows only a slight stair-step on the brightest light bar at the very
+edge of the image. `balanced` makes the edges of bright light fixtures and
+high-contrast texture detail visibly stair-stepped from about 31 degrees off
+axis and softens wood grain and corrugated metal; `performance` makes them
+blocky (4x4) from about 36 degrees. Judged on the full eye image, which is
+harsher than what the lenses show; not checked in a headset yet. Temporal AA
+over coarse tiles: no smearing or trailing in the captures with the head
+turning, compared with full rate at the same head angle. Bloom and exposure:
+mean brightness changes by under 1 % (`balanced`: 25.05 to 24.88). Right eye:
+the same as the left, no artefact of its own; nothing at the seam between the
+eyes.
+
+### The parts of the image the headset cannot show
+
+OpenXR reports them as a triangle mesh per eye (`XR_KHR_visibility_mask`,
+`IXrBackend::GetHiddenAreaMesh`; the Null backend emulates one: everything
+outside an ellipse around the view axis 5 % larger than the FOV's half-extents,
+8.3 % of the image). Tiles entirely inside it get their own index:
+
+- `coarse` (default): shaded once per 4x4 pixels. Their content stays
+  plausible, so nothing differs where it can bleed into the visible image.
+- `cull`: not rasterised at all. The culled pixels keep whatever the targets
+  held before (in the captures: stale red content from another pass, not
+  black), and the passes after the scene read them: bloom spreads them into
+  the visible image, temporal AA can pull them in at the edge when the head
+  turns, and auto exposure includes them. For at most 8 % of the pixels at
+  1/16 of the cost already, that is not worth it, so culling is not the
+  default.
+
+SteamVR's null driver reports an empty mesh (0 triangles), so there the outer
+ring covers the corners. Virtual Desktop's mask has not been seen yet.
+
+### Cost and savings
+
+GPU time of the scene window (`gpu scene` in the timing block, timestamps at
+the scene markers), first room, Null backend unpaced, 2 x 2496x2592, all
+settings in one session, p50 over about 500-1000 frames each:
+
+| Setting | Scene GPU ms | Saved |
+|---|---|---|
+| off | 7.71 (again at the end: 7.71) | - |
+| `quality` | 6.76 | 0.95 ms (12 %) |
+| `balanced` | 6.38 | 1.34 ms (17 %) |
+| `performance` | 6.12 | 1.59 ms (21 %) |
+| `balanced`, `passes = no-gbuffer` | 6.58 | 1.14 ms |
+
+The context hooks cost 0.02 ms of CPU per frame on the RHI thread (about 95
+render target bindings in the scene window per frame, 16 to 17 of them get
+the mask). Frame times measured with the benchmark harness are in
+`docs/benchmarking.md` style below.
+
+BENCH_TABLE_PLACEHOLDER
+
+### Foveation dev commands
+
+| Command | Effect |
+|---|---|
+| `fov status` | settings, state, stereo frames and bindings so far, the surface's ring shares and the optical centres |
+| `fov on` / `fov off` | switch the mask; after `fov off` the scene's GPU time keeps being measured, so on and off compare in one session |
+| `fov preset <name>`, `fov radii <a> <b> <c>`, `fov rates <a> <b> <c>`, `fov hidden off\|coarse\|cull`, `fov passes scene\|no-gbuffer\|all`, `fov skip [formats]` | change the settings at run time (the surface is rebuilt at the next stereo frame) |
+| `fov trace` | log every render target binding of the next stereo frame, from the scene's start to Present, with GPU times |
+| `fov timing` | log and reply the scene GPU time, the GPU time after the scene and the hooks' CPU time since the last report |
+
+Log lines to look for:
+
+```
+foveation: scene markers installed (Render +0x21e64a0, FPostProcessing::Process +0x251c230, ...)
+foveation: variable rate shading available (driver 610.47, r610_45), context hooks installed
+foveation: eye views: rect at +0x80 (2064x2208), projection at +0xe0 (...)
+foveation: surface 259x139 tiles for 4128x2208; pixels: full 37.6 %, ...; left eye ... optical centre at (1212, 1027) ...
+foveation: off for this session: <reason>          (unsupported GPU or driver, NVAPI missing, an NVAPI call failed)
+```
+
 ## First test on a Quest 3 through Virtual Desktop
 
 Everything above was verified with the Null backend and SteamVR's null driver;
@@ -634,3 +834,11 @@ start the game normally. Check, in this order:
     it is too large or too small adjust `[ui] size` / `distance` (or `ui size
     <m>` live), and compare markers over enemies with `[ui] size = 1.57`
     ([World-anchored elements](#world-anchored-elements)).
+12. **Foveated rendering** (on by default, `quality`): look straight ahead and
+    let the eyes wander to the edges of the view. The image should look as
+    sharp as before up to well beyond comfortable eye movement; bright edges
+    (lamps, light fixtures, sky behind railings) at the very edge may look
+    slightly stepped. Compare with `[foveation] enabled = 0` (or `fov off`
+    through the dev pipe) and try `fov preset balanced`. The log lines
+    `xr: eye 0 hidden area mesh: N triangles` tell whether Virtual Desktop
+    reports the region the lenses cannot show.

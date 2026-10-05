@@ -5,7 +5,10 @@ has two backends behind one interface (`src/xr/include/ff7vr/xr/xr.h`):
 
 - **OpenXR** (D3D11): the real backend. The OpenXR loader is linked statically.
 - **Null**: no runtime. A Quest 3 class virtual headset with a fixed FOV,
-  64 mm IPD and scripted head motion. It can write each eye to PNG.
+  64 mm IPD and scripted head motion. It can write each eye to PNG, and it
+  reports an emulated hidden area (the image corners outside an ellipse around
+  each eye's view axis, about 8 % of the image) like a headset's
+  `XR_KHR_visibility_mask`; `NullOptions::hiddenArea = false` turns it off.
 
 `tools/xr_smoke` is a small console app that exercises either backend without
 the game: it creates its own D3D11 device, draws a test pattern for both eyes
@@ -200,6 +203,8 @@ What a passing run reports (SteamVR 2.18 on the reference machine):
   offers `R8G8B8A8_UNORM_SRGB, B8G8R8A8_UNORM_SRGB, R32G32B32A32_FLOAT,
   R16G16B16A16_FLOAT, R10G10B10A2_UNORM` and depth formats
 - 90 Hz (`XR_FB_display_refresh_rate`), `XR_KHR_composition_layer_depth` available
+- `XR_KHR_visibility_mask` is offered, but the null driver's hidden area mesh
+  is empty (`eye 0 hidden area mesh: 0 triangles`)
 - views: identity head pose, eyes at +-31.5 mm, symmetric 45 degree FOV
 - session `IDLE -> READY -> SYNCHRONIZED -> VISIBLE (-> FOCUSED)`, every
   `xrEndFrame` accepted, clean `STOPPING -> IDLE -> EXITING` on shutdown
