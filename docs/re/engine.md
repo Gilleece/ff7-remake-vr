@@ -407,7 +407,7 @@ backend's asymmetric Quest 3 class FOV, plus the mod's fixed test host for symme
 | HZB occlusion | The game's own value of `r.HZBOcclusion` is **0** (set by its constructor default), so UEVR's "disable HZB" setting changes nothing here. With 1 no popping or missing geometry in either eye in a static view. Each eye has its own view state. |
 | TAA, motion blur | TAA is on (`r.PostProcessAAQuality 4`), motion blur quality 4. Neither causes a difference between the eyes; turning them off does not change the problem below. |
 | `r.SSR.Quality` | Does not exist in this build (Square Enix's own screen-space reflection setup; `ShowFlag.ScreenSpaceReflections` exists). |
-| **Right eye shows a ghost of the left eye's image** | A semi-transparent copy of the left eye's picture appears in the right eye at the left eye's image positions, mostly visible on glossy surfaces (metal walls, the counter) and around bright lamps. Strong with the asymmetric headset FOV (where the two eyes' images are offset by about 360 px), faint with a symmetric FOV (only lamp glows). The left eye is clean. It disappears with `ShowFlag.PostProcessing 0`; it does not go away with TAA off, motion blur off, or `ShowFlag.` `ScreenSpaceReflections`, `ReflectionEnvironment`, `PostProcessMaterial`, `Bloom`, `LensFlares`, `DepthOfField`, `AmbientOcclusion`, `Tonemapper` 0 one at a time. INFERRED: a pass in the post-processing chain samples scene color for the second view with the first view's viewport offset (the reflection-like look on glossy surfaces suggests Square Enix's screen-space reflection resolve, `SSRParameter` / `ScreenSpaceReflectionsTexture` in the scene texture parameters). Not yet located. |
+| **Right eye shows a ghost of the left eye's image** | A semi-transparent copy of the left eye's picture appears in the right eye at the left eye's image positions, mostly visible on glossy surfaces (metal walls, the counter) and around bright lamps. Strong with the asymmetric headset FOV (where the two eyes' images are offset by about 360 px), faint with a symmetric FOV (only lamp glows). The left eye is clean. It disappears with `ShowFlag.PostProcessing 0`; it does not go away with TAA off, motion blur off, or `ShowFlag.` `ScreenSpaceReflections`, `ReflectionEnvironment`, `PostProcessMaterial`, `Bloom`, `LensFlares`, `DepthOfField`, `AmbientOcclusion`, `Tonemapper` 0 one at a time. `r.BloomQuality 0` removes it (together with all bloom). **Located and fixed**: it is Square Enix's own bloom, see section 10. |
 
 ## 7. Console variables
 
@@ -698,6 +698,74 @@ else separates them: the game camera's pitch (with decoupled pitch the eye views
 the markers do not), head position, and the parallax between the quad's distance and the
 object's. See `docs/render.md`, "UI layer", for the numbers at the default placement.
 
+## 10. Post-processing in stereo: Square Enix's passes (LIVE, GPU trace)
+
+Recorded with the engine module's one-frame GPU trace (`gpu trace`, see [Tools](#tools)) in
+the first room, on the street outside and in the item shop, eyes 2064x2208 (target
+4128x2208), Null backend. Each view runs the whole post-processing chain on its own, left
+view first. Stock UE 4.18 passes keep each view at its own rectangle in every intermediate
+target (the right eye at `x = 2064` full size, `x = 1032` at half size, and so on). Several
+of Square Enix's passes do not: they put every view's data at the origin of their targets.
+
+| Pass (pool names) | Layout | Per eye correct? |
+|---|---|---|
+| Subsurface scattering (`SubsurfaceSetup` / `SubsurfaceBlurX/Y`, half size) | each view at the origin `0 0 1032 1104`; the combine (`SubsurfaceColor`) writes back at the view's own rectangle | yes: the right view's blur holds the right eye's skin (read-backs differ by the eyes' parallax) |
+| Bloom (`BloomReduce`, 10 levels, target size = scene buffer >> (level + 1); `BloomBlur`, 9 upsample/combine passes) | each view at the origin; the tonemapper reads the result at the origin | **no** (fixed by the mod), see below |
+| Custom glare (`CustomGlare`, `CombinedExtraGlare`) | each view at the origin of one shared target | not exercised: no glare primitives in the scenes tested; see below |
+
+### The right-eye ghost: the bloom's first pass (LIVE, fixed)
+
+- The bloom chain is built by `0x2287ba0` (called from `FPostProcessing::Process`,
+  `0x251c230`, when the view's float at `FViewInfo+0xE70` is above 0, which it was in every
+  scene). Its first pass, `Bloom reduce pass Process` (`0x22861b0`, vtable `0x4d5fd90`
+  slot 5), reduces the view's full-resolution input (the anti-aliased scene colour, a
+  4128x2208 target holding both eyes) into level 0 at the origin. The C++ side gives it the
+  view's source rectangle from `FViewInfo+0x70` (`2064 0 4128 2208` for the right eye): the
+  vertex constants (`UVScaleBias = 2064 2208 2064 0`) and the pixel shader constants carry
+  the offset.
+- **The pixel shader ignores it**: the right view's level 0 is numerically the same as the
+  left view's (mean absolute difference 0.06 of 255 on the read-backs, `captures/stereo/runK/k4`
+  events 2798 and 2831). So the right eye's whole bloom chain is the left eye's image; the
+  tonemapper adds it at the right eye's pixel positions: a soft copy of everything bright
+  at the left eye's image positions.
+- `stereo swap 1` (right eye rendered into the left half) showed the fault follows the
+  position, not the view: the eye at the offset is wrong whichever it is.
+- `re poke` of the `jae` at `0x251d847` (skips the bloom chain and the glare combine)
+  removed the ghost, and so does `r.BloomQuality 0` (no bloom at all, a visibly flatter
+  image); `ShowFlag.Bloom 0` does not.
+- **Fix** (`src/engine/src/bloom_fix.cpp`): a hook on the reduce pass's Process (render
+  thread) appends an RHI command for the first level of a view whose rectangle does not
+  start at the origin; on the RHI thread the next DrawIndexed (the pass's draw) gets a
+  scratch texture of the input's size and format, with the view's rectangle copied to its
+  origin, bound as shader resource 0 for that draw only. After the fix the two views' level
+  0 differ by the eyes' parallax (mean difference 20.9) and the right eye shows no ghost in
+  the room, the street and the shop (captures in section "Evidence" of
+  `docs/engine-module.md`).
+
+### Custom glare (STATIC + LIVE, not exercised)
+
+- Square Enix renders "custom glare" primitives (primitive view relevance bit `0x400`, list
+  at `FViewInfo+0x1768`, count `+0x1770`) per view in a loop before post-processing
+  (`0x262d250` from `0x21e64a0`): `FSceneRenderTargets::BeginRenderingCustomGlare`
+  (`0x2544ed0`) allocates `CustomGlare` (member `+0x118` of the scene targets
+  `0x5923ad0`, half size), clears the whole target and sets the viewport at the origin. The
+  combine pass `FRCPassPostProcessCombineExtraGlare` (constructor `0x251b380`, Process
+  `0x228b310`, shader parameters `ExtraGlare`, `ExtraGlareRectangle` = the view's half
+  size at the origin) is added after the bloom chain when that target exists.
+- With two views each view clears and redraws the same origin region, so only the last
+  view's glare survives until post-processing: the left eye would get the right eye's
+  glare. LIVE: in the three scenes tested the count was 0 for both views every frame, the
+  target was never allocated and the combine never ran. A fix would give each view its own
+  region (or target) the same way as the bloom fix; needs a scene with glare primitives to
+  verify.
+
+### Other FViewInfo fields seen (STATIC + LIVE)
+
+`+0x70` the rectangle post-processing reads the view from (equals the view rect at 100 %
+screen percentage), `+0xA0` view rect, `+0x970` stereo pass, `+0xE70` bloom/glare enable
+(float), `+0xF44` / `+0xF48` bloom parameters, `+0x10AC` another post-processing enable
+(float), `+0x1768` custom glare primitives.
+
 ## Tools
 
 All in `tools/re/`, run with the repo's `.venv` Python. The exe is found through Steam's
@@ -711,6 +779,24 @@ library folders (or `FF7R_EXE`, or a path argument).
 | `live_check.py` | Read-only inspection of a running game: GEngine, device and vtable, controller refcounts, XRSystem, viewport size and separate-target state, render target texture and its native resource, local player view states, a few cvars, `GSystemResolution`. |
 | `pe_info.py [exe]` | Exe identity: hashes, PE header, sections with entropy, imports, TLS, packer/DRM markers. |
 | `ff7re.py` | Library: image loading by RVA, string search, RIP-relative xref scan, `.pdata` function bounds, control-flow disassembly, vtable helpers. |
+| `gpu_trace_view.py` | Views a one-frame GPU trace of the running game (dev pipe `gpu trace`): `sheet` makes contact sheets of the read-backs (optionally only one eye's half), `png` converts read-backs, `passes` sums GPU time per render target. |
+
+### One-frame GPU trace (in the mod, dev pipe)
+
+```
+gpu names on                                   # label textures with the engine's pool names (before 'stereo on')
+gpu trace <abs prefix>                         # next stereo frame: every draw/dispatch/clear/copy with its state
+gpu trace <abs prefix> dump fullscreen scale 4 # plus a read-back of every full-screen pass and its constants
+gpu status
+python tools/re/gpu_trace_view.py sheet <prefix> out.png --from N --to M
+```
+
+The trace hooks the D3D11 immediate context's functions (inline hooks on the functions its
+vtable points to: this game's RHI does not call through that vtable pointer, so patching
+vtable slots sees nothing). Times between events are GPU timestamps, but the tracing itself
+starves the GPU, so they are only useful for relative sizes within one trace.
+`re peek <rva> <n>` and `re poke <rva> <bytes>` read and patch the game image to try a
+patch before writing it (`stereo swap 1` renders the right eye into the left half).
 
 Reproducing the live check: `tools/dev/launch.ps1 -NoMod -ExtraArgs '-emulatestereo'
 -WaitSeconds 45 -Screenshot -KeepRunning`, then `python tools/re/live_check.py`, then

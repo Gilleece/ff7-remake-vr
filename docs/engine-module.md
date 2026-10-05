@@ -21,6 +21,10 @@ global are written, and two single bytes of code can be changed:
 | `GSystemResolution` | engine global | only while stereo renders: set to the eye target size, because this build sizes its scene buffers from it (`docs/re/engine.md` section 8); the game's value is put back when stereo stops |
 | windowed-fullscreen view rect | the `jne` at RVA `0x3018fb8` in `ULocalPlayer::CalcSceneView` | only while stereo renders: made unconditional so that, in windowed fullscreen, the game does not replace the eye rects with the full screen |
 | light sort-key immediate | one byte in `FDeferredShadingSceneRenderer::RenderLights` | only when `[stereo] light_fix = 1` or the `stereo lightfix 1` command |
+| Square Enix's bloom reduce pass (`Process`) | inline hook, render thread | `[stereo] bloom_fix` (default on): for the first level of a view that does not start at the origin, an RHI command arms the right-eye bloom fix (below) |
+| D3D11 immediate context draw/dispatch/clear/copy functions | inline hooks, RHI thread | installed at the first stereo frame when the bloom fix is on (it needs to act on one DrawIndexed), or by the first GPU trace; otherwise not installed |
+| `FRenderTargetPool::FindFreeElement` | inline hook, render thread | only after `gpu names on` (GPU trace labels) |
+| the object array and name pool | read on the game thread | only with `[stereo] movie_screen = 1`: movie detection (below) |
 
 Everything else goes through the device's own function tables, which the engine calls:
 view rects, per-eye view offset and projection, the size of the separate render target,
@@ -146,6 +150,8 @@ Choices for a seated player in a third-person game:
 | `positional` | `1` | apply head position |
 | `mirror` | `crop` | desktop window in stereo: `crop` (left eye, centre crop at the window's aspect), `left`, `right`, `both` (side by side, letterboxed), `off` |
 | `light_fix` | `0` | light sort-key patch (see `docs/re/engine.md` section 6) |
+| `bloom_fix` | `1` | right-eye bloom fix (below) |
+| `movie_screen` | `0` | movie detection: stereo is held off while a pre-rendered movie plays, so the virtual screen shows it (below) |
 | `allow_unknown_build` | `0` | try a game build other than 1.0.0.7 if every signature and layout check passes |
 | `log_frames` | `0` | log the eye cameras of the first N stereo frames |
 | `eye_width`, `eye_height` | `1280`, `1440` | fixed host: per-eye render size |
@@ -175,6 +181,11 @@ Through the dev pipe (`[dev] pipe = 1`, `tools\dev\send-input.ps1 -Pipe "<comman
 | `stereo scale <f>`, `stereo pitch <0\|1>`, `stereo positional <0\|1>` | camera settings |
 | `stereo lightfix <0\|1>` | light sort-key patch |
 | `stereo log <n>` | log the eye cameras of the next n stereo frames |
+| `stereo bloomfix [0\|1]` | right-eye bloom fix on/off, with its counters (reduce passes seen, commands queued, draws fixed, misses) |
+| `stereo movie [on\|off]`, `stereo movie menu <0\|1>` | movie detection on/off and its state; `menu 1` counts the menu background players too (test) |
+| `stereo swap <0\|1>` | test: render the right eye into the left half of the target and the left eye into the right half (the eyes then come out swapped). Tells a bug that follows a view's position in the target from one that follows the view |
+| `gpu names on`, `gpu trace <prefix> [dump fullscreen \| dump <from> <to>] [scale <n>]`, `gpu status` | one-frame GPU trace (`docs/re/engine.md`, Tools) |
+| `re peek <rva> <n>`, `re poke <rva> <hex bytes>` | read or patch the game image (to try a patch in a running game) |
 | `stereo host <render\|fixed>` | switch the source of eye size and views (for tests; switching away from `render` leaves the render module in stereo mode) |
 | `cvar get <name>` | integer and float value and set-by priority of a console variable |
 | `cvar set <name> <value>` | set it with console priority (applied on the game thread) |
@@ -236,6 +247,56 @@ Gameplay, first room of the save used by the harness, 1280x720 window, no XR ses
 | stereo 2 x 2064x2208 | 7.0 ms | 7.4 ms |
 | stereo 2 x 2500x2600 | 8.6 ms | 9.0 ms |
 
+## Right-eye bloom fix
+
+Square Enix's bloom builds a mip chain per view with every level at the origin of its
+target, and its first pass reduces the view's full-resolution input (a target holding both
+eyes side by side). That pass's pixel shader samples the input relative to the origin, so
+for the right eye it reduced the left eye's image: the right eye showed a soft copy of the
+left eye's lamps, windows and lit surfaces at the left eye's image positions. Details and
+how it was found: `docs/re/engine.md`, section 10.
+
+`src/engine/src/bloom_fix.cpp`: the hook on the reduce pass's `Process` (render thread)
+appends an RHI command for the first level of a view whose rectangle (`FViewInfo+0x70`) does
+not start at the origin. On the RHI thread the command arms the next DrawIndexed on the
+immediate context, which is that pass's draw: the view's rectangle of the bound input
+(shader resource 0) is copied to the origin of a scratch texture of the same size and format,
+the scratch texture is bound in its place for this one draw, and the engine's binding is put
+back afterwards. The engine's textures are not changed. `stereo bloomfix` shows `applied`
+growing by one per stereo frame and `missed 0`.
+
+Cost: one copy of the eye's rectangle per frame (2064x2208 RGBA16F, 36 MB of copy traffic)
+and a scratch texture as large as the scene colour target (4128x2208 RGBA16F, 73 MB of video
+memory).
+
+Evidence (Null backend, Quest 3 class asymmetric FOV, eyes 2064x2208, right eye, fix off and
+on in the same session): `captures/stereo/runL/crop_room_R_before_after.png` (first room),
+`captures/stereo/runM/crop_street_R_before_after.png` (street outside),
+`captures/stereo/runM/crop_shop_R_before_after.png` (item shop). Full eye images:
+`runL/l_nofix_*.png`, `l_fix2_*.png`, `runM/m09_*`, `n03_*`. The left eye is the same with the
+fix on and off (mean pixel difference 0.6, the same as between two captures without any
+change).
+
+## Movies
+
+The game plays its pre-rendered movies (`.emov` files under
+`End/Content/GameContents/Movie`) through Unreal's media framework: every movie has a
+`UMediaPlayer` asset (`<name>_MediaPlayer`, packages under `/Game/GameContents/Movie/...`),
+and the menu backgrounds use the same mechanism from packages under `/Menu/`.
+
+`src/engine/src/movie_watch.cpp` (`[stereo] movie_screen = 1`): on the game thread it finds
+the `MediaPlayer` class and its `IsPlaying` function by name once (object array and name pool,
+a slice per frame), then keeps scanning the object array a slice per frame (16384 slots) for
+`MediaPlayer` objects and asks each non-menu one `IsPlaying` through `ProcessEvent` every
+frame. While one plays, stereo is switched off: the engine renders the normal window and
+the render module shows it on the virtual screen (the automatic fallback of stereo mode);
+stereo comes back when no movie plays. The switch reallocates the eye target (a short
+hitch at the start and end of a movie).
+
+Status: the class and function are found in gameplay (`stereo movie`); detection of a
+playing movie has not been seen yet (no movie was reached with scripted input), so the key
+is off by default.
+
 ## UI layer
 
 `src/engine/src/ui_layer.cpp` (start function `start_ui_layer`, called by the loader right
@@ -255,9 +316,9 @@ lets the game draw the UI for both eyes again; `uihook status` shows the counter
 
 ## Known problems
 
-- The right eye shows a faint ghost of the left eye's image on glossy surfaces and around
-  lamps, strong with asymmetric headset FOVs; it comes from the post-processing chain
-  (`docs/re/engine.md` section 6, "Evaluation").
+- Square Enix's custom glare (`docs/re/engine.md`, section 10) puts both views' glare at the
+  same place of one target; in a scene with glare primitives the left eye would get the
+  right eye's glare. Not seen yet (no glare primitives in the scenes tested).
 - Without the UI layer (`[ui] layer = 0`, or no XR session) the in-game UI is composited
   into each eye as a central crop of the 16:9 UI; the size variables cannot fix that
   (`docs/re/engine.md`, "What the UI composite does with an eye view"). With it the UI is on
