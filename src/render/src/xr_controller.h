@@ -146,11 +146,15 @@ private:
     std::condition_variable queueCv_;
     std::deque<Waited> queue_;
 
-    // Stereo submission recorded by SubmitStereoFrame (RT), consumed by the Present hook.
+    // Stereo images recorded by SubmitStereoFrame, consumed by the Present hook. A queue:
+    // the engine's render thread may record frame N+1 before the thread that presents
+    // (the RHI thread in this game) has presented frame N.
+    struct PendingStereo {
+        StereoSubmit submit;
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+    };
     std::mutex stereoMutex_;
-    bool stereoPending_ = false;
-    StereoSubmit stereo_{};
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> stereoTexture_;
+    std::deque<PendingStereo> stereoQueue_;
     std::atomic<Mode> mode_{Mode::Screen};
 
     // Screen layer (RT).
@@ -168,6 +172,7 @@ private:
     std::atomic<uint64_t> monoFallbacks_{0};
     GpuTimer gpu_;
     int64_t lastStatsQpc_ = 0;
+    xr::FrameStats lastFrameStats_{};  // backend counters at the previous report (XR thread)
     std::string lastPresentInfo_;
 };
 

@@ -119,6 +119,8 @@ add_library(ff7vr_xr STATIC
   src/capture.cpp
   src/compositor.h
   src/compositor.cpp
+  src/gpu_timer.h
+  src/gpu_timer.cpp
   src/backend_base.h
   src/backend_base.cpp
   src/null_backend.cpp

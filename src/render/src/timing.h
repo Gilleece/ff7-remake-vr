@@ -41,7 +41,8 @@ struct Timing {
     Series hook{"present hook"};                    // our whole Present detour before the real Present
     Series submit{"xr submit"};                     // IXrBackend::SubmitFrame (begin, copies, end frame)
     Series wait{"xr frame wait"};                   // IXrBackend::WaitFrame (xrWaitFrame), on whatever thread calls it
-    Series gpu{"gpu (our copies)"};                 // GPU time between timestamps around our submission
+    Series gpuCopy{"gpu copy"};                     // GPU time of the copies into the XR swapchains (timestamps around each copy)
+    Series gpu{"gpu submit total"};                 // GPU time between timestamps around the whole submission (copies + what the runtime adds)
 };
 Timing& GetTiming();
 

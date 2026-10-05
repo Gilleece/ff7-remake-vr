@@ -62,8 +62,12 @@ void GpuTimer::Begin(ID3D11Device* device, ID3D11DeviceContext* ctx) {
         device_ = device;
     }
     active_ = -1;
+    // Next slot whose results were read; when all are pending, skip this frame rather than stall.
+    uint32_t pick = next_;
+    while (slots_[pick % slots_.size()].pending && pick - next_ < slots_.size()) ++pick;
+    if (pick - next_ == slots_.size()) return;
+    next_ = pick;
     Slot& s = slots_[next_ % slots_.size()];
-    if (s.pending) return;  // results not read yet: skip this frame rather than stall
     if (!s.disjoint) {
         D3D11_QUERY_DESC d{D3D11_QUERY_TIMESTAMP_DISJOINT, 0};
         if (FAILED(device->CreateQuery(&d, &s.disjoint))) return;

@@ -191,6 +191,9 @@ struct InitDesc {
     // by setting each layer's own disable_environment variable before the
     // instance is created. The layers found are listed in RuntimeInfo either way.
     bool disableImplicitApiLayers = false;
+    // Measure the GPU time of the library's own copies with timestamp queries
+    // (read with TakeGpuCopyTimes). Costs a few queries per frame.
+    bool gpuTiming = false;
 
     NullOptions null;
 };
@@ -331,6 +334,10 @@ struct FrameStats {
     uint64_t copyPath = 0, blitPath = 0;  // per-image submission paths used (eyes and quads)
     uint64_t quadUpdates = 0;             // quad layer images copied in
     uint64_t imageWaitTimeouts = 0;       // xrWaitSwapchainImage timed out (image kept for the next frame)
+    // Cumulative CPU time spent inside runtime calls on the submitting thread (OpenXR), milliseconds.
+    double acquireWaitMs = 0;  // xrAcquireSwapchainImage + xrWaitSwapchainImage
+    double releaseMs = 0;      // xrReleaseSwapchainImage
+    double endFrameMs = 0;     // xrBeginFrame + xrEndFrame
 };
 
 class IXrBackend {
@@ -382,6 +389,12 @@ public:
     virtual std::vector<CaptureResult> WaitForCaptures(uint32_t timeoutMs) = 0;
 
     virtual FrameStats GetStats() const = 0;
+
+    // Any thread. With InitDesc::gpuTiming: GPU milliseconds of the copies into
+    // the swapchains, one value per submitted frame, collected since the last call
+    // (results arrive a few frames late). Excludes what the runtime itself does
+    // on the context inside xrEndFrame/xrReleaseSwapchainImage.
+    virtual std::vector<float> TakeGpuCopyTimes() = 0;
 };
 
 std::unique_ptr<IXrBackend> CreateBackend(BackendType type);

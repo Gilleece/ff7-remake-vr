@@ -6,6 +6,7 @@
 #include "capture.h"
 #include "compositor.h"
 #include "d3d11_blitter.h"
+#include "gpu_timer.h"
 
 #include <array>
 #include <atomic>
@@ -41,6 +42,7 @@ public:
     void RequestCapture(const CaptureRequest& req) override { capture_.Request(req); }
     std::vector<CaptureResult> WaitForCaptures(uint32_t timeoutMs) override { return capture_.Wait(timeoutMs); }
     FrameStats GetStats() const override;
+    std::vector<float> TakeGpuCopyTimes() override { return gpuCopy_.Take(); }
     bool GetQuadLayerInfo(LayerHandle layer, SwapchainInfo* out) const override;
 
 protected:
@@ -98,6 +100,11 @@ protected:
     // Validates a SubmitDesc (source regions, quad handles). Logs and returns false on error.
     bool ValidateSubmit(const SubmitDesc& desc);
     void CountStat(uint64_t FrameStats::* field);
+    void AddMs(double FrameStats::* field, int64_t sinceNs) {
+        const double ms = double(QpcNowNs() - sinceNs) / 1e6;
+        std::lock_guard lk(statsMutex_);
+        stats_.*field += ms;
+    }
 
     // RT, inside a saved-state scope, between capture_.BeginFrame and EndFrame:
     // if a capture is active, composites each eye (projection image, may be
@@ -119,6 +126,15 @@ protected:
     Compositor compositor_;
     CaptureManager capture_;
     D3D11StateBackup stateBackup_;  // RT only
+    GpuCopyTimer gpuCopy_;          // RT only (Take: any thread)
+    bool gpuTiming_ = false;
+    // RT: bracket the copies of one frame (no-ops without InitDesc::gpuTiming).
+    void GpuFrameBegin() {
+        if (gpuTiming_) gpuCopy_.BeginFrame(device_.Get(), context_.Get());
+    }
+    void GpuFrameEnd() {
+        if (gpuTiming_) gpuCopy_.EndFrame(context_.Get());
+    }
 
     mutable std::mutex infoMutex_;
     RuntimeInfo info_;

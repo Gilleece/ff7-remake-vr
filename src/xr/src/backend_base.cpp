@@ -124,6 +124,8 @@ Result BackendBase::InitCommon(const InitDesc& desc) {
     if (!blitter_.Init(device_.Get(), &log_)) return Result::Error;
     if (!compositor_.Init(device_.Get(), &log_)) return Result::Error;
     capture_.Init(device_.Get(), &log_, &blitter_);
+    gpuTiming_ = desc.gpuTiming;
+    gpuCopy_.Reset();
     {
         std::lock_guard lk(frameMutex_);
         ring_ = {};
@@ -146,6 +148,7 @@ Result BackendBase::InitCommon(const InitDesc& desc) {
 
 void BackendBase::ShutdownCommon() {
     capture_.Shutdown();
+    gpuCopy_.Reset();
     {
         std::lock_guard lk(quadMutex_);
         quads_ = {};
@@ -263,7 +266,9 @@ bool BackendBase::TransferEye(Eye eye, const SubmitDesc& desc, const EyeTarget& 
     src.mipLevel = desc.mipLevel;
     BlitDest dst{t.texture, t.viewFormat, t.width, t.height, t.arraySlice};
     Blitter::Path path{};
+    if (gpuTiming_) gpuCopy_.Before(context_.Get());
     const bool ok = blitter_.Transfer(context_.Get(), src, EyeRect(desc, eye), dst, &path, outW, outH);
+    if (gpuTiming_) gpuCopy_.After(context_.Get());
     CountPath(statsMutex_, stats_, path);
     return ok;
 }
@@ -277,7 +282,9 @@ bool BackendBase::TransferQuad(const QuadLayer& q, const EyeTarget& t, uint32_t*
     src.mipLevel = q.mipLevel;
     BlitDest dst{t.texture, t.viewFormat, t.width, t.height, t.arraySlice};
     Blitter::Path path{};
+    if (gpuTiming_) gpuCopy_.Before(context_.Get());
     const bool ok = blitter_.Transfer(context_.Get(), src, QuadRect(q), dst, &path, outW, outH);
+    if (gpuTiming_) gpuCopy_.After(context_.Get());
     CountPath(statsMutex_, stats_, path);
     if (ok) CountStat(&FrameStats::quadUpdates);
     return ok;

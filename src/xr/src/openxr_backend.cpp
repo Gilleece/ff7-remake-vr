@@ -318,13 +318,22 @@ Result OpenXrBackend::InitImpl(const InitDesc& desc) {
     // ---- graphics requirements: the runtime's adapter must be the device's adapter ----
     XrGraphicsRequirementsD3D11KHR req{XR_TYPE_GRAPHICS_REQUIREMENTS_D3D11_KHR};
     if (!Check(pfnGetD3D11Req_(instance_, systemId_, &req), "xrGetD3D11GraphicsRequirementsKHR")) return Result::Error;
+    // SteamVR reports LUID 0 until its compositor runs, which happens once a
+    // session exists: ask again briefly, then continue with the device's adapter.
+    for (int i = 0; i < 8 && req.adapterLuid.LowPart == 0 && req.adapterLuid.HighPart == 0; ++i) {
+        if (i == 0) log_.Info("runtime reports no adapter yet (LUID 0); waiting for it to start");
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        if (!Check(pfnGetD3D11Req_(instance_, systemId_, &req), "xrGetD3D11GraphicsRequirementsKHR")) return Result::Error;
+    }
+    const bool luidKnown = req.adapterLuid.LowPart != 0 || req.adapterLuid.HighPart != 0;
+    if (!luidKnown) log_.Info("runtime names no adapter yet; continuing with the device's adapter (SteamVR does this until its compositor runs)");
     info.adapterLuid = (static_cast<uint64_t>(static_cast<uint32_t>(req.adapterLuid.HighPart)) << 32) | req.adapterLuid.LowPart;
     {
         ComPtr<IDXGIDevice> dxgiDevice;
         ComPtr<IDXGIAdapter> adapter;
         DXGI_ADAPTER_DESC ad{};
         if (SUCCEEDED(device_.As(&dxgiDevice)) && SUCCEEDED(dxgiDevice->GetAdapter(&adapter)) && SUCCEEDED(adapter->GetDesc(&ad))) {
-            if (ad.AdapterLuid.LowPart != req.adapterLuid.LowPart || ad.AdapterLuid.HighPart != req.adapterLuid.HighPart) {
+            if (luidKnown && (ad.AdapterLuid.LowPart != req.adapterLuid.LowPart || ad.AdapterLuid.HighPart != req.adapterLuid.HighPart)) {
                 log_.Error("the D3D11 device is on adapter '{}' but the runtime requires adapter LUID {:08X}:{:08X}",
                            WideToUtf8(ad.Description), static_cast<uint32_t>(req.adapterLuid.HighPart), req.adapterLuid.LowPart);
                 return Result::GraphicsMismatch;
@@ -692,10 +701,12 @@ Result OpenXrBackend::BeginLocked(FrameRecord& r) {
     // Caller holds sessionMutex_ and frameMutex_.
     XrFrameBeginInfo bi{XR_TYPE_FRAME_BEGIN_INFO};
     XrResult xr;
+    const int64_t t0 = QpcNowNs();
     {
         ScopedStateBackup backup(stateBackup_, context_.Get());
         xr = xrBeginFrame(session_, &bi);
     }
+    AddMs(&FrameStats::endFrameMs, t0);
     r.begun = true;
     if (xr == XR_FRAME_DISCARDED) {
         CountStat(&FrameStats::framesDiscarded);
@@ -753,10 +764,12 @@ Result OpenXrBackend::EndFrameLocked(int64_t displayTime, const XrCompositionLay
     ei.layerCount = layerCount;
     ei.layers = layers;
     XrResult xr;
+    const int64_t t0 = QpcNowNs();
     {
         ScopedStateBackup backup(stateBackup_, context_.Get());
         xr = xrEndFrame(session_, &ei);
     }
+    AddMs(&FrameStats::endFrameMs, t0);
     if (XR_FAILED(xr)) {
         log_.Error("xrEndFrame failed: {}", Name(xr));
         if (MapError(xr) == Result::SessionLost) state_ = SessionState::Lost;
@@ -840,13 +853,17 @@ OpenXrBackend::ImageWait OpenXrBackend::AcquireAndWait(SwapImages& sc, uint32_t*
 template <class F>
 OpenXrBackend::ImageWait OpenXrBackend::UpdateImage(SwapImages& sc, F&& transfer) {
     uint32_t idx = 0;
+    const int64_t t0 = QpcNowNs();
     const ImageWait w = AcquireAndWait(sc, &idx);
+    AddMs(&FrameStats::acquireWaitMs, t0);
     if (w != ImageWait::Ready) return w;
     uint32_t outW = 0, outH = 0;
     const EyeTarget t{sc.images[idx], sc.format, sc.width, sc.height, 0};
     const bool transferred = transfer(t, &outW, &outH);
     XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+    const int64_t t1 = QpcNowNs();
     const bool released = Check(xrReleaseSwapchainImage(Handle(sc), &ri), "xrReleaseSwapchainImage");
+    AddMs(&FrameStats::releaseMs, t1);
     if (!transferred) {
         // The newest released image now holds undefined content: stop showing it until a good copy.
         if (released) sc.hasImage = false;
@@ -894,6 +911,7 @@ Result OpenXrBackend::SubmitFrame(uint64_t frameId, const SubmitDesc& desc) {
     if (render) {
         ScopedStateBackup backup(stateBackup_, context_.Get());
         capture_.BeginFrame(frameId);
+        GpuFrameBegin();
         LayerImage captureImages[2]{};
 
         // ---- projection layer ----
@@ -958,6 +976,7 @@ Result OpenXrBackend::SubmitFrame(uint64_t frameId, const SubmitDesc& desc) {
             layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&l);
         }
 
+        GpuFrameEnd();
         CaptureComposited(rec, desc, captureImages, eyes_[0].width, eyes_[0].height);
         capture_.EndFrame();
     }

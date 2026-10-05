@@ -201,6 +201,7 @@ public:
         {
             ScopedStateBackup backup(stateBackup_, context_.Get());
             capture_.BeginFrame(frameId);
+            GpuFrameBegin();
             LayerImage projection[2]{};
             if (desc.texture) {
                 for (int e = 0; e < 2; ++e) {
@@ -236,6 +237,7 @@ public:
                     ok = false;
                 }
             }
+            GpuFrameEnd();
             CaptureComposited(rec, desc, projection, opt_.eyeWidth, opt_.eyeHeight);
             capture_.EndFrame();
         }

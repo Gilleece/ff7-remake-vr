@@ -872,6 +872,7 @@ int main(int argc, char** argv) {
     desc.disableImplicitApiLayers = opt.noImplicitLayers;
     desc.null.motion = opt.motion;
     desc.null.paceToRefresh = opt.pace;
+    desc.gpuTiming = true;
 
     const auto tInit = std::chrono::steady_clock::now();
     const xr::Result ir = be->Init(desc);
@@ -967,6 +968,16 @@ int main(int argc, char** argv) {
     Info("frame interval     : {}", run.intervalMs.Summary());
     Info("SubmitFrame (CPU)  : {}", run.submitMs.Summary());
     Info("predicted period   : {}", run.periodMs.Summary());
+    {
+        // GPU time of the library's copies; results arrive a few frames late, so the last frames are missing.
+        Series gpu;
+        for (float ms : be->TakeGpuCopyTimes()) gpu.Add(ms);
+        Info("GPU copies / frame : {}", gpu.Summary());
+        if (run.submitted >= 30 && gpu.v.empty()) {
+            Fail("no GPU copy timings were collected");
+            ok = false;
+        }
+    }
     Info("refresh rate       : {:.2f} Hz; final state {}", ri2.refreshHz, xr::ToString(be->GetState()));
     if (run.shouldRenderFalse) Info("frames with shouldRender=false: {}", run.shouldRenderFalse);
 

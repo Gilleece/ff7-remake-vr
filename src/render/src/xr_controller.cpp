@@ -146,6 +146,7 @@ void XrController::TryInit() {
     d.resolutionScale = cfg_.resolutionScale;
     d.disableImplicitApiLayers = cfg_.disableImplicitLayers;
     d.enableDebugUtils = cfg_.debugUtils;
+    d.gpuTiming = cfg_.gpuTiming;
     d.null.refreshHz = cfg_.nullRefreshHz;
     d.null.paceToRefresh = cfg_.nullPace;
     d.null.motion = cfg_.nullMotion;
@@ -199,6 +200,7 @@ void XrController::TryInit() {
         eyeValid_ = true;
     }
     sessionStarted_ = false;
+    lastFrameStats_ = xr::FrameStats{};
     ready_ = true;
 }
 
@@ -286,8 +288,7 @@ void XrController::Teardown(TeardownReason why, const char* text) {
     queueCv_.notify_all();
     {
         std::lock_guard lk(stereoMutex_);
-        stereoPending_ = false;
-        stereoTexture_.Reset();
+        stereoQueue_.clear();
     }
     {
         std::lock_guard lk(eyeMutex_);
@@ -313,10 +314,27 @@ void XrController::LogStats() {
               seconds, seconds > 0 ? double(frames) / seconds : 0.0, ready_.load() ? BackendName(cfg_.backend) : "off", xr::ToString(st),
               ModeName(mode_.load()), presents_.load(), submittedScreen_.load(), submittedStereo_.load(), presentsWithoutFrame_.load(),
               submitErrors_.load());
-    for (Series* s : {&t.frameInterval, &t.presentCall, &t.hook, &t.submit, &t.wait, &t.gpu}) {
+    std::string runtimeCalls;
+    if (ready_.load()) {
+        std::lock_guard rl(rtMutex_);
+        if (backend_) {
+            for (float ms : backend_->TakeGpuCopyTimes()) t.gpuCopy.Add(ms);
+            const xr::FrameStats cur = backend_->GetStats();
+            const uint64_t ended = (cur.framesSubmitted + cur.framesSkipped) - (lastFrameStats_.framesSubmitted + lastFrameStats_.framesSkipped);
+            if (ended > 0 && cur.framesSubmitted >= lastFrameStats_.framesSubmitted)
+                runtimeCalls = std::format("runtime calls per ended frame (CPU, render thread): acquire+wait image {:.3f} ms, release image {:.3f} ms, "
+                                           "begin+end frame {:.3f} ms (n {})",
+                                           (cur.acquireWaitMs - lastFrameStats_.acquireWaitMs) / double(ended),
+                                           (cur.releaseMs - lastFrameStats_.releaseMs) / double(ended),
+                                           (cur.endFrameMs - lastFrameStats_.endFrameMs) / double(ended), ended);
+            lastFrameStats_ = cur;
+        }
+    }
+    for (Series* s : {&t.frameInterval, &t.presentCall, &t.hook, &t.submit, &t.wait, &t.gpuCopy, &t.gpu}) {
         const std::string line = s->TakeSummary();
         if (!line.empty()) log::info("timing:   {}", line);
     }
+    if (!runtimeCalls.empty()) log::info("timing:   {}", runtimeCalls);
 }
 
 void XrController::StereoTestThread() {
@@ -380,15 +398,14 @@ void XrController::SubmitOne(const PresentInfo& p, const Waited& w) {
     bool stereo = false;
     {
         std::lock_guard lk(stereoMutex_);
-        if (stereoPending_ && stereo_.frameId == w.info.frameId && stereoTexture_) {
-            stereo = true;
-            s = stereo_;
-            stereoTex = stereoTexture_;
-        }
-        if (stereoPending_ && stereo_.frameId <= w.info.frameId) {
-            stereoPending_ = false;
-            stereoTexture_.Reset();
-        }
+        for (const PendingStereo& ps : stereoQueue_)
+            if (ps.submit.frameId == w.info.frameId && ps.texture) {
+                stereo = true;
+                s = ps.submit;
+                stereoTex = ps.texture;
+            }
+        // Images for this frame or older ones are done with (a frame ends exactly once).
+        std::erase_if(stereoQueue_, [&](const PendingStereo& ps) { return ps.submit.frameId <= w.info.frameId; });
     }
     if (stereo) {
         d.texture = stereoTex.Get();
@@ -528,11 +545,14 @@ StereoFrame XrController::BeginGameFrame() {
 }
 
 void XrController::SubmitStereoFrame(const StereoSubmit& s) {
+    if (!s.texture) return;
     std::lock_guard lk(stereoMutex_);
-    stereo_ = s;
-    stereo_.texture = nullptr;
-    stereoTexture_ = s.texture;  // keeps it alive until the Present that submits it
-    stereoPending_ = s.texture != nullptr;
+    PendingStereo ps;
+    ps.submit = s;
+    ps.submit.texture = nullptr;
+    ps.texture = s.texture;  // keeps it alive until the Present that submits it
+    stereoQueue_.push_back(std::move(ps));
+    while (stereoQueue_.size() > 4) stereoQueue_.pop_front();
 }
 
 // ---------------------------------------------------------------------------
@@ -565,7 +585,9 @@ std::string XrController::Status() {
     log::info("status: {}", counters);
     if (ready) log::info("status: screen layer for a {}x{} {} back buffer", screenW_, screenH_, xr::DxgiFormatName(screenFmt_));
     Timing& t = GetTiming();
-    for (Series* s : {&t.frameInterval, &t.presentCall, &t.hook, &t.submit, &t.wait, &t.gpu}) {
+    if (ready)
+        for (float ms : backend_->TakeGpuCopyTimes()) t.gpuCopy.Add(ms);
+    for (Series* s : {&t.frameInterval, &t.presentCall, &t.hook, &t.submit, &t.wait, &t.gpuCopy, &t.gpu}) {
         const std::string line = s->Peek();
         if (!line.empty()) log::info("status: timing since last report: {}", line);
     }
