@@ -276,12 +276,13 @@ Not tested at all:
 
 - **Other headsets and PCs.** The mod has been played only on a Meta Quest 3 through
   Virtual Desktop, on one PC, in the first areas of one save game (Sector 7 slums,
-  indoors and the street). There the 3D
-  rendering works and the right-eye ghost fix was confirmed. Other headsets, Virtual
-  Desktop settings, graphics cards and OpenXR runtimes have not been tried.
+  indoors and the street). There the 3D rendering works and the right-eye ghost fix
+  was confirmed. Other headsets, Virtual Desktop settings, graphics cards and OpenXR
+  runtimes have not been tried.
 - **Combat, conversations, real-time cutscenes, loading screens between areas,
   pre-rendered movies, the pause menu.** None of these was reached in testing
-  without a headset or tried in one; they are for you to try. What to look for: a battle should switch to third person and
+  without a headset or tried in one; they are for you to try. What to look for: a
+  battle should switch to third person and
   back (the battle detection is an educated guess: it reads a battle scene ID that
   is empty outside battles, but it has never been seen in a battle); scripted camera
   shots should be shown as the game frames them (the mod then uses the game's
