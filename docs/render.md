@@ -145,7 +145,7 @@ All keys are optional. `ff7vr.ini` sits next to the DLL.
 | `[render] capture_dir` | `ff7vr-captures` next to the DLL | where relative capture prefixes go |
 | `[xr] enabled` | `1` | `0`: hooks and timing only, no XR session (the baseline for overhead measurements) |
 | `[xr] backend` | `openxr` | `openxr` or `null` (no runtime; captures only) |
-| `[xr] runtime` | `virtualdesktop` | `virtualdesktop`, `steamvr`, `system`, `inherit` or a path to a runtime JSON (see `docs/testing-headless.md`). The machine's default OpenXR runtime is never changed |
+| `[xr] runtime` | `auto` | `auto` (the first runtime with a headset, see "Runtime selection" below), `virtualdesktop`, `steamvr`, `system`, `inherit` or a path to a runtime JSON (see `docs/testing-headless.md`). The machine's default OpenXR runtime is never changed |
 | `[xr] resolution_scale` | `1.0` | scale of the runtime's recommended eye size (stereo render size and eye swapchains) |
 | `[xr] eye_width`, `eye_height` | `0` | explicit eye size instead of the recommendation |
 | `[xr] disable_implicit_layers` | `reshade` | implicit OpenXR API layers to disable for the game process: `0`/`none`, `1`/`all`, or a comma-separated list of parts of a layer's name or manifest path. See below |
@@ -177,7 +177,82 @@ are typically focused at, which is easier on the eyes than a near screen
 with `width` (or nearer with `distance`); the angle is
 `2 * atan(width / 2 / distance)`.
 
-Implicit API layers: OpenXR loads every implicit layer registered on the
+### Runtime selection
+
+`[xr] runtime` picks the OpenXR runtime for the game process only: it sets
+`XR_RUNTIME_JSON` in the process and passes the same path to the loader as a
+loader property (`xrInitializeLoaderKHR`). The registry is only read.
+
+With `auto` (the default) every attempt (`ff7vr xr` thread, every
+`retry_interval` seconds until a session exists) builds a candidate list
+(`EnumerateRuntimeCandidates`, `src/xr/src/runtime_select.cpp`):
+
+1. sources: `ActiveRuntime` under `HKLM\SOFTWARE\Khronos\OpenXR\1`, every
+   enabled value under `...\AvailableRuntimes`, and the install folders of
+   runtimes that may not be registered: Virtual Desktop
+   (`%ProgramFiles%\Virtual Desktop Streamer\OpenXR\virtualdesktop-openxr.json`),
+   SteamVR (`openvrpaths.vrpath`, then the Steam folder), PICO
+   (`%ProgramFiles%\PICO Streaming Service\openxr_runtime_pc\PicoStreamingXRRuntime\picostreaming-openxr.json`),
+   Meta Quest Link (`Base` of `HKLM\SOFTWARE\Oculus VR, LLC\Oculus`, else
+   `%ProgramFiles%\Oculus`, then `Support\oculus-runtime\oculus_openxr_64.json`),
+   Windows Mixed Reality (`%SystemRoot%\System32\MixedRealityRuntime.json`) and
+   Pimax (`%ProgramFiles%\Pimax\Runtime\PiOpenXR_64.json`). The first three were
+   seen on a test PC; the others are the vendors' documented locations, not
+   tried. PimaxXR, Varjo and Monado are recognised by their manifest names when
+   registered. Duplicates (same file) are dropped;
+2. order: runtimes whose process runs (`VirtualDesktop.Streamer.exe`,
+   `vrserver.exe`, `OVRServer_x64.exe`, `PICO Connect.exe`,
+   `MixedRealityPortal.exe`), then the active runtime, then the rest;
+3. each candidate is probed (`ProbeRuntime`, `src/xr/src/runtime_probe.cpp`):
+   loader pointed at its manifest, extension list (must offer
+   `XR_KHR_D3D11_enable`), `xrCreateInstance`, `xrGetSystem` for a
+   head-mounted display, `xrDestroyInstance`. The first that returns a system
+   wins and the normal initialisation runs with it.
+   `XR_ERROR_FORM_FACTOR_UNAVAILABLE` (no headset), load failures and other
+   errors move on to the next;
+4. not probed: SteamVR, Meta Quest Link and Windows Mixed Reality while their
+   process is not running, unless they are the active runtime (loading their
+   runtime starts their server, which a game is expected to do only for the
+   PC's default); PICO while PICO Connect is not running, also when active,
+   because its runtime (1.1.46) answers `xrGetSystem` with a system called
+   `pico` when no PICO headset was ever connected, so its answer says nothing.
+
+Switching runtimes inside one process works with the static loader
+(OpenXR-SDK 1.1.63): the loader keeps the runtime library it loaded until the
+last `XrInstance` is destroyed (`LoaderXrDestroyInstance` calls
+`RuntimeInterface::UnloadRuntime`) or until `xrInitializeLoaderKHR` is called
+while no instance exists (`InitializeLoaderInitData` unloads it and replaces
+the loader properties); the next call that needs a runtime reads
+`XR_RUNTIME_JSON` again (`RuntimeManifestFile::FindManifestFiles`). Verified
+with `ff7vr_runtime_probe` (target in `src/xr/CMakeLists.txt`, not built by
+default): Virtual Desktop, PICO, Virtual Desktop, PICO and then SteamVR,
+Virtual Desktop, SteamVR, Virtual Desktop, SteamVR in one process each
+reported its own runtime name (`VirtualDesktopXR` 1.0.10, `PICO XR Runtime`
+1.1.46, `SteamVR/OpenXR` 2.18.2).
+
+Log lines (they stay at info level during repeated attempts):
+
+```
+xr: OpenXR runtime (auto): skipped Virtual Desktop (...virtualdesktop-openxr.json): no headset connected (XR_ERROR_FORM_FACTOR_UNAVAILABLE) [36 ms]
+xr: OpenXR runtime (auto): chose SteamVR - runtime 'SteamVR/OpenXR' 2.18.2, headset 'SteamVR/OpenXR : null', manifest ...steamxr_win64.json (vrserver.exe running; probe 2199 ms)
+xr: OpenXR runtime (auto), round 1: no headset found: Virtual Desktop (...): no headset connected (...) [37 ms]; SteamVR (...): not running (looked for vrserver.exe); loading it would start it; PICO (...): not running (...); its runtime reports a headset even when none is connected
+```
+
+A round line is repeated when its text changes, otherwise at rounds 2, 4, 8,
+...; the others go to debug level. A round costs one instance per probed
+runtime (Virtual Desktop without a headset: 36 to 80 ms). The winner's instance
+is created twice (probe, then the session); with SteamVR each takes about 2.2 s
+in the game process.
+
+Known limits: a runtime that reports a system without a headset (like PICO's)
+would win if it were probed; a session, once created, is kept, so connecting
+a different headset later needs `xr-restart` or `xr-runtime auto`; the
+process names that mark a runtime as running for Meta Quest Link, PICO and
+Windows Mixed Reality are untested.
+
+### Implicit API layers
+
+OpenXR loads every implicit layer registered on the
 machine into the game. Registered layers seen on a typical machine with
 Virtual Desktop and ReShade installed:
 
@@ -204,8 +279,8 @@ presented (so the game's device is known) and then:
 
 | Situation | What happens |
 |---|---|
-| no headset (`SystemUnavailable`: Virtual Desktop running without a connected headset returns `XR_ERROR_FORM_FACTOR_UNAVAILABLE`) | logged once, retried every `retry_interval` seconds; later failures are logged at 2, 4, 8, ... attempts |
-| runtime missing (`RuntimeUnavailable`: the runtime JSON or its DLL does not exist) | same, at least every 30 s |
+| no headset (`SystemUnavailable`: Virtual Desktop running without a connected headset returns `XR_ERROR_FORM_FACTOR_UNAVAILABLE`; with `auto`, at least one runtime loaded but none had a headset) | logged once, retried every `retry_interval` seconds; later failures are logged at 2, 4, 8, ... attempts |
+| runtime missing (`RuntimeUnavailable`: the runtime JSON or its DLL does not exist; with `auto`, no candidate loaded at all) | same, at least every 30 s |
 | wrong GPU (`GraphicsMismatch`) | logged, not retried until `xr-restart` |
 | session created, not yet running | frames are polled every 10 ms; the game presents normally |
 | session lost | session ended, new attempt after `retry_interval` |
