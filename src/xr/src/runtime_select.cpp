@@ -2,6 +2,8 @@
 // never writes machine-wide state. The system default runtime is untouched.
 #include "xr_common.h"
 
+#include <tlhelp32.h>
+
 #include <algorithm>
 #include <cstdlib>
 #include <cwctype>
@@ -12,6 +14,7 @@ namespace ff7vr::xr {
 namespace {
 
 std::wstring FindInAvailableRuntimes(const wchar_t* needleLower);
+std::string JsonStringValue(const std::string& json, const char* key);
 
 bool FileExists(const std::wstring& p) {
     const DWORD a = GetFileAttributesW(p.c_str());
@@ -118,6 +121,10 @@ bool ResolveRuntimeJson(std::string_view selection, std::string* outPath, std::s
         if (outPath) outPath->clear();
         return true;
     }
+    if (IsAutoRuntimeSelection(selection)) {
+        if (error) *error = "'auto' is a choice among several runtimes, not one runtime";
+        return false;
+    }
     if (sel == L"steamvr" || sel == L"steam") {
         path = FindSteamVr();
         if (path.empty()) {
@@ -164,6 +171,210 @@ bool ApplyRuntimeSelection(std::string_view selection, std::string* outPath, std
     }
     if (outPath) *outPath = path;
     return true;
+}
+
+bool IsAutoRuntimeSelection(std::string_view selection) {
+    const std::wstring sel = Lower(Utf8ToWide(selection));
+    return sel == L"auto" || sel == L"any";
+}
+
+namespace {
+
+// ---- automatic choice: candidates ----
+
+std::wstring ProgramFiles64() {
+    std::wstring pf = GetEnvW(L"ProgramW6432");
+    return pf.empty() ? GetEnvW(L"ProgramFiles") : pf;
+}
+
+std::wstring FileNameLower(const std::wstring& path) {
+    const size_t s = path.find_last_of(L"\\/");
+    return Lower(s == std::wstring::npos ? path : path.substr(s + 1));
+}
+
+std::wstring Canonical(const std::wstring& path) {
+    wchar_t full[MAX_PATH * 4];
+    const DWORD n = GetFullPathNameW(path.c_str(), static_cast<DWORD>(std::size(full)), full, nullptr);
+    return Lower((n > 0 && n < std::size(full)) ? std::wstring(full, n) : path);
+}
+
+std::wstring FindOculus() {
+    // The Oculus/Meta PC app records its install folder; default C:\Program Files\Oculus.
+    for (const REGSAM view : {KEY_WOW64_64KEY, KEY_WOW64_32KEY}) {
+        HKEY key = nullptr;
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Oculus VR, LLC\\Oculus", 0, KEY_READ | view, &key) != ERROR_SUCCESS) continue;
+        wchar_t buf[2048];
+        DWORD size = sizeof(buf);
+        const bool ok = RegGetValueW(key, nullptr, L"Base", RRF_RT_REG_SZ, nullptr, buf, &size) == ERROR_SUCCESS;
+        RegCloseKey(key);
+        if (ok) {
+            std::wstring base = buf;
+            if (!base.empty() && base.back() != L'\\') base += L'\\';
+            const std::wstring p = base + L"Support\\oculus-runtime\\oculus_openxr_64.json";
+            if (FileExists(p)) return p;
+        }
+    }
+    const std::wstring p = ProgramFiles64() + L"\\Oculus\\Support\\oculus-runtime\\oculus_openxr_64.json";
+    return FileExists(p) ? p : std::wstring();
+}
+
+std::wstring FindPico() {
+    const std::wstring p = ProgramFiles64() + L"\\PICO Streaming Service\\openxr_runtime_pc\\PicoStreamingXRRuntime\\picostreaming-openxr.json";
+    return FileExists(p) ? p : std::wstring();
+}
+
+std::wstring FindWmr() {
+    const std::wstring sys = GetEnvW(L"SystemRoot");
+    if (sys.empty()) return {};
+    const std::wstring p = sys + L"\\System32\\MixedRealityRuntime.json";
+    return FileExists(p) ? p : std::wstring();
+}
+
+std::wstring FindPimax() {
+    const std::wstring p = ProgramFiles64() + L"\\Pimax\\Runtime\\PiOpenXR_64.json";
+    return FileExists(p) ? p : std::wstring();
+}
+
+std::wstring FindVirtualDesktopInstall() {
+    const std::wstring p = ProgramFiles64() + L"\\Virtual Desktop Streamer\\OpenXR\\virtualdesktop-openxr.json";
+    return FileExists(p) ? p : std::wstring();
+}
+
+// Runtimes the mod knows by name. Matched by the manifest's file name; the
+// install path is a fallback for a runtime that is installed but not registered.
+struct KnownRuntime {
+    const char* name;
+    const wchar_t* manifestFile;  // lower case
+    std::vector<const wchar_t*> processes;
+    // Non-null: probe only while one of `processes` runs (or, with probeWhenActive,
+    // while it is the machine's active runtime); the text says why.
+    const char* needsRunningBecause;
+    bool probeWhenActive;
+    std::wstring (*find)();
+};
+
+constexpr const char* kStartsServer = "loading it would start it";
+// Seen on a PC with PICO's streaming service and no PICO headset: xrGetSystem
+// returns a system ('pico'), so a probe cannot tell whether a headset is there.
+constexpr const char* kReportsSystemAlways = "its runtime reports a headset even when none is connected";
+
+const std::vector<KnownRuntime>& KnownRuntimes() {
+    static const std::vector<KnownRuntime> k = {
+        {"Virtual Desktop", L"virtualdesktop-openxr.json", {L"VirtualDesktop.Streamer.exe"}, nullptr, false, &FindVirtualDesktopInstall},
+        {"SteamVR", L"steamxr_win64.json", {L"vrserver.exe"}, kStartsServer, true, &FindSteamVr},
+        {"Meta Quest Link (Oculus)", L"oculus_openxr_64.json", {L"OVRServer_x64.exe"}, kStartsServer, true, &FindOculus},
+        {"PICO", L"picostreaming-openxr.json", {L"PICO Connect.exe", L"PICO Connect TMP.exe"}, kReportsSystemAlways, false, &FindPico},
+        {"Windows Mixed Reality", L"mixedrealityruntime.json", {L"MixedRealityPortal.exe"}, kStartsServer, true, &FindWmr},
+        {"Pimax", L"piopenxr_64.json", {}, nullptr, false, &FindPimax},
+        {"PimaxXR", L"pimax-openxr.json", {}, nullptr, false, nullptr},
+        {"Varjo", L"varjoopenxr.json", {}, nullptr, false, nullptr},
+        {"Monado", L"openxr_monado.json", {}, nullptr, false, nullptr},
+    };
+    return k;
+}
+
+std::vector<std::wstring> RunningProcessesLower() {
+    std::vector<std::wstring> out;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return out;
+    PROCESSENTRY32W pe{sizeof(pe)};
+    for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe)) out.push_back(Lower(pe.szExeFile));
+    CloseHandle(snap);
+    return out;
+}
+
+std::string ManifestRuntimeName(const std::wstring& manifest) {
+    std::ifstream f(manifest, std::ios::binary);
+    if (!f) return {};
+    std::stringstream ss;
+    ss << f.rdbuf();
+    const std::string s = ss.str();
+    const size_t r = s.find("\"runtime\"");
+    if (r == std::string::npos) return {};
+    std::string name = JsonStringValue(s.substr(r), "name");
+    while (!name.empty() && name.front() == ' ') name.erase(name.begin());
+    return name;
+}
+
+}  // namespace
+
+std::vector<RuntimeCandidate> EnumerateRuntimeCandidates() {
+    struct Entry {
+        std::wstring path;
+        std::string origin;
+    };
+    std::vector<Entry> found;
+    auto add = [&](const std::wstring& p, const char* origin) {
+        if (p.empty() || !FileExists(p)) return;
+        const std::wstring c = Canonical(p);
+        for (const Entry& e : found)
+            if (Canonical(e.path) == c) return;
+        found.push_back({p, origin});
+    };
+    const std::wstring active = RegString(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Khronos\\OpenXR\\1", L"ActiveRuntime");
+    add(active, "active runtime");
+    {
+        HKEY key = nullptr;
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Khronos\\OpenXR\\1\\AvailableRuntimes", 0, KEY_READ | KEY_WOW64_64KEY, &key) ==
+            ERROR_SUCCESS) {
+            for (DWORD i = 0;; ++i) {
+                wchar_t name[2048];
+                DWORD nameLen = 2048;
+                DWORD type = 0, data = 0, dataSize = sizeof(data);
+                if (RegEnumValueW(key, i, name, &nameLen, nullptr, &type, reinterpret_cast<BYTE*>(&data), &dataSize) != ERROR_SUCCESS)
+                    break;
+                // Value 1 marks a runtime its installer registered as disabled.
+                if (type == REG_DWORD && data != 0) continue;
+                add(std::wstring(name, nameLen), "registered");
+            }
+            RegCloseKey(key);
+        }
+    }
+    for (const KnownRuntime& k : KnownRuntimes())
+        if (k.find) add(k.find(), "install folder");
+
+    const std::vector<std::wstring> procs = RunningProcessesLower();
+    const std::wstring activeCanon = active.empty() ? std::wstring() : Canonical(active);
+    std::vector<RuntimeCandidate> out;
+    for (const Entry& e : found) {
+        RuntimeCandidate c;
+        c.manifest = WideToUtf8(e.path);
+        c.origin = e.origin;
+        c.active = !activeCanon.empty() && Canonical(e.path) == activeCanon;
+        const std::wstring file = FileNameLower(e.path);
+        const KnownRuntime* known = nullptr;
+        for (const KnownRuntime& k : KnownRuntimes())
+            if (file == k.manifestFile) known = &k;
+        if (known) {
+            c.name = known->name;
+            if (known->needsRunningBecause) c.needsRunningBecause = known->needsRunningBecause;
+            c.probeWhenActive = known->probeWhenActive;
+            for (const wchar_t* p : known->processes) {
+                if (!c.processesLookedFor.empty()) c.processesLookedFor += ", ";
+                c.processesLookedFor += WideToUtf8(p);
+                if (c.runningProcess.empty() && std::find(procs.begin(), procs.end(), Lower(p)) != procs.end())
+                    c.runningProcess = WideToUtf8(p);
+            }
+        } else {
+            c.name = ManifestRuntimeName(e.path);
+            if (c.name.empty()) c.name = WideToUtf8(FileNameLower(e.path));
+        }
+        out.push_back(std::move(c));
+    }
+    // Running first, then the active runtime, then the rest (stable: registry order).
+    std::stable_sort(out.begin(), out.end(), [](const RuntimeCandidate& a, const RuntimeCandidate& b) {
+        auto rank = [](const RuntimeCandidate& c) { return !c.runningProcess.empty() ? 0 : c.active ? 1 : 2; };
+        return rank(a) < rank(b);
+    });
+    return out;
+}
+
+bool ShouldProbeRuntime(const RuntimeCandidate& c, std::string* skipReason) {
+    if (c.needsRunningBecause.empty() || !c.runningProcess.empty() || (c.active && c.probeWhenActive)) return true;
+    if (skipReason)
+        *skipReason = "not running (looked for " + (c.processesLookedFor.empty() ? std::string("its process") : c.processesLookedFor) +
+                      "); " + c.needsRunningBecause;
+    return false;
 }
 
 namespace {

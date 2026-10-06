@@ -42,7 +42,7 @@ RenderConfig LoadConfig(const StartupContext& ctx) {
     } else if (backend != "openxr") {
         log::warn("render: [xr] backend = '{}' is unknown; using openxr", backend);
     }
-    r.runtime = c.get_string("xr", "runtime", r.runtime);
+    r.runtime = c.get_string("xr", "runtime", "auto");  // auto: the first runtime found that has a headset
     r.resolutionScale = static_cast<float>(std::clamp(c.get_float("xr", "resolution_scale", r.resolutionScale), 0.1, 4.0));
     r.eyeWidth = static_cast<uint32_t>(std::clamp<long long>(c.get_int("xr", "eye_width", 0), 0, 16384));
     r.eyeHeight = static_cast<uint32_t>(std::clamp<long long>(c.get_int("xr", "eye_height", 0), 0, 16384));

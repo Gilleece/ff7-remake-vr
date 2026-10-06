@@ -113,6 +113,7 @@ add_library(ff7vr_xr STATIC
   src/xr_common.h
   src/xr_common.cpp
   src/runtime_select.cpp
+  src/runtime_probe.cpp
   src/d3d11_blitter.h
   src/d3d11_blitter.cpp
   src/capture.h
@@ -146,3 +147,8 @@ target_link_libraries(ff7vr_xr
   PUBLIC  d3d11 dxgi
   PRIVATE openxr_loader advapi32)
 set_property(TARGET ff7vr_xr PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
+# Command-line probe of the OpenXR runtimes on this machine (not built by default).
+add_executable(ff7vr_runtime_probe EXCLUDE_FROM_ALL tools/runtime_probe.cpp)
+target_link_libraries(ff7vr_runtime_probe PRIVATE ff7vr_xr)
+set_property(TARGET ff7vr_runtime_probe PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")

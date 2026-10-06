@@ -97,7 +97,9 @@ namespace ff7vr::xr {
 
 constexpr uint32_t kMaxFramesInFlight = 4;
 
-enum class LogLevel { Debug, Info, Warn, Error };
+// Notice: an informational line the host should show even while it quiets the
+// messages of repeated failed attempts (the runtime choice, one line per probe round).
+enum class LogLevel { Debug, Info, Warn, Error, Notice };
 
 // Host-provided log sink. May be called from any thread, concurrently.
 using LogCallback = std::function<void(LogLevel level, std::string_view message)>;
@@ -168,10 +170,11 @@ struct InitDesc {
     LogCallback log;                 // optional (nullptr = silent)
 
     // OpenXR runtime selection, applied per process before the loader creates
-    // the instance (see ApplyRuntimeSelection). "" or "inherit" = leave the
-    // process environment as is. Default: "virtualdesktop" (VDXR, Quest via
-    // Virtual Desktop), regardless of the machine's default runtime.
-    std::string runtime = "virtualdesktop";
+    // the instance (see ApplyRuntimeSelection). "auto" (default) = probe the
+    // runtimes found on the machine and take the first one that has a headset
+    // (see EnumerateRuntimeCandidates). "" or "inherit" = leave the process
+    // environment as is. The machine's default runtime is never changed.
+    std::string runtime = "auto";
     std::string appName = "ff7-remake-vr";
     uint32_t appVersion = 1;
 
@@ -458,8 +461,50 @@ std::unique_ptr<IXrBackend> CreateBackend(BackendType type);
 // works in an elevated process where the loader ignores environment variables.
 // Never touches the registry. Returns the resolved JSON path ("" for system)
 // or an error message in *error.
+//            "auto"           -> not a single runtime: see EnumerateRuntimeCandidates;
+//                                ResolveRuntimeJson rejects it, IsAutoRuntimeSelection tells
 bool ResolveRuntimeJson(std::string_view selection, std::string* outPath, std::string* error);
 bool ApplyRuntimeSelection(std::string_view selection, std::string* outPath, std::string* error);
+bool IsAutoRuntimeSelection(std::string_view selection);  // "auto", "any"
+
+// ---- automatic runtime choice ([xr] runtime = auto) ----
+// A runtime that could drive the headset, found in the registry or at a known
+// install path. Never written anywhere; reading only.
+struct RuntimeCandidate {
+    std::string name;            // "Virtual Desktop", "SteamVR", ... or the manifest's runtime name
+    std::string manifest;        // absolute path of the runtime JSON
+    std::string origin;          // "active runtime", "registered", "install folder"
+    bool active = false;         // the machine's default (registry ActiveRuntime)
+    std::string runningProcess;  // the runtime's server/streamer process seen running ("" = none)
+    std::string processesLookedFor;  // the process names that count as running ("" = none known)
+    // Non-empty: probed only while its process runs (see ShouldProbeRuntime), because
+    // loading it would start its server (SteamVR, Oculus, Windows Mixed Reality) or
+    // because its answer does not tell whether a headset is there (PICO).
+    std::string needsRunningBecause;
+    bool probeWhenActive = false;  // ... unless it is the active runtime (then it is probed like any OpenXR game would)
+};
+// False with the reason when the candidate is to be skipped without loading it.
+bool ShouldProbeRuntime(const RuntimeCandidate& c, std::string* skipReason);
+// Order: runtimes whose server/streamer process is running, then the active
+// runtime, then every other registered or installed one. One entry per manifest.
+std::vector<RuntimeCandidate> EnumerateRuntimeCandidates();
+
+// Loads one runtime in this process (XR_RUNTIME_JSON for this process plus the
+// loader property; the loader unloads whatever runtime it had loaded, which it
+// allows while no XrInstance exists), creates an instance with XR_KHR_D3D11_enable
+// and asks for a head-mounted system. The instance is destroyed again, which
+// unloads the runtime. Ok: a headset is there. SystemUnavailable: the runtime
+// works but has no headset (XR_ERROR_FORM_FACTOR_UNAVAILABLE). RuntimeUnavailable:
+// it did not load, lacks D3D11 or failed. Never call while an XrInstance exists.
+struct RuntimeProbe {
+    Result result = Result::RuntimeUnavailable;
+    std::string reason;       // why it was rejected ("" when Ok)
+    std::string runtimeName;  // XrInstanceProperties::runtimeName, when an instance was created
+    std::string runtimeVersion;
+    std::string systemName;   // when Ok
+    double ms = 0;            // time the probe took
+};
+RuntimeProbe ProbeRuntime(const std::string& manifest);
 
 // Implicit API layers registered for this user/machine (HKLM and HKCU).
 struct ImplicitLayer {

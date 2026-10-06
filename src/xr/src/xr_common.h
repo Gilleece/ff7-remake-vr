@@ -30,6 +30,8 @@ public:
     void Warn(std::format_string<A...> f, A&&... a) const { Emit(LogLevel::Warn, f, std::forward<A>(a)...); }
     template <class... A>
     void Error(std::format_string<A...> f, A&&... a) const { Emit(LogLevel::Error, f, std::forward<A>(a)...); }
+    template <class... A>
+    void Notice(std::format_string<A...> f, A&&... a) const { Emit(LogLevel::Notice, f, std::forward<A>(a)...); }
 
 private:
     template <class... A>
@@ -57,5 +59,10 @@ std::wstring Utf8ToWide(std::string_view s);
 std::string WideToUtf8(std::wstring_view s);
 
 int64_t QpcNowNs();
+
+// Points the OpenXR loader of this process at a runtime manifest ("" = the
+// machine's default): XR_RUNTIME_JSON plus the loader property, which also
+// unloads a runtime loaded earlier. Only while no XrInstance exists.
+bool PointLoaderAtRuntime(const std::string& manifest, std::string* error);
 
 }  // namespace ff7vr::xr

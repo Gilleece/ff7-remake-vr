@@ -170,9 +170,9 @@ void XrController::TryInit() {
     d.log = [quiet](xr::LogLevel level, std::string_view msg) {
         log::Level l = level == xr::LogLevel::Error ? log::Level::Error
                        : level == xr::LogLevel::Warn ? log::Level::Warn
-                       : level == xr::LogLevel::Info ? log::Level::Info
-                                                     : log::Level::Debug;
-        if (quiet) l = log::Level::Debug;
+                       : level == xr::LogLevel::Info || level == xr::LogLevel::Notice ? log::Level::Info
+                                                                                        : log::Level::Debug;
+        if (quiet && level != xr::LogLevel::Notice) l = log::Level::Debug;
         if (log::enabled(l)) log::write(l, std::string("xr: ") + std::string(msg));
     };
     d.runtime = cfg_.runtime;

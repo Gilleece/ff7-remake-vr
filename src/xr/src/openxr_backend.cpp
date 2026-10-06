@@ -80,6 +80,9 @@ private:
     bool Check(XrResult r, const char* what) const;
     Result MapError(XrResult r) const;
     Result InitImpl(const InitDesc& desc);
+    // [xr] runtime = auto: probes the candidates in order and points the loader at
+    // the first one with a headset. SystemUnavailable / RuntimeUnavailable when none.
+    Result ChooseRuntime(std::string* manifest);
     void DestroyAll();
     void PollEvents();
     void HandleSessionState(XrSessionState s);
@@ -162,6 +165,72 @@ Result OpenXrBackend::MapError(XrResult r) const {
 }
 
 // ---------------------------------------------------------------------------
+// Automatic runtime choice
+// ---------------------------------------------------------------------------
+// Rounds without a headset, across backend instances (the host creates a new
+// backend for every attempt). A round's line is logged when it differs from the
+// previous round's, and otherwise at rounds 2, 4, 8, ... like the host's own
+// "still no session" lines.
+std::mutex g_roundMutex;
+uint64_t g_failedRounds = 0;
+std::string g_lastRoundSummary;
+
+Result OpenXrBackend::ChooseRuntime(std::string* manifest) {
+    const std::vector<RuntimeCandidate> candidates = EnumerateRuntimeCandidates();
+    std::vector<std::string> rejected;
+    const RuntimeCandidate* chosen = nullptr;
+    RuntimeProbe chosenProbe;
+    bool anyRuntimeLoaded = false;
+    for (const RuntimeCandidate& c : candidates) {
+        std::string skip;
+        if (!ShouldProbeRuntime(c, &skip)) {
+            rejected.push_back(std::format("{} ({}): {}", c.name, c.manifest, skip));
+            continue;
+        }
+        RuntimeProbe p = ProbeRuntime(c.manifest);
+        if (p.result == Result::Ok) {
+            chosen = &c;
+            chosenProbe = std::move(p);
+            break;
+        }
+        if (p.result == Result::SystemUnavailable) anyRuntimeLoaded = true;
+        rejected.push_back(std::format("{} ({}): {} [{:.0f} ms]", c.name, c.manifest, p.reason, p.ms));
+    }
+
+    std::lock_guard lk(g_roundMutex);
+    if (!chosen) {
+        ++g_failedRounds;
+        std::string summary;
+        for (const std::string& r : rejected) summary += (summary.empty() ? "" : "; ") + r;
+        if (summary.empty())
+            summary = "no OpenXR runtime found (registry ActiveRuntime and AvailableRuntimes, known install folders)";
+        const bool changed = summary != g_lastRoundSummary;
+        const bool pow2 = (g_failedRounds & (g_failedRounds - 1)) == 0;
+        if (changed || pow2)
+            log_.Notice("OpenXR runtime (auto), round {}: no headset found: {}", g_failedRounds, summary);
+        else
+            log_.Debug("OpenXR runtime (auto), round {}: unchanged", g_failedRounds);
+        g_lastRoundSummary = std::move(summary);
+        return anyRuntimeLoaded ? Result::SystemUnavailable : Result::RuntimeUnavailable;
+    }
+    for (const std::string& r : rejected) log_.Notice("OpenXR runtime (auto): skipped {}", r);
+    std::string why = !chosen->runningProcess.empty() ? chosen->runningProcess + " running" : std::string();
+    if (chosen->active) why += why.empty() ? "the PC's active runtime" : ", the PC's active runtime";
+    if (why.empty()) why = chosen->origin;
+    log_.Notice("OpenXR runtime (auto): chose {} - runtime '{}' {}, headset '{}', manifest {} ({}; probe {:.0f} ms{})", chosen->name,
+                chosenProbe.runtimeName, chosenProbe.runtimeVersion, chosenProbe.systemName, chosen->manifest, why, chosenProbe.ms,
+                g_failedRounds ? std::format(", after {} rounds without a headset", g_failedRounds) : std::string());
+    g_failedRounds = 0;
+    g_lastRoundSummary.clear();
+    std::string err;
+    if (!ApplyRuntimeSelection(chosen->manifest, manifest, &err)) {
+        log_.Error("runtime selection '{}': {}", chosen->manifest, err);
+        return Result::RuntimeUnavailable;
+    }
+    return Result::Ok;
+}
+
+// ---------------------------------------------------------------------------
 // Init / Shutdown
 // ---------------------------------------------------------------------------
 Result OpenXrBackend::Init(const InitDesc& desc) {
@@ -181,9 +250,18 @@ Result OpenXrBackend::InitImpl(const InitDesc& desc) {
     RuntimeInfo info;
     info.backend = BackendType::OpenXR;
 
+    // ---- implicit API layers (before any runtime is loaded, probes included) ----
+    std::vector<std::string> disabledLayers;
+    if (desc.disableImplicitApiLayers)
+        DisableImplicitApiLayers(&disabledLayers);
+    else if (!desc.disableImplicitApiLayersMatching.empty())
+        DisableImplicitApiLayersMatching(desc.disableImplicitApiLayersMatching, &disabledLayers);
+
     // ---- runtime selection (this process only) ----
     std::string err;
-    if (!ApplyRuntimeSelection(desc.runtime, &runtimeJson_, &err)) {
+    if (IsAutoRuntimeSelection(desc.runtime)) {
+        if (const Result r = ChooseRuntime(&runtimeJson_); r != Result::Ok) return r;
+    } else if (!ApplyRuntimeSelection(desc.runtime, &runtimeJson_, &err)) {
         log_.Error("runtime selection '{}': {}", desc.runtime, err);
         return Result::RuntimeUnavailable;
     }
@@ -205,12 +283,7 @@ Result OpenXrBackend::InitImpl(const InitDesc& desc) {
         }
     }
 
-    // ---- implicit API layers ----
-    std::vector<std::string> disabledLayers;
-    if (desc.disableImplicitApiLayers)
-        DisableImplicitApiLayers(&disabledLayers);
-    else if (!desc.disableImplicitApiLayersMatching.empty())
-        DisableImplicitApiLayersMatching(desc.disableImplicitApiLayersMatching, &disabledLayers);
+    // ---- implicit API layers: what the registry lists ----
     for (const ImplicitLayer& l : EnumerateImplicitApiLayers()) {
         const bool disabledHere = std::find(disabledLayers.begin(), disabledLayers.end(), l.manifest) != disabledLayers.end();
         info.implicitLayers.push_back(l.manifest + (disabledHere ? " (disabled for this process)"
@@ -450,6 +523,9 @@ Result OpenXrBackend::InitImpl(const InitDesc& desc) {
         }
         w = std::clamp(w, 16u, std::max(16u, vcv[e].maxImageRectWidth));
         h = std::clamp(h, 16u, std::max(16u, vcv[e].maxImageRectHeight));
+        // Runtimes may also limit any swapchain below the view's maximum.
+        if (info.maxSwapchainWidth) w = std::min(w, std::max(16u, info.maxSwapchainWidth));
+        if (info.maxSwapchainHeight) h = std::min(h, std::max(16u, info.maxSwapchainHeight));
         if (const Result r = CreateSwapchain(w, h, format_, &eyes_[e]); r != Result::Ok) return r;
         info.eyeSwapchain[e] = SwapchainInfo{w, h, format_, static_cast<uint32_t>(eyes_[e].images.size())};
         D3D11_TEXTURE2D_DESC td{};
