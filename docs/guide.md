@@ -414,6 +414,7 @@ in commit `ef2688a` (a package's folder name contains the commit it was built fr
 later one has the fix). It needs an NVIDIA RTX graphics
 card with a current driver: the DLSS model comes with the driver (or from an
 `nvngx_dlss.dll` in the game folder), and if the NVIDIA App's DLSS override is set for
-this game, the App's choice of model applies, not `[dlss] preset`; with that override,
-leave `[stereo] dynamic_resolution` off while DLSS is on (every change of the render size
-then stutters for a frame). Packages without `-dlss` ignore the `[dlss]` section.
+this game, the App's choice of model applies, not `[dlss] preset`. The App's
+"DLSS override - Super Resolution" for this game must stay at the application's choice: if
+it forces DLAA, DLSS cannot upscale and you see the game's own image (the log says why).
+Packages without `-dlss` ignore the `[dlss]` section.

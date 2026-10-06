@@ -213,7 +213,8 @@ room of the test save, third person, still camera; street = the alley outside, f
 reached by walking (`captures/dlss/r23` at 3072x3264, `r24` at 3600x3600; the game's own
 anti-aliasing at 100 % measured in the same run as the reference). Every DLSS number is
 preset L, forced by the NVIDIA App override on the test machine. The K and M columns are
-**inferred, not measured**: the frame time with the DLSS share scaled by NVIDIA's own cost
+**inferred, not measured** (measured later per eye at 0.58 with the override off: K 0.50
+and M 0.82 of L's DLSS time, section "The NVIDIA App's DLSS override decides the model"): the frame time with the DLSS share scaled by NVIDIA's own cost
 ratios for an RTX 5080 (guide, 4K Performance: L 2.24 ms, M 1.74 ms, K 1.31 ms), and the
 DLSS time per eye scaled the same way.
 
@@ -427,6 +428,25 @@ NVIDIA App override), the dev ini's `[stereo_cvars]` (including the level-of-det
 
 | Gameplay, foveated rendering on at `performance` (`e3b-world-fovperf`): as above, started at `input_scale` 1.0 so that foveated rendering finds the views, then the render scale switched between 0.5 and 0.58 every 60 s (each switch rebuilds the shading-rate surface and, under the NVIDIA App override, recreates both features): the combination that hung within 3 minutes twice in the runs of 06/10 night | 20.0 min | no fault; 19 scale changes, 40 feature creations, 20 shading-rate surfaces, every replaced feature released after its fence; 208,712 evaluations, none failed, no failed check, no warning, error or NGX error. Frames after the first minute (which ran at full size): average 9.7 to 12.0 ms, 95th percentile 10.7 to 13.7 ms, longest 68 ms |
 
+The runs above were made while the NVIDIA App's override still forced DLAA and preset L.
+From 13:51 the override was off (the application's choice: Balanced at 0.58 with preset K,
+a dynamic feature), and the same tests were repeated with the range rule of "Modes and
+ranges" (commit `8f47bed`):
+
+| Run (override off) | Length | Result |
+|---|---|---|
+| Title screen in stereo (`n-n1-fix`) | 5 min | no fault; 69,644 evaluations, none failed, no warning or error; frames 8.33 ms (the 120 Hz pace), DLSS 1.49 ms per eye |
+| The same with `context_state = own` (`n-n2-own`) | - | GPU hang after 27 s |
+| Gameplay with a capture every 20 s (`f-captures`) | 6 min | no fault; 14 captures, all written; no warning or error; DLSS 1.61 ms per eye; frames 9.1 to 9.3 ms |
+| Gameplay, foveated rendering off, as `e2-world-fovoff` (`e2n-world-fovoff`) | 20.1 min | no fault; 247,107 evaluations, none failed, no failed check, 23 history resets, no warning, error or NGX error; 2 feature creations; frames after the first minute average 8.8 to 9.4 ms, 95th percentile 9.8 to 10.8 ms, longest 148 ms (an Insert switch); DLSS 1.60 ms per eye |
+| Gameplay, foveated rendering on at `performance`, render scale 0.5 / 0.58 every 60 s, as `e3b-world-fovperf` (`e3n-world-fovperf`); each change switches between Performance (M) and Balanced (K) and recreates both features | 20.1 min | no fault; 20 scale changes, 52 feature creations (all replaced ones released after their fence), 19 shading-rate surfaces, 177,414 evaluations, none failed, no failed check, no warning, error or NGX error; DLSS 1.94 ms per eye. Frames: steady 8.5 to 9.2 ms (95th percentile 8.8 to 10.3) from minute 9 on; slow phases (average 23 to 37 ms) in the first 3 minutes and in minutes 5 to 8, as also seen without DLSS (below) |
+
+Slow phases: in several runs, with and without DLSS (a 5-minute run without DLSS at render
+scale 0.58 on the same route averaged 32 to 47 ms throughout), the frame time rose to 20 to
+50 ms for minutes while the System process's copy engine was busy (video memory being
+moved), then fell back. They are not caused by DLSS; their cause was not investigated (the
+level-of-detail `[stereo_cvars]` added to the defaults on 06/10 are one candidate).
+
 Not covered: a loading screen between areas, a cutscene, a headset. Foveated rendering
 still does not start when the render scale is below 1 at start (so with `input_scale`
 below 1 from the ini it stays off, as before; a known problem of foveated rendering, not of
@@ -633,6 +653,44 @@ the wanted preset) in the NVIDIA App; that also changes what Luma gets in flat p
 The override also takes away DLSS's dynamic input range (99 to 100 % of the output in every
 mode), so a change of the input size recreates the features (section "Dynamic resolution").
 
+**With the override set back to the application's choice** (test machine, from 06/10 13:51):
+NGX loads the model from the game folder's `nvngx_dlss.dll` (310.6.0), reports real ranges
+for a 3072x3264 output (Quality 2048x2176, Balanced 1782x1893 and Performance 1536x1632, all
+three accepting inputs down to 1536x1632 and Balanced up to the full size; Ultra Performance
+1024x1088; DLAA 3041x3231 to 3072x3264) and follows the mode's default preset when
+`[dlss] preset = default`: K for DLAA, Quality and Balanced, M for Performance, L for Ultra
+Performance (NGX log: "App hint Preset Unspecified or Overridden, using title default
+Preset K"). The features are then created dynamic (at `input_scale` 0.58: 1786x1898, any
+input from 1536x1632 up to that), so `[stereo] dynamic_resolution` no longer recreates them.
+The first feature creation with that model took 12.6 s on the RHI thread once (the game
+stood still); later starts took 60 to 90 ms. DLSS cost at 0.58 (Balanced, K): 1.61 ms per
+eye against 3.2 ms with the overridden L (`captures/dlss/f-captures`).
+
+**Presets measured** with the override off (`captures/dlss/presets`: the first room, still
+camera, eyes 3072x3264, Balanced at `input_scale` 0.58 = 1784x1896 per eye, unpaced; NGX's
+log confirmed each request, "Using App hint Preset K"):
+
+| Preset | DLSS GPU time per eye (motion vectors + DLSS + copy) | Against L |
+|---|---|---|
+| K | 1.57 ms (two measurements: 1.59, 1.57) | 0.50 |
+| M | 2.56 ms | 0.82 |
+| L | 3.13 ms | 1 |
+
+So K saves about 3.1 ms per frame against L at this size (both eyes), M about 1.1 ms; the
+ratios are close to NVIDIA's table for the RTX 5080 (K 0.58, M 0.78 of L at 4K
+Performance). The frame times of that run are not comparable between presets (the level was
+still streaming in during the first windows). Which preset looks better in the headset has
+not been judged; `[dlss] preset = default` (K at Balanced and Quality, M at Performance) is
+left as it was.
+
+**Modes and ranges.** A feature is created only for a mode whose reported range holds its
+creation size: the mode of the input's share of the output first (Quality from 0.66,
+Balanced from 0.57, Performance from 0.49, Ultra Performance below), then the others. If no
+mode accepts the input, there is no evaluation, the game's own pass runs and the log says so
+(a warning at the first time and every power of two); under the override that is every input
+below about 99 % of the output, so upscaling then needs the override's Super Resolution
+setting back at the application's choice.
+
 **Letting the mod choose (steps in the NVIDIA App, not done on the test machine):** NVIDIA
 App, `Graphics`, `Program Settings`, choose `FINAL FANTASY VII REMAKE INTERGRADE` in the
 program list; in its settings find the DLSS override entries (in current versions
@@ -689,7 +747,10 @@ always uses AutoExposure"; the mod sets the auto-exposure flag.
   `build\release-dlss` and makes a package named `ff7vr-<date>-<commit>-dlss` (the default package
   is built explicitly without DLSS, and the script checks the DLL for NGX names either way).
 - `[dlss] enabled = 1` in `ff7vr.ini`; `mode = upscale` and `input_scale = 0.5` (or 0.58, 0.67)
-  are the defaults. Leave `[stereo] dynamic_resolution` off while the NVIDIA App override is set.
+  are the defaults.
+- The NVIDIA App's DLSS override for this game must not force the Super Resolution mode:
+  under a forced DLAA no mode accepts a smaller input and upscaling does not run (section
+  "The NVIDIA App's DLSS override decides the model"). A model preset override alone is fine.
 - A build from commit `ef2688a` or later: before it, DLSS could hang the GPU (within seconds
   at the title screen; section "GPU faults seen in the test runs"). Foveated rendering may
   stay on (tested together with DLSS and render scale changes, section "Proof of the fix"),
