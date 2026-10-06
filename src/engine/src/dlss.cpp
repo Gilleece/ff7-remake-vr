@@ -1114,8 +1114,15 @@ bool try_final(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_t
     D3D11_VIEWPORT reduced_vp{static_cast<float>(s.x), static_cast<float>(s.y), static_cast<float>(s.w), static_cast<float>(s.h), vp.MinDepth, vp.MaxDepth};
     ID3D11RenderTargetView* graded = g_graded_rtv.Get();
     ID3D11Buffer* patched = g_cb_copy.Get();
+    // The engine's scissor rectangle is the eye's full rectangle; for the right eye it would
+    // clip the reduced viewport away (seen: a black right eye at 50 %).
+    D3D11_RECT saved_scissor[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
+    UINT nsc = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    ctx->RSGetScissorRects(&nsc, saved_scissor);
+    const D3D11_RECT reduced_sc{static_cast<LONG>(s.x), static_cast<LONG>(s.y), static_cast<LONG>(s.x + s.w), static_cast<LONG>(s.y + s.h)};
     ctx->OMSetRenderTargets(1, &graded, saved_dsv.Get());
     ctx->RSSetViewports(1, &reduced_vp);
+    ctx->RSSetScissorRects(1, &reduced_sc);
     ctx->PSSetConstantBuffers(0, 1, &patched);
     original(ctx, count, start, base);
     ID3D11Buffer* game_cb0_raw = game_cb0.Get();
@@ -1124,6 +1131,7 @@ bool try_final(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_t
     for (int i = 0; i < 8; ++i) restore[i] = saved_rtv[i].Get();
     ctx->OMSetRenderTargets(8, restore, saved_dsv.Get());
     ctx->RSSetViewports(nvp, &vp);
+    ctx->RSSetScissorRects(nsc, nsc ? saved_scissor : nullptr);
     // 2. DLSS from the reduced rectangle into the eye's rectangle.
     ComPtr<ID3D11DeviceContext1> ctx1;
     if (FAILED(ctx->QueryInterface(IID_PPV_ARGS(&ctx1)))) return false;

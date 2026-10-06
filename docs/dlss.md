@@ -112,9 +112,10 @@ override forces L).
 ## The NVIDIA App's DLSS override decides the model
 
 NGX applies the driver profile of the game (`ff7remake_.exe`, profile "FINAL FANTASY VII
-REMAKE") to every DLSS feature in the process, including the mod's. On the development
-machine that profile has the NVIDIA App's DLSS override set (presumably for flat play with
-Luma), and NGX's own log shows what it does:
+REMAKE") to every DLSS feature in the process, including the mod's. When the NVIDIA App's
+DLSS override is set for this game (a common setting for flat play with a DLSS mod), NGX's
+own log shows what it does (lines from the test machine, where the override was set to
+DLAA and the latest model):
 
 ```
 ngx: [NGXSecureLoadFeature] Feature dlss override enabled
