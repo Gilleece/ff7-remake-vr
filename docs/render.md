@@ -391,6 +391,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev\send-input.ps1 -Pi
 | `xr-sim head <yaw deg> [pitch deg] [x y z m]` | Null backend: sets the emulated head pose (on top of `[xr] null_motion`) |
 | `xr-sim recenter-event [nopose] [delay <frames>]` | Null backend: the headset's own recenter: LOCAL moves to the current leveled head and a LOCAL change event is sent, with `poseInPreviousSpace` or without (`nopose`, like Virtual Desktop), change time `delay` frames ahead (default 3) |
 | `xr-sim lose orientation\|position <frames>` | Null backend: the next frames report that part invalid, with NaN values |
+| `xr-sim gaze <yaw> <pitch>`, `gaze off`, `gaze sweep [radius deg] [period s]`, `gaze blink <frames>`, `gaze status` | Null backend with `[foveation] eye_tracking` on: a simulated eye tracker (fixed gaze in head space, yaw + right and pitch + up; not tracked; a circle around the view axis; a short loss) ([Eye-tracked foveation](#eye-tracked-foveation)) |
 
 Modules register commands with `ff7vr::dev_commands::add` (`src/core`); the
 pipe passes every line it does not handle itself to `dev_commands::dispatch`.
@@ -882,6 +883,9 @@ Passes that write data later passes read per pixel:
 | `[foveation] passes` | `scene` | `scene`: matching targets inside the scene window; `no-gbuffer`: the same without the G-buffer pass (3 or more targets); `all`: matching targets from the scene's start until Present, including post-processing (for comparison only) |
 | `[foveation] skip_formats` | `35` | DXGI formats of render target 0 that never get the mask (35 = `R16G16_UNORM`, the velocity buffer) |
 | `[debug] foveation_unsupported` | `0` | `1`: behave as on a GPU without variable rate shading (tests the fallback) |
+| `[foveation] eye_tracking` | `0` | `1` or `auto`: the rings follow the eye gaze when the headset has an eye tracker ([Eye-tracked foveation](#eye-tracked-foveation)); `0`: fixed at the optical centres. Read when the XR session starts |
+| `[foveation] gaze_margin_deg` | `5` | degrees added to the full-rate zone's radius while the gaze drives it (covers the gaze sample's age and tracker error) |
+| `[foveation] gaze_smoothing` | `0.5` | 0 to 0.95: weight of the previous centre for gaze movements under 2 degrees (fixational jitter); larger movements jump |
 
 Presets (radius 1.0 is half the eye width; with the Null backend's Quest 3
 class FOV that is a tangent of 1.09, so 0.70 is about 37 degrees from the view
@@ -964,6 +968,9 @@ BENCH_TABLE_PLACEHOLDER
 | `fov preset <name>`, `fov radii <a> <b> <c>`, `fov rates <a> <b> <c>`, `fov hidden off\|coarse\|cull`, `fov passes scene\|no-gbuffer\|all`, `fov skip [formats]` | change the settings at run time (the surface is rebuilt at the next stereo frame) |
 | `fov trace` | log every render target binding of the next stereo frame, from the scene's start to Present, with GPU times |
 | `fov timing` | log and reply the scene GPU time, the GPU time after the scene and the hooks' CPU time since the last report |
+| `fov gaze status` | eye tracking: setting, gaze source, following the gaze / holding / fixed, tracked, sample age, each eye's ring centre (pixels, share of the eye, degrees from its axis), surface refills (count, rate, CPU cost), switches, losses bridged, the ring shares |
+| `fov gaze mode 0\|1\|auto`, `fov gaze margin <deg>`, `fov gaze smoothing <0..0.95>` | change the eye-tracking settings at run time (a session started with `eye_tracking = 0` has no gaze source until `xr-restart`) |
+| `fov gaze dump <file.png>` | read the shading-rate surface back from the GPU and write it as a PNG, one pixel per 16x16 tile: white full rate, yellow / orange / red rings 1 / 2 / outside, grey hidden area, black no eye, a cyan cross at each eye's ring centre |
 
 Log lines to look for:
 
@@ -974,6 +981,182 @@ foveation: eye views: rect at +0x80 (2064x2208), projection at +0xe0 (...)
 foveation: surface 259x139 tiles for 4128x2208; pixels: full 37.6 %, ...; left eye ... optical centre at (1212, 1027) ...
 foveation: off for this session: <reason>          (unsupported GPU or driver, NVAPI missing, an NVAPI call failed)
 ```
+
+## Eye-tracked foveation
+
+With a headset that tracks the eyes, the rings of the shading-rate surface
+follow the gaze instead of sitting at the optical centres. Off by default
+(`[foveation] eye_tracking = 0`). **Verified only with the Null backend's
+simulated gaze; no eye-tracked headset has been used with it yet.**
+
+### Gaze input (`src/xr`)
+
+With `InitDesc::eyeGaze` (set when `eye_tracking` is `1` or `auto`) the OpenXR
+backend enables the eye-tracking extensions the runtime offers and picks one
+source when the session is created (one log line, `xr: eye gaze: source ...`
+or `xr: eye gaze: no source (...)` with the reasons):
+
+1. `XR_EXT_eye_gaze_interaction` (ratified, revision 2), used when
+   `XrSystemEyeGazeInteractionPropertiesEXT::supportsEyeGazeInteraction` is
+   true: an action set `ff7vr_eye_gaze` with one pose action, suggested binding
+   `/user/eyes_ext/input/gaze_ext/pose` for
+   `/interaction_profiles/ext/eye_gaze_interaction`, attached to the session
+   (the only action set this application has), an action space with an
+   identity pose. Every `WaitFrame`: `xrSyncActions`, `xrGetActionStatePose`
+   (`isActive`), then `xrLocateSpace(gaze space, VIEW space, predicted display
+   time)` with `XrEyeGazeSampleTimeEXT` chained. The gaze counts as tracked
+   when `ORIENTATION_VALID` and `ORIENTATION_TRACKED` are both set; the
+   direction is the pose's -Z axis in head space. `POSITION_TRACKED` is
+   reported as "nominal" (the specification's high-quality gaze; a runtime
+   clears it for a sub-nominal gaze).
+2. `XR_FB_eye_tracking_social`, only when (1) is absent or reports no support
+   and `XrSystemEyeTrackingPropertiesFB::supportsEyeTracking` is true:
+   `xrCreateEyeTrackerFB`, then per frame `xrGetEyeGazesFB` in VIEW space at
+   the predicted display time; the valid eyes' -Z axes are averaged. The
+   specification says this extension's gaze may be filtered for avatars; the
+   margin covers that.
+
+What the specification says that matters here (OpenXR 1.1, section 12.33):
+the gaze pose is oriented like VIEW space (-Z forward) and may originate
+between the eyes; a runtime with a permission system reports the action
+inactive and clears every location flag until the user allowed access; a
+runtime that cannot predict the gaze returns the sample nearest the requested
+time and writes its time into `XrEyeGazeSampleTimeEXT::time` (0 = unknown);
+`xrSuggestInteractionProfileBindings` must accept the eye gaze path whether or
+not the device has a tracker. `xrSyncActions` returns `XR_SESSION_NOT_FOCUSED`
+while the session is not focused; every action is then inactive, which counts
+as not tracked.
+
+`FrameInfo::gaze` carries the sample (tracked, direction, sample time, display
+time). The render module keeps the newest one with each eye's rotation
+relative to the head from the same frame (`XrController::GetGaze`), so a
+headset with canted displays gets the right direction per eye.
+
+### What the runtimes offer
+
+| Runtime | Offers | Source |
+|---|---|---|
+| Virtual Desktop (VDXR) | both; `supportsEyeGazeInteraction` is true only when the headset reports eye tracking (Quest Pro, PICO 4 Pro / Enterprise through Virtual Desktop) or its `simulate_eye_tracking` setting is on. The gaze is the average of both eyes' poses, used only when both are valid with confidence above 0.5; the sample time it returns is the requested time | its source (`virtualdesktop-openxr/instance.cpp`, `system.cpp`, `eye_tracking.cpp`, `space.cpp`, `action.cpp`; commit `f039941`), and the extension names in the installed `virtualdesktop-openxr.dll` |
+| SteamVR | `XR_EXT_eye_gaze_interaction` (since SteamVR 2.8.3; drivers send data through `Prop_SupportsXrEyeGazeInteraction_Bool`, Steam Link forwards a Quest Pro's gaze when enabled in its settings); no `XR_FB_eye_tracking_social` | Valve's SteamVR announcements and the extension names in the installed `vrclient_x64.dll` (which also contains `XR_META_foveation_eye_tracked`) |
+| PICO Connect / Streaming (PC) | both extension names in `picostreaming-openxr.dll`, plus PICO's own eye tracker types; public reports say the PC streaming path does not deliver a gaze for the PICO 4 Pro / Enterprise | the installed DLL; PICO's OpenXR documentation lists `XR_EXT_eye_gaze_interaction` for its standalone runtime |
+| Meta Quest Link (Quest Pro) | `XR_FB_eye_tracking_social` only (needs developer mode and eye tracking over Link enabled in the Meta app); this is why the second source exists | public developer reports; the runtime is not installed on the development machine |
+
+Steam Frame: not looked into beyond SteamVR itself; a gaze that SteamVR
+exposes arrives through path 1.
+
+### From gaze to rings
+
+- Rings are measured as **angles** from the ring centre: a preset radius `r`
+  (a fraction of half the eye width as a tangent) becomes `atan(r / sx)` with
+  `sx` the projection's x scale. At the optical centre this is exactly the
+  fixed surface (same tiles, same shares as before), and off-centre a ring
+  keeps its angular size (it is stretched on the image plane towards the
+  edge, as the lenses stretch it back).
+- Per tile and eye the view direction of the tile centre is computed once per
+  layout; a new centre then needs one dot product per tile and eye.
+- The gaze direction (head space) is turned into each eye's space and becomes
+  that eye's centre. Both eyes get the same direction: the tracker gives no
+  vergence, and the 32 mm between an eye and the gaze origin changes the
+  angle by under 2 degrees for anything farther than 1 m.
+- **Latency margin**: the full-rate zone grows by `gaze_margin_deg` (default
+  5) while the gaze drives the centre; the outer radii stay as the preset says
+  (they are pushed out only when the margin would cross them). The sample is
+  about one display period older than the frame it shades (13.9 ms at 72 Hz in
+  the Null backend; a real tracker adds its own latency, and Virtual Desktop
+  returns the requested time, not the true sample time).
+- **Smoothing, no prediction**: a gaze step larger than 2 degrees is a saccade
+  and the centre jumps there; smaller steps (fixational jitter) are smoothed
+  with `gaze_smoothing`. Saccade landing points cannot be extrapolated from a
+  72-90 Hz stream, so the margin, not a prediction, covers the gaze's age.
+- **Hysteresis**: the gaze takes over after 3 consecutive tracked samples; a
+  gaze that stops being tracked keeps its last centre for 400 ms (blinks last
+  100 to 300 ms) and only then the fixed centre returns. A loss shorter than
+  that changes nothing (`losses bridged` in `fov gaze status`).
+- **Refills**: the surface (R8_UINT, DEFAULT usage) is refilled in place with
+  `UpdateSubresource` when either eye's centre moved by more than half a tile
+  (8 pixels), or the centre switched between gaze and fixed. No new texture or
+  view, so the NVAPI binding stays.
+- `eye_tracking = 0`: no extension is enabled, nothing is sampled, and the
+  per-frame cost is one comparison; the surface is built once per layout as
+  before.
+- `1` and `auto` behave the same at run time (gaze when tracked, fixed
+  otherwise); `1` also logs once when the session has no gaze source.
+
+### Proof (Null backend, 2 x 3072x3264, first room, uncapped)
+
+The Null backend simulates a tracker when `eye_tracking` is on: `xr-sim gaze
+<yaw> <pitch>` (head space, yaw positive to the right, pitch positive up),
+`xr-sim gaze off` (not tracked), `xr-sim gaze sweep [radius deg] [period s]`
+(a circle around the view axis, default 15 degrees every 4 s), `xr-sim gaze
+blink <frames>`. Scripts and captures: `captures\gaze\` (not in git).
+
+- Ring centres follow the gaze with the right offset per eye: gaze 0/0 puts
+  the centres at the optical centres (left eye 58.7 % / 46.5 % of the eye,
+  right eye 41.3 % / 46.5 %); gaze 20 degrees right moves both by 16.7 % of
+  the eye width (75.4 % and 58.0 %); -20/+10 gives 42.0 % / 38.1 % and
+  24.6 % / 38.1 %; 30/15 gives 85.2 % / 32.6 % and 67.8 % / 32.6 %. Surface
+  dumps (`fov gaze dump`) show the full-rate zone around the cross in both
+  eyes.
+- The GPU applies the refilled surface where it says: with every ring at 4x4
+  and the mask on post-processing too (`fov rates 4x4 4x4 4x4`, `fov passes
+  all`, a debug view only), the eye captures were measured per 16x16 tile
+  (pixels inside 4x4 cells identical while cell borders differ = coarse).
+  Against the surface dumped at the same gaze: 98.8 to 99.5 % of the textured
+  full-rate tiles look full rate and 98.4 to 100 % of the coarse tiles look
+  coarse, in both eyes. Against the surface of a different gaze (control):
+  40 to 51 % agreement on the full-rate tiles.
+- Ring shares (`quality`): fixed 37.7 % full rate / 57.6 % work; with the
+  gaze at 0/0 the margin raises it to 53.7 % / 65.6 %; at 20/0 50.4 % /
+  62.1 %; at 30/15 39.0 % / 53.3 % (part of the zone leaves the image).
+- Refills: a moving gaze (sweep 15 degrees / 4 s, about 24 degrees per
+  second) refills 66 to 79 times per second at about 110 frames per second;
+  0.27 to 0.30 ms CPU per refill on the RHI thread (computation and upload),
+  at most 0.57 ms in one run and 1.47 ms in another. A still gaze refills only
+  when it moves.
+- GPU time of the scene (p50 over about 1100 frames each, same session):
+
+  | Setting | Scene GPU ms |
+  |---|---|
+  | foveation off | 9.49 |
+  | `quality`, fixed centre | 7.99 |
+  | `quality`, gaze still at 15/0 | 8.22 |
+  | `quality`, gaze sweeping | 8.29 |
+  | radii `0.35 0.55 0.80`, fixed centre | 7.31 |
+  | radii `0.35 0.55 0.80`, gaze still at 15/0 | 7.41 |
+  | radii `0.35 0.55 0.80`, gaze sweeping | 7.44 |
+
+  A moving gaze costs nothing measurable on the GPU against a still one. With
+  the `quality` radii the gaze costs 0.2 to 0.3 ms because the margin enlarges
+  the full-rate zone; the gain of eye tracking is that a much smaller zone
+  becomes acceptable (the `0.35` radii save another 0.6 to 0.7 ms against
+  `quality`). Which radii look right with a real tracker is for a headset
+  test; no preset is changed.
+- Loss of tracking: `gaze off` -> fixed centre 408 to 418 ms later (log);
+  `gaze <yaw> <pitch>` -> following the gaze 31 to 35 ms later (3 samples); a
+  blink of 10 or 30 frames (about 90 / 270 ms) changed nothing (no refill, no
+  switch); a blink of 80 frames (about 700 ms) went to the fixed centre and
+  back.
+- `eye_tracking = 0`: no `eye gaze` log line, `xr-sim gaze` reports no
+  simulated tracker, the surface is built once per stereo start as before and
+  its shares are identical to the earlier fixed surface at this resolution
+  (37.7 / 23.7 / 26.6 / 3.5 / 8.5 %).
+
+### Not verified
+
+- Any real eye tracker or runtime path: the OpenXR code (action set, sync,
+  locate, sample time, `XR_FB_eye_tracking_social`) is built to the
+  specification and compiled, but has only run against runtimes without a
+  tracker. In particular: whether Virtual Desktop with a Quest Pro reports
+  `isActive` and the flags as expected, and how old its samples really are.
+- Whether the margin and smoothing defaults look right: a ring edge that
+  lags a saccade shows coarse shading at the new fixation point for a frame
+  or two; saccadic suppression should hide most of it, untested.
+- Picture at the ring edges while the centre moves: in the sweep captures
+  (radii `0.35 0.55 0.80`) the edges look like those of the fixed centre at
+  the same radii, judged on single frames only. Seen in both: under 2x2
+  shading the top edge of a skin area against dark cloth gets a thin line of
+  white pixels (first room, Tifa's legs), which full-rate shading does not
+  show; that is foveation itself, not the moving centre.
 
 ## First test on a Quest 3 through Virtual Desktop
 

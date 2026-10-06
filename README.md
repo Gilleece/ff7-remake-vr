@@ -79,6 +79,7 @@ package folder.
 | `[xr] runtime` | `auto` | which OpenXR runtime drives the headset. `auto` takes the first one with a headset connected (runtimes whose PC app runs first, then the PC's default); pin one with `virtualdesktop`, `steamvr`, `system` or the path of a runtime's `.json` |
 | `[xr] resolution_scale` | `1.0` | per-eye render size relative to what the headset's runtime asks for. `0.8` renders 64 % of the pixels: faster, softer |
 | `[foveation] preset` | `quality` | lower detail at the outer edges of each eye to save GPU time: `quality` (barely visible), `balanced`, `performance` (visibly blocky edges), `off` |
+| `[foveation] eye_tracking` | `0` | `1`: the full-detail area follows your eyes on a headset with eye tracking (untested with a real one) |
 | `[ui] distance`, `[ui] size` | `3.0`, `2.0` | distance and height in metres of the HUD/menu panel (Page Down/Up change the distance during play, until the game is restarted). `size = 1.57` lines the markers over enemies up with the enemies; `2.0` is easier to read |
 | `[ui] follow_head` | `0` | `1` = the panel follows your head |
 | `[stereo] world_scale` | `1.0` | above 1 the world looks smaller (you become a giant), below 1 larger |
