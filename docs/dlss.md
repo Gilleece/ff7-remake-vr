@@ -10,11 +10,13 @@ at headset resolution). The history is reset on camera cuts; upscale mode works 
 change of the size recreates the features, a hitch) and always hands the runtime the full
 eye. Since 06/10 the engine renders at the input size and DLSS writes the runtime's size
 (`[dlss] output = runtime`, section "Output at the runtime's size"), and the right eye's
-shimmer under head motion is fixed (section "The right eye's shimmer"). Everything here was
-measured headless (Null backend); the first headset sessions (06/10, Virtual Desktop) found
-the right eye's shimmer and the video memory limit that these two changes address; neither
-change has been seen in a headset yet. Not handled: texture mip bias in upscale mode, mono
-frames. **GPU faults:**
+shimmer under head motion is fixed (section "The right eye's shimmer"). The measurements here
+were made headless (Null backend); the first headset sessions (06/10, Virtual Desktop) found
+the right eye's shimmer and the video memory limit that these two changes address, and the
+player has used the result since (06/10 evening, Virtual Desktop at 3264x3072 per eye,
+`input_scale` 0.75: "working super super well"). Since then: a mip bias for the game's
+textures while DLSS upscales (section "Texture mip bias") and what the dots he saw at that size
+are (section "The dots at 3264x3072"). Not handled: mono frames. **GPU faults:**
 the driver resets with DLSS on had one cause, found on 06/10 and fixed: the mod drew its
 motion vectors inside a device context state of its own (`SwapDeviceContextState`) in the
 middle of the engine's frame; at the title screen that hung the GPU within seconds, with or
@@ -308,9 +310,150 @@ would read them as output-size vectors). Texture mip bias for the lower render s
 guide 3.5): `r.MipMapLODBias -1` at 0.5 showed no clear difference in the crops checked
 (`r14/sheet_bias.png`, the counter and the gramophone), so it is left to the player
 (`[stereo_cvars] r.MipMapLODBias = -1`); the flat-screen Luma mod instead adds a bias to the
-game's samplers (recreated with `MipLODBias`), which was not tried. `render_scale` and
+game's samplers (recreated with `MipLODBias`); the mod does that too since 06/10 evening
+(section "Texture mip bias"). `render_scale` and
 `r.ScreenPercentage` at the same input give the same texture sharpness
 (`r22/sheet_rs_vs_sp.png`).
+
+### The dots at 3264x3072 (06/10 evening)
+
+The player, in the headset at Virtual Desktop's 3264x3072 per eye with `input_scale` 0.75,
+preset default and foveated rendering `performance`: "a bit of that weird dot kind of effect
+from DLSS", not at 4032x3648 with 0.76.
+
+**Setup.** Null backend, eyes 3264x3072, `input_scale` 0.75 (the engine renders 2448x2304 per
+eye), `output = runtime`, preset default (K: NGX picks Quality for 0.75), foveated rendering
+`performance`, `r.BloomQuality 0`, the level-of-detail lines of the dev ini; the latest save,
+which now starts in the street outside Seventh Heaven. Settings switched while the game runs,
+three captures each; third person with a still camera (`captures/dlss/d2`; the first-person
+camera sways with the idle animation, so first-person captures, `d1`, are only good for
+looking). Frame times unpaced (`xr.null_pace = 0`, `t.MaxFPS 0`), 6 s windows; DLSS GPU time
+per eye from timestamp queries.
+
+**Source: foveated rendering's coarse shading, which DLSS keeps.** `performance` shades the
+eye at full rate inside 0.45 of the ring radius, at 2x2 to 0.65 and at 4x4 beyond: 59 % of the
+input's pixels at 4x4 (`foveation:` line of the log). A 4x4 block of the 2448-wide input is 5.3
+pixels of the 3264-wide output, and the blocks sit on a fixed screen grid, the same in every
+jittered frame, so DLSS sees them as stable detail and rebuilds them: a mosaic of blocks on
+everything away from the view's centre, and on dithered hair the 2x2 and 4x4 blocks turn into
+scattered bright specks. With foveated rendering off the same spots are clean
+(`d1/sheet_fov_left.png`, people 26 to 41 % of the eye's width from its centre;
+`d2/sheet_fov_npc.png`, a man's head near the left edge; `d2/sheet_fov_right.png`, people near
+the right edge). The full-rate centre of the eye looks the same in all four foveation settings
+(`d2/sheet_centre_fov.png`).
+
+Why at 3264x3072 and not at 4032x3648: without DLSS (the game's anti-aliasing at 3264x3072,
+`captures/dlss/d3`) `performance` leaves blocks of 4 output pixels, which the game's
+anti-aliasing softens (`dcmp/sheet_npc.png`); this is the state the player could not tell from
+foveated rendering off. With DLSS from 0.75 the same blocks are 5.3 output pixels and kept
+sharp. At 4032x3648 with 0.76 (`d4`) the input is 3064 wide, so a block is again about the
+angular size it has without DLSS (`d4/sheet_angular_npc.png`, both sizes cropped to the same
+angle): smaller and less visible. That matches the player's report; whether it is all he saw
+cannot be told headless.
+
+A second, smaller source, in the full-rate centre: DLSS (preset K) from 0.75 draws gritty or
+rusty surfaces with salt-and-pepper specks of one or two output pixels that the game's own
+image at full size shows much softer (`dcmp/sheet_wall.png`, a rusted pillar;
+`d4/sheet_angular_pillar.png`: finer at 4032x3648 / 0.76). Measured on four static, full-rate
+regions (third person, three captures each, `dots.py`): mean luma gradient 10.6 to 17.2
+(native) against 14.3 to 20.2 (DLSS, foveated rendering off), pixels more than 16 levels off
+their 3x3 median 1.6 to 3.3 % against 3.2 to 6.3 % (about twice as many). Presets L and M
+show fewer specks there (`dcmp/sheet_wall_presets.png`; gradient L 12.1 and M 12.9 against K
+14.2 in the region of the pillar), at their cost. The specks are in DLSS's input: a frame dump
+(`dlss frames`, `d5/dump_pillar_input.png` against `_output.png`) shows the pillar's dark pits
+as single aliased pixels of the 2448-wide input, different in each jittered frame; the game's
+anti-aliasing at full size averages them into a soft texture, K keeps them as specks. Not the
+game's grain: DLSS's input drawn without the last pass's noise texture (`dlss nograin 1`, `d5`)
+gives the same gradient and outliers (14.0 to 17.1 against 13.8 to 16.4; 2.8 to 5.1 % against
+2.6 to 4.5 %).
+
+| Foveated rendering with DLSS (0.75, K) | Frame ms avg (p95) | Against `performance` | Picture away from the centre (`d2/sheet_fov_*.png`) |
+|---|---|---|---|
+| `performance` (1x1 to 0.45, 2x2 to 0.65, 4x4 beyond) | 9.59 (11.46) | - | mosaic of blocks, specks in hair |
+| `balanced` | 9.85 (11.47) | +0.26 ms | blocks mostly gone at the edge, specks in hair remain |
+| `quality` | 10.12 (11.88) | +0.53 ms | no blocks seen; fine specks in dithered hair |
+| off | 10.95 (12.55) | +1.36 ms | clean |
+
+Other remedies measured in the same run (third person, still camera, foveated rendering
+`performance`):
+
+| Setting | Frame ms avg (p95) | DLSS ms per eye (L / R) | Picture (`d2/sheet_presets_*.png`, `d2/sheet_tb_*.png`) |
+|---|---|---|---|
+| preset default (K), the reference | 9.59 (11.46), 9.65 (11.23) with `k` named | 1.53 / 1.62 | - |
+| `firefly = 1` (NGX's `Hint.UseFireflySwatter`, which the flat-screen Luma mod sets for this game) | 9.59 (11.10) | 1.53 / 1.62 | no visible change; the specks in hair stay |
+| preset M | 13.94 (15.59) | 3.66 / 3.49 | the coarse blocks largely smoothed out, darker shadows (mean level of the shadowed ground 22 against 25) |
+| preset L | 15.98 (17.73) | 4.63 / 4.47 | blocks remain, a little softer |
+| texture bias `auto` (-0.41 at 0.75) | 13.36 (22.37): a disturbed window (p50 10.83); see `auto-1` | 1.67 / 3.36 (same window) | no visible change |
+| texture bias `auto-1` (-1.41) | 9.74 (11.54); with foveated rendering off 11.06 against 10.95 | 1.53 / 1.62 | textures a little crisper where shaded at full rate; measured 10 to 20 % more fine specks, not visible in the crops (section "Texture mip bias") |
+
+For comparison, the game's own anti-aliasing at the full 3264x3072 without DLSS (`d3`, same
+spot): 9.14 ms with foveated rendering `performance`, 9.61 `balanced`, 10.18 `quality`, 11.76
+off. So at this size and 0.75 DLSS costs about as much as rendering the full size (0.45 ms more
+with `performance`, the same with `quality`, 0.8 ms less with foveated rendering off): it is a
+picture choice here, and the cost of `quality` instead of `performance` is the same with or
+without DLSS.
+
+The game's own dither and shadow settings, each switched in the first-person run (`d1`;
+`r.SSS.Checkerboard 0`, `r.AmbientOcclusionLevels 0`, `r.DisableLODFade 1`,
+`r.TemporalAASamples 16`, `r.Shadow.FilterMethod 1`, `r.Tonemapper.GrainQuantization 0`,
+`foliage.DitheredLOD 0`, `r.StencilForLODDither 0`; all exist in this build): no visible
+change to the blocks, which none of them touches (`d1/sheet_cvars_left.png`); the dots metric
+(isolated bright pixels in shadow, `captures/dlss/dots.py`) could not separate them from the
+camera's sway in that run. In a later run (`d5`, third person) `r.Tonemapper.GrainQuantization
+0`, set while the game ran 10 s after the no-grain test, was followed 8 s later by a GPU hang
+(System log `nvlddmkm` 153 at 20:50:12, the game's crash report `DXGI_ERROR_DEVICE_HUNG`); the
+same switch in `d1` ran without a fault. Not repeated (a reproduction resets the driver for the
+whole PC) and not explained; in UE 4 that variable selects a variant of the tonemapper's
+shader (inferred for this build), and it is best not switched while the game runs.
+`input_scale` 0.85 and 0.80 at 3264x3072 (`d1/sheet_nat_left.png`): smaller blocks (4x4 of a
+2776-wide input is 4.7 output pixels), DLSS 1.70 ms per eye against 1.67 (K's cost hardly
+follows the input here); the frame cost of rendering 28 % more pixels was not measured in a
+clean window (that run was in a slow state).
+
+### Texture mip bias (`[dlss] texture_bias`)
+
+With DLSS the engine renders each eye at `input_scale` of the output and chooses texture mips
+for that smaller size, so textures are softer than at the output size. The DLSS guide (3.5)
+asks for a negative mip bias, `log2(render width / output width)`, and recommends 1 more
+(`- 1.0 + epsilon`, "-2.0 for this Performance mode"), warning that a bias can bring flicker
+or moiré on fine textures. `r.MipMapLODBias` did not reach the game's materials (`r14`): the
+engine bakes it into each texture's sampler state when the texture is loaded (inferred from
+UE 4's texture code; not traced here), and the materials sample through those states.
+
+**How.** A hook on `PSSetSamplers` (immediate context slot 10, installed with the view buffer
+hooks) replaces, on the RHI thread and only for the game's immediate context, each anisotropic
+sampler state the game binds by a copy with the bias added to `MipLODBias`, while the frame
+before was upscaled by DLSS in stereo. Copies are made once per sampler and bias
+(`CreateSamplerState` with the original description) and kept in a map that holds a reference
+to the original, so that its address cannot be reused while it is in the map; a change of the
+bias (quantised to 1/32) clears the map. Point, bilinear and trilinear samplers
+(post-processing, shadow maps, the UI) are left alone; `texture_bias_trilinear = 1` adds the
+trilinear ones. The flat-screen Luma mod does the same at its sampler level (anisotropic
+samplers, `log2(render / output) - 1`); no code was taken from it.
+
+What the game binds (`dlss status`, "texture mip bias"; `d2`, about 75 s with a bias on, at
+about 100 frames per second): 5.1 million `PSSetSamplers` calls, 4.2 million of them with a
+sampler replaced (about 700 calls per stereo frame, a map look-up each); few
+distinct sampler objects (D3D11 returns the same object for the same description): 6
+anisotropic, 9 trilinear, 15 others, 3 comparison; 6 copies made, none failed.
+
+**Measured** (3264x3072, 0.75, preset K, third person, still camera, `d2`; native = the game's
+anti-aliasing at 3264x3072 without DLSS, `d3`; luma gradient and outliers as in "The dots at
+3264x3072", full-rate regions):
+
+| | Bias at 0.75 | Frame ms, foveation `performance` / off | Gradient, ground region A / B | Outliers > 16, A / B | Crops |
+|---|---|---|---|---|---|
+| native, no DLSS | - | 9.14 / 11.76 | 12.7 / 17.2 | 1.6 / 3.3 % | `dcmp/sheet_ground.png` |
+| `off` | 0 | 9.59 / 10.95 | 15.6 / 20.2 | 3.2 / 6.3 % | - |
+| `auto` | -0.41 | not measured cleanly (its window was disturbed; the repeat run ended in the hang above) | A with foveation `performance`: 14.1, as `off` (14.1) | - | no visible change |
+| `auto-1` | -1.41 | 9.74 / 11.06 | 16.3 / 20.6 | 3.8 / 6.8 % | `d2/sheet_tb_fovoff_*.png`: hardly visible; the ground a touch crisper |
+
+So at this size DLSS's image from 0.75 already carries more fine detail (and more specks)
+than the game's own image at full size, the bias moves it further that way, and the visible
+gain is small. NVIDIA's warning about flicker and moiré was not tested under motion. The bias
+is therefore off by default and left as an option (`auto` or `auto-1`) for players who find
+textures soft; it costs about 0.1 ms. Textures in the coarsely shaded part of foveated
+rendering are limited by the shading rate, not by the mip (`d2/sheet_tb_sign.png`).
 
 ### DLSS before the tonemapper (not built; what it would take)
 
@@ -927,9 +1070,16 @@ always uses AutoExposure"; the mod sets the auto-exposure flag.
   but it does not start when `input_scale` (the render scale) is below 1 at start, so with
   DLSS from the ini it is off for now.
 - A DLSS model: if the NVIDIA App's override is set for the game, the driver's own copy is
-  used and nothing else is needed; otherwise `nvngx_dlss.dll` (310.5.0 or later for presets
-  L/M) next to the game's exe or in `[dlss] dll_dir`. The game folder may already have one
-  from a flat-screen DLSS mod.
+  used (whether that works with no `nvngx_dlss.dll` anywhere was not tested); otherwise
+  `nvngx_dlss.dll` (310.5.0 or later for presets L/M) next to the game's exe or in
+  `[dlss] dll_dir`. The game folder may already have one from a flat-screen DLSS mod. The
+  mod passes NGX `[dlss] dll_dir` and its own folder (beside the exe in a drop-in); the SDK's
+  copy in the build tree is not used at run time and no package contains it. Without any
+  model NGX reports DLSS as unavailable and the engine renders at the headset's full size
+  with the game's own anti-aliasing (by the code; not tested on a PC without a model).
+- With foveated rendering at `performance`, DLSS makes its coarse edges visible as blocky
+  dots at input sizes around 2400 pixels wide; `quality` avoids that (section "The dots at
+  3264x3072").
 - Expect DLAA to cost about 8 ms per eye at 3072x3264 with preset L: too slow for 72 Hz on
   an RTX 5080. Upscale mode from 0.5 costs about what the game's own 100 % costs, with a
   picture close to it (section "The numbers").
@@ -952,6 +1102,9 @@ by the project's maintainers on how an MIT-licensed project and NVIDIA's terms f
 | `output` | `runtime` | upscale mode: `runtime`: the engine renders at `input_scale` of the runtime's eye size and DLSS writes the runtime's size into a texture of its own that goes to the runtime (section "Output at the runtime's size"); `engine`: the engine's buffers at the runtime's size, the views at `input_scale` of them, DLSS's result copied back (the way before 06/10) |
 | `mv_textures` | `eye` | `eye`: each eye's motion vectors at the origin of a texture of its own; `shared`: one double-wide texture read at the right eye's sub-rectangle base, which made the right eye shimmer (section "The right eye's shimmer"; only to compare) |
 | `preset` | `default` | DLSS model: `default` (NVIDIA's choice for the mode), `j`, `k`, `l`, `m`. The NVIDIA App's override for the game wins |
+| `firefly` | `0` | `1`: NGX's `Hint.UseFireflySwatter` at feature creation (features are recreated when it changes). No visible change and no cost measured in this game (section "The dots at 3264x3072") |
+| `texture_bias` | `off` | upscale mode: a mip bias added to the game's anisotropic sampler states while DLSS upscales: `off`, `auto` (`log2` of the input's share of the output), `auto-1` (one more, NVIDIA's recommendation), `auto+<x>`/`auto-<x>`, or a fixed negative number (section "Texture mip bias") |
+| `texture_bias_trilinear` | `0` | `1`: also the game's trilinear samplers |
 | `auto_exposure` | `1` | DLSS computes the exposure itself |
 | `mv_jitter` | `2` | how the camera motion vectors treat the jitter: `2` as the engine computes them, not flagged; `1` flagged as jittered; `0` the jitter difference removed |
 | `camera_cut_reset` | `1` | reset an eye's history on a camera cut (see "Camera cuts") |
@@ -1020,7 +1173,9 @@ The fault-isolation keys (`test_eyes`, `test_zero_mv`, `test_mv_sanitize`, `test
 | `dlss autoexp <0\|1>`, `dlss mvjitter <0\|1\|2>`, `dlss jitter <sx> <sy>` | tests |
 | `dlss cutreset <0\|1>`, `dlss cutflag <0\|1>`, `dlss cutlimits <cm> <deg>` | the camera cut reset, the candidate flag of row 140, the limits |
 | `dlss cuttest <path prefix> <reset 0\|1> <zero_mv 0\|1>` | at the next camera cut, with or without the reset and with the cut frame's motion vectors zeroed or not, write the left eye's upscaled image (a centred crop up to 2048x2048) of frames 0, 1, 2, 3, 5, 10 and 60 after the cut as raw `R10G10B10A2` files `<prefix>_f<n>_<w>x<h>.r10g10b10a2` |
-| `dlss hdr <0\|1>`, `dlss sharpness <v>`, `dlss preexp <v>`, `dlss nograin <0\|1>` | upscale mode tests: the input flagged HDR, `InSharpness`, `InPreExposure`, the last pass at the reduced size without its noise texture |
+| `dlss hdr <0\|1>`, `dlss sharpness <v>`, `dlss preexp <v>`, `dlss nograin <0\|1>` | upscale mode tests: the input flagged HDR, `InSharpness`, `InPreExposure`, DLSS's input drawn by the last pass without its noise texture |
+| `dlss firefly <0\|1>` | `[dlss] firefly` while the game runs (features are recreated) |
+| `dlss texbias <off\|auto\|auto-1\|value> [trilinear 0\|1]` | `[dlss] texture_bias` (and `texture_bias_trilinear`) while the game runs; `dlss status` shows the bias in use, the input's share, the binds and replacements and the sampler kinds seen |
 | `dlss maxinput <full\|setting>` | upscale mode test: size a dynamic feature for render scale 1 instead of `[stereo] render_scale` |
 | `dlss reset`, `dlss recreate` | reset the history, release and recreate the features |
 | `dlss skip <0\|1>` | upscale mode fault test: everything runs (motion vectors, the graded copy at the reduced size) except the NGX evaluation; the game's own last pass scales the image up. `[dlss] test_skip` from the ini also has levels 2 (no graded copy either), 3 (pass-through copy only), 4 (nothing replaced), 5 (the mod's context state swapped in and out, no draw), 6 (motion vectors drawn in the game's state) |

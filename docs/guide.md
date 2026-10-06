@@ -419,7 +419,14 @@ DLSS model L) 0.5 cost about as much as the game at full size (5 % more at 3072x
 eye, between 9 % less and 4 % more at 3600x3600), with detail close to it and far sharper
 than rendering at 0.5 without DLSS; hair and soft shadow edges are grainier than at full
 size; 0.67 is calmer and closer to full size but costs about half as much again.
-What it looks like in a headset has not been seen yet. Earlier `-dlss` packages could hang
+It has been played in a headset (Virtual Desktop at 3264x3072 per eye with `input_scale =
+0.75`). Blocky dots away from the centre of the view, at that size, are foveated rendering's
+coarsely drawn edges: DLSS keeps them sharp and, from a smaller rendered image, makes them
+larger. `[foveation] preset = quality` removes them for about 0.5 ms per frame (measured
+without a headset at 3264x3072 and 0.75: `performance` 9.6 ms, `quality` 10.1 ms, off 11.0 ms);
+at 4032x3648 with 0.76 they are smaller. `[dlss] texture_bias = auto` (or `auto-1`) makes
+textures a little crisper for about 0.1 ms; it is off because DLSS's image is already more
+detailed than the game's own at that size. Earlier `-dlss` packages could hang
 the graphics card (within seconds at the title screen); that was a fault in the mod, fixed
 in commit `ef2688a` (a package's folder name contains the commit it was built from; any
 later one has the fix). It needs an NVIDIA RTX graphics
