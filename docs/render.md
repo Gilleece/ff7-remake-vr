@@ -927,7 +927,12 @@ feature switches itself off with one log line and nothing else changes.
   scale 0.58 from the ini (Null backend): `rect at +0x80 (1784x1896, right eye
   at x 3072)` on the first stereo frame, no failed search, surface for
   6144x3265, rings centred at 58.7 % / 46.5 % of each scaled rect (the same
-  shares as at full size).
+  shares as at full size). The same with DLSS (`[dlss] input_scale = 0.58`,
+  `[foveation] preset = performance`, stereo on from the start): the layout
+  found on the first stereo frame, then 10 minutes of walking, turning, Insert
+  off and on every 2 minutes and a 150-degree head jump with foveation active
+  throughout, no WARN or ERROR, 113,130 DLSS evaluations with no failure, no
+  driver event.
 - **Which draws get it.** The engine module marks where the scene of a stereo
   frame starts and ends, in the order of the frame's GPU work: hooks on
   `FDeferredShadingSceneRenderer::Render` and `FPostProcessing::Process` (and

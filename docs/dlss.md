@@ -574,7 +574,8 @@ addition is changes of `[stereo] render_scale` (view rectangles inside full-size
 for which foveated rendering rebuilds its shading-rate surface) while NGX evaluated. Where
 inside the driver, NGX or foveated rendering the GPU then waits is not known. Until it
 is, run DLSS with `[foveation] enabled = 0`; started from the ini with an `input_scale`
-below 1, foveated rendering is off anyway (see above). The deferred release ("Lifetimes")
+below 1, foveated rendering is off anyway (see above; since fixed: it now starts at
+any scale, `docs/render.md`, the view layout search). The deferred release ("Lifetimes")
 is right by the SDK's rules but did not prevent the hangs, so it is not the explanation.
 
 ## Camera cuts
@@ -730,7 +731,7 @@ always uses AutoExposure"; the mod sets the auto-exposure flag.
 
 | With | Result | How it was checked |
 |---|---|---|
-| Foveated rendering (variable rate shading) | works; it shades the scene before the anti-aliasing pass, DLSS resolves the periphery like the game's pass does. No GPU fault together with DLSS since the fix (20 minutes with render scale changes, section "Proof of the fix"). It does not start when the render scale is below 1 at start (a foveation limitation) | `fov off` / `fov on` with DLSS on, `r3/sheet_fov.png`; `captures/dlss/e3b-world-fovperf` |
+| Foveated rendering (variable rate shading) | works; it shades the scene before the anti-aliasing pass, DLSS resolves the periphery like the game's pass does. No GPU fault together with DLSS since the fix (20 minutes with render scale changes, section "Proof of the fix"). It also starts with `input_scale` below 1 from the ini (10 minutes at 0.58 with `performance`: foveation active, no failed evaluation, no driver event; `docs/render.md`, the view layout search) | `fov off` / `fov on` with DLSS on, `r3/sheet_fov.png`; `captures/dlss/e3b-world-fovperf` |
 | Bloom and ambient occlusion fixes | still applied once per stereo frame at 100 % | `stereo bloomfix`, `stereo aofix` counters with DLSS on |
 | Bloom and ambient occlusion fixes below 100 % | with `r.ScreenPercentage` 58 and 67 at eyes 3072 wide the right view's rectangle reaches 1-3 pixels past the scaled buffer; before `bbe071a` the fixes skipped those frames (`missed 4759`, `failed 4844` in `r9`, the right eye showed the left eye's bloom and occlusion ghost, `r8/sheet_up_R.png`), since then they clamp the rectangle. With `input_scale` / `render_scale` the rectangles never overhang | counters, captures |
 | Light sort-key fix, UI layer | unaffected (the UI is drawn into its own layer; the light fix is in the scene) | captures show the HUD layer and lit scenes as before |
