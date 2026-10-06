@@ -352,7 +352,8 @@ bool is_projection(const float* m) {
 }
 
 // Finds where FViewInfo keeps the view rect and the projection matrix: the first FIntRect
-// that reads (0, 0, W, H) in the left eye and (W, 0, 2W, H) in the right eye, and the first
+// that reads (0, 0, W, H) in the left eye and (W, 0, 2W, H) in the right eye (or, at a render
+// scale below 1, (0, 0, w, h) and (X, 0, X + w, h) with X > w), and the first
 // matrix of the projection's form in both. The first stereo frame can fail (with stereo on
 // from the start the views of tick 2 do not have the eye rects yet), so a failed search is
 // repeated on the next stereo frames, with a warning at failures 1, 2, 4, 8, ...; only a
@@ -363,13 +364,20 @@ void find_view_layout(const std::uint8_t* left, const std::uint8_t* right) {
     const std::size_t span = g_mark.viewStride - 64;
     const bool forced = g_layoutForceFail > 0 && g_layoutFailures < static_cast<std::uint64_t>(g_layoutForceFail);
     if (!forced && readable(left, span) && readable(right, span)) {
-        for (std::size_t o = 0; o + 16 <= span && g_mark.rect < 0; o += 4) {
-            const auto* a = reinterpret_cast<const std::int32_t*>(left + o);
-            const auto* b = reinterpret_cast<const std::int32_t*>(right + o);
-            if (a[0] == 0 && a[1] == 0 && a[2] >= 64 && a[2] <= 16384 && a[3] >= 64 && a[3] <= 16384 && b[0] == a[2] && b[1] == 0 &&
-                b[2] == 2 * a[2] && b[3] == a[3])
-                g_mark.rect = static_cast<int>(o);
-        }
+        // Pass 0: the eyes fill their halves, (0, 0, W, H) and (W, 0, 2W, H).
+        // Pass 1: a render scale below 1 ([stereo] render_scale, [dlss] input_scale, dynamic
+        // resolution): each eye covers only the corner of its half, (0, 0, w, h) and
+        // (X, 0, X + w, h) with X (the half's width) beyond w. Tried only when pass 0 finds
+        // nothing, so a full-size layout is found exactly as before.
+        for (int relaxed = 0; relaxed < 2 && g_mark.rect < 0; ++relaxed)
+            for (std::size_t o = 0; o + 16 <= span && g_mark.rect < 0; o += 4) {
+                const auto* a = reinterpret_cast<const std::int32_t*>(left + o);
+                const auto* b = reinterpret_cast<const std::int32_t*>(right + o);
+                if (!(a[0] == 0 && a[1] == 0 && a[2] >= 64 && a[2] <= 16384 && a[3] >= 64 && a[3] <= 16384 && b[1] == 0 && b[3] == a[3]))
+                    continue;
+                const bool match = relaxed ? (b[0] > a[2] && b[0] <= 16384 && b[2] == b[0] + a[2]) : (b[0] == a[2] && b[2] == 2 * a[2]);
+                if (match) g_mark.rect = static_cast<int>(o);
+            }
         for (std::size_t o = 0; o + 64 <= span && g_mark.proj < 0; o += 16)
             if (is_projection(reinterpret_cast<const float*>(left + o)) && is_projection(reinterpret_cast<const float*>(right + o)))
                 g_mark.proj = static_cast<int>(o);
@@ -389,8 +397,10 @@ void find_view_layout(const std::uint8_t* left, const std::uint8_t* right) {
     g_layoutFound = true;
     const float* m = reinterpret_cast<const float*>(left + g_mark.proj);
     const auto* r = reinterpret_cast<const std::int32_t*>(left + g_mark.rect);
-    log::info("foveation: eye views: rect at +0x{:x} ({}x{}), projection at +0x{:x} (left eye scale {:.4f} {:.4f}, axis at NDC {:.4f} {:.4f}){}",
-              g_mark.rect, r[2], r[3], g_mark.proj, m[0], m[5], m[8], m[9],
+    const auto* rr = reinterpret_cast<const std::int32_t*>(right + g_mark.rect);
+    log::info("foveation: eye views: rect at +0x{:x} ({}x{}, right eye at x {}), projection at +0x{:x} (left eye scale {:.4f} {:.4f}, axis at NDC "
+              "{:.4f} {:.4f}){}",
+              g_mark.rect, r[2], r[3], rr[0], g_mark.proj, m[0], m[5], m[8], m[9],
               g_layoutFailures ? std::format(", found after {} failed search(es)", g_layoutFailures) : std::string());
 }
 

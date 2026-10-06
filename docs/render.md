@@ -915,7 +915,19 @@ feature switches itself off with one log line and nothing else changes.
   yet) is repeated on every later stereo frame until it succeeds, with a
   warning at failures 1, 2, 4, 8 and so on, and foveation stays off until
   then. `[dev] foveation_layout_fail = N` makes the first N searches fail, to
-  test this.
+  test this. The view rect is recognised in two forms, tried in this order:
+  `(0, 0, W, H)` and `(W, 0, 2W, H)` (each eye fills its half), then
+  `(0, 0, w, h)` and `(X, 0, X + w, h)` with `X > w` (a render scale below 1:
+  each eye covers the top-left corner of its half, `X` being the half's
+  width). Before the second form existed, a session that started with
+  `[stereo] render_scale` or `[dlss] input_scale` below 1 never found the
+  layout (`view rect (missing) or projection (+0xe0) not found`, every frame)
+  and ran without foveation; starting at 1 and lowering the scale later worked
+  because the layout is found once and kept. Verified at 3072x3264 per eye,
+  scale 0.58 from the ini (Null backend): `rect at +0x80 (1784x1896, right eye
+  at x 3072)` on the first stereo frame, no failed search, surface for
+  6144x3265, rings centred at 58.7 % / 46.5 % of each scaled rect (the same
+  shares as at full size).
 - **Which draws get it.** The engine module marks where the scene of a stereo
   frame starts and ends, in the order of the frame's GPU work: hooks on
   `FDeferredShadingSceneRenderer::Render` and `FPostProcessing::Process` (and
@@ -1220,7 +1232,7 @@ Log lines to look for:
 ```
 foveation: scene markers installed (Render +0x21e64a0, FPostProcessing::Process +0x251c230, ...)
 foveation: variable rate shading available (driver 610.47, r610_45), context hooks installed
-foveation: eye views: rect at +0x80 (2064x2208), projection at +0xe0 (...)[, found after N failed search(es)]
+foveation: eye views: rect at +0x80 (2064x2208, right eye at x 2064), projection at +0xe0 (...)[, found after N failed search(es)]
 foveation: view rect (missing) or projection (+0xe0) not found in the eye views (search N failed); no foveated rendering until a later stereo frame finds them
 foveation: surface 259x139 tiles for 4128x2208; pixels: full 37.6 %, ...; left eye ... optical centre at (1212, 1027) ...
 foveation: off for this session: <reason>          (unsupported GPU or driver, NVAPI missing, an NVAPI call failed)
