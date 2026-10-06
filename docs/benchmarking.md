@@ -269,6 +269,47 @@ are stored in `result.json`.
 <dir> -ConfigFile <psd1> -OutDir <dir>`; `bench-compare.ps1 -Configs a,b
 -Runs 3` plus the same knobs and `-StopOnFailure`.
 
+## Stereo at headset resolution: `vr-perf-session.ps1`
+
+The configurations above compare whole runs. For the cost of the mod's stereo rendering and
+of single settings, `tools/bench/vr-perf-session.ps1` runs one game session and measures
+many settings in it, switched through the dev pipe, so differences of a few tenths of a
+millisecond are visible (alternate the settings; two windows of the same setting differ by
+about 0.05-0.1 ms standing still).
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\bench\vr-perf-session.ps1 `
+    -EyeWidth 3600 -EyeHeight 3600 -Steps tools\bench\vr-perf-steps\scenes.ps1 [-BuildDir build\<name>] [-ExtraSet "section.key=value"]
+```
+
+What it does: the player's ini (`tools/package/ff7vr.ini`) plus the XR Null backend at the
+given eye size without frame pacing (`xr.null_pace=0`), the dev pipe, `r.BloomQuality 0` in
+stereo and no periodic timing lines; the latest save through the harness; `t.MaxFPS 0`; then
+the steps file, dot-sourced with the helpers of `vr-perf-lib.ps1`:
+
+| Helper | Does |
+|---|---|
+| `Measure-Perf <label> [seconds]` | a frame time window (`stereo frametime`, the engine's frame interval: avg, p50, p95, max) and the GPU time of the scene and of everything after it until Present (`fov timing`, timestamp queries) over the same seconds; one line `RESULT ...` and a row in `results.json` |
+| `P "<cmd>;<cmd>"` | dev pipe commands, replies printed |
+| `Start-Pan <step>` / `.Stop()` | turn the camera with relative mouse moves (negative step: the other way) |
+| `Send-Walk <ms>` | walk forward with W |
+
+Steps files in `tools/bench/vr-perf-steps/`: `scenes.ps1` (three views of the latest save and
+turning, each with the per-eye reflections off and on: the before/after table in
+`docs/engine-module.md`, "At headset resolution"), `render-scale.ps1` (fixed render scales and
+the dynamic resolution). Output: `captures\perf\<time>-<tag>-<w>x<h>\` with `results.json`,
+`results.txt`, `status.txt`, captures and the mod's log. The game is stopped and everything
+put back at the end (`-NoStop` keeps it running).
+
+Without pacing the frame time is the GPU frame time of the game (it is GPU-bound at these
+sizes): compare it with the headset's frame period, keeping in mind that the runtime's
+compositor and, for Virtual Desktop, the video encoding take GPU time on top.
+
+For one frame in detail: `fov trace` (GPU time per render target binding, accurate) and
+`gpu trace <prefix>` (every draw with its targets, inputs and shaders; its per-draw GPU times
+include idle time while the trace itself holds the CPU, so use it for what is drawn, not for
+how long it takes).
+
 ## Resting state
 
 After `bench-compare.ps1` (and after every `bench-run.ps1`) the machine is

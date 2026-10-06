@@ -392,6 +392,11 @@ hidden buttons, is inferred from the filter's output.
 | `light_fix` | `1` | light sort-key patch while stereo renders: white blocks on skin indoors (see "Skin lighting fix"; `docs/re/engine.md` section 6) |
 | `bloom_fix` | `1` | right-eye bloom fix (below) |
 | `ao_fix` | `1` | right-eye ambient occlusion fix (below) |
+| `ssr_per_eye` | `1` | each eye's screen-space reflection run limited to its half of the target, and the per-view colour copy for it halved (see "Reflections per eye"); same image, about 0.45 ms less per frame at 2 x 3072x3264 |
+| `render_scale` | `1.0` | share of each eye's target the views render, per axis (0.3 to 1); the runtime scales the smaller image to the display. Also the upper bound of the dynamic resolution (see "Render scale and dynamic resolution") |
+| `dynamic_resolution` | `0` | adjust the render scale every few frames to hold the GPU frame time below `dynamic_resolution_target` of the display's frame period |
+| `dynamic_resolution_min` | `0.75` | lowest scale the dynamic resolution may use (per axis; 0.75 is 56 % of the pixels) |
+| `dynamic_resolution_target` | `0.85` | GPU frame time to hold, as a share of the display's frame period (0.85 at 72 Hz: 11.8 ms) |
 | `vr_window` | `1280x720` | window size the game is switched to while VR renders in a fullscreen mode; `0` keeps the mode (see "Window modes") |
 | `movie_screen` | `0` | movie detection: stereo is held off while a pre-rendered movie plays, so the virtual screen shows it (below) |
 | `allow_unknown_build` | `0` | try a game build other than 1.0.0.7 if every signature and layout check passes |
@@ -451,6 +456,9 @@ Through the dev pipe (`[dev] pipe = 1`, `tools\dev\send-input.ps1 -Pipe "<comman
 | `stereo log <n>` | log the eye cameras of the next n stereo frames |
 | `stereo bloomfix [0\|1]` | right-eye bloom fix on/off, with its counters (reduce passes seen, commands queued, draws fixed, misses) |
 | `stereo aofix [0\|1]` | right-eye ambient occlusion fix on/off, with its counters (draws fixed, failures); one per stereo frame |
+| `ssr [on\|off]` | reflections per eye on/off, with its counters (runs limited, colour copies halved; two each per stereo frame) |
+| `ssr poison <0\|1\|2\|3>` | test of reflections per eye: `1` fills every half the fix skips with a loud colour (nothing of it may reach the eye images), `2` fills the half each reflection run writes, `3` the half each colour copy writes (controls: the colour must show) |
+| `dynres [on\|off]`, `dynres scale\|min\|target <value>` | render scale and dynamic resolution: state, current scale and rect, last GPU frame time and budget, number of changes |
 | `stereo movie [on\|off]`, `stereo movie menu <0\|1>` | movie detection on/off and its state; `menu 1` counts the menu background players too (test) |
 | `stereo window [<w>x<h>\|0]` | window size while VR renders in a fullscreen mode, and the state |
 | `stereo frametime <s>` | frame time window length in seconds; restarts the window (for A/B measurements) |
@@ -529,6 +537,61 @@ Gameplay, first room of the save used by the harness, 1280x720 window, no XR ses
 | mono, 1280x720 window (device installed, stereo off) | 2.24 ms | 2.52 ms |
 | stereo 2 x 2064x2208 | 7.0 ms | 7.4 ms |
 | stereo 2 x 2500x2600 | 8.6 ms | 9.0 ms |
+
+### At headset resolution: 2 x 3072x3264 and 2 x 3600x3600
+
+The player's configuration (`tools/package/ff7vr.ini`: foveation `quality`, UI layer, first
+person, light and occlusion fixes) with `r.BloomQuality 0`, Null backend without pacing,
+`t.MaxFPS 0`, RTX 5080, measured with `tools/bench/vr-perf-session.ps1` and
+`vr-perf-steps/scenes.ps1` (`docs/benchmarking.md`). Frame time = the engine's frame interval
+(average over 5 s windows, two windows each); "before" = `ssr_per_eye` off (the state before
+2026-10-06), "after" = the defaults. Runs `captures/perf/005341-final-3072x3264`,
+`005805-final-3600x3600`.
+
+| View | 3072x3264 before | after | 3600x3600 before | after |
+|---|---|---|---|---|
+| start of the latest save (doorway, Tifa) | 9.35 ms | 8.98 ms | 11.57 ms | 11.09 ms |
+| alley after walking out | 7.88 ms | 7.35 ms | 9.72 ms | 9.05 ms |
+| open street | 9.61 ms | 9.18 ms | 11.73 ms | 11.18 ms |
+| turning in the street (p95) | 10.1 ms (13.0) | 9.25 ms (12.8) | 12.3 ms (16.0) | 11.1 ms (14.9) |
+
+Headroom of "after" against the display period: at 72 Hz (13.9 ms) 4.7 to 6.5 ms at
+3072x3264 and 2.7 to 4.8 ms at 3600x3600 standing; at 90 Hz (11.1 ms) 1.9 to 3.8 ms and
+-0.1 to 2.0 ms. Turning raises the 95th percentile by 3 to 4 ms. These are GPU frame times
+of the game alone: Virtual Desktop's compositor and encoder take GPU time on top, which cannot
+be measured without the headset (the player's session at 3072x3264 / 72 Hz ran at 64 to 72
+fps before these changes).
+
+Where the frame goes (2 x 3072x3264, start of the save, `fov trace`: GPU time per render
+target binding, 9.58 ms from the scene's start to Present):
+
+| Group | GPU ms |
+|---|---|
+| depth prepass and shadow depths | 1.1 |
+| hierarchical depth (four mip chains, built from the whole double-wide depth) | 0.6 |
+| translucency lighting volumes and other compute | 1.1 |
+| G-buffer (base pass, velocity) | 0.9 |
+| ambient occlusion, subsurface setup and blurs (per eye) | 0.9 |
+| lights, shadow masks, sky and fog into scene colour | 2.6 |
+| reflections, subsurface recombine, scene colour and depth copies | 1.4 (about 0.45 of it removed by `ssr_per_eye`) |
+| post-processing: temporal AA and tonemapper per eye | 0.93 |
+| the mod's own work: two eye blits (0.07 ms each), UI quad (0.013), desktop mirror (0.02) | about 0.2 |
+
+The scene window is 8.6 ms, of which 5.1 ms is shaded with the foveation mask; switching
+foveation off costs 1.8 ms (9.4 -> 11.2 ms). CPU: over a whole run (start, load, 3 minutes of
+play) the busiest threads are the RHI thread (about 40 % of a core), an unnamed engine thread
+(37 %), the game thread (31 %) and the render thread (24 %): the frame is GPU-bound at these
+sizes.
+
+Options measured but not on by default (they change the picture):
+
+| Setting | Effect | Visible cost |
+|---|---|---|
+| `fov hidden cull` | -0.19 ms (2 x 3072x3264) | pixels the lenses never show are left with stale content, which temporal AA, exposure and bloom can carry into the visible image ("Foveated rendering", `docs/render.md`) |
+| `fov passes all` (mask on post-processing too) | post-processing 0.93 -> 0.66 ms | temporal AA and tonemapper shaded coarsely in the periphery |
+| `render_scale 0.9` / `0.8` / `0.75` | -12 % / -26 % / -31 % at 2 x 3600x3600 | softer image (fewer pixels; the runtime scales up) |
+| `r.ScreenPercentage` below 100 | about as above | same softening, and every change reallocates the scene buffers (hitches of 50-140 ms) |
+| candidate preset below (fog, shadows) | -21 % at 2 x 2500x2600 | not checked in sunlit or hazy scenes |
 
 ### Outdoors at 2 x 2500x2600: what the frame time is made of
 
@@ -773,6 +836,112 @@ counters are read one after the other) with the light fix on, off and on again (
 bloom fix `applied` +557, +523, +546, occlusion fix +556, +523, +546, stereo frames +556,
 +523, +546; `missed 0`, `failed 0`). The flat game (`stereo off`) with the patch removed
 looks as before (`r3/flat_after_off.png`). Not confirmed in a headset yet.
+
+## Reflections per eye
+
+Square Enix's screen-space reflections run once per view, each time as one full-screen
+triangle over the whole side-by-side target (`DrawIndexed 3`, viewport 6144x3264 at 2 x
+3072x3264, into an `R16G16B16A16_FLOAT` target, reading the view's hierarchical depth
+(`R16_FLOAT` with mips), velocity, GBuffers and the previous frame's colour). The next pass of
+that view (the reflection composite, at the view's own viewport) reads only its half; the next
+view's run then overwrites the whole target. So half of each run is computed and thrown away.
+After the scene's lighting, the whole scene colour is also copied once per view
+(`CopyResource`, 6144x3264 RGBA16F, about 0.17 ms each) into the texture that view's next
+reflection run reads as the previous frame's colour.
+
+`src/engine/src/fixes.cpp` (`ssr_draw`, `ssr_copy`; `[stereo] ssr_per_eye = 1`, default):
+on the RHI thread, a draw of that shape (one triangle over a whole R16G16B16A16 target at
+least 1.5 times as wide as high, no depth, a hierarchical depth texture among the pixel
+shader's inputs) is run with a scissor rectangle on its view's half: the first such draw of a
+frame on the left half, the second on the right (`stereo swap` reverses this), any further one
+untouched. A `CopyResource` whose destination one of this frame's reflection runs read (a
+texture of the scene colour's size and format) copies only that view's half. Viewports,
+shaders and inputs are unchanged, so every pixel that is computed is computed as before.
+
+Evidence (Null backend, 2 x 3072x3264, `captures/perf/`): the two runs and two copies are seen
+once each per stereo frame (`ssr`: runs limited 16044 and copies halved 16044 in 8022 frames,
+no extra runs) at the start of the latest save and in the street. Because two captures of the
+game a few frames apart already differ a lot (camera sway, animation), equality was tested with
+`ssr poison`: filling every skipped half with a bright magenta (value 50) adds no magenta pixel
+to either eye (start and street, render scale 1 and 0.8: 0 to 18 magenta pixels, the same as
+with the fix alone, none in the 64 columns next to the eye boundary), while filling the halves
+the fix does compute shows it (reflection output: 37-50 % of the pixels magenta in both eyes;
+colour copies: 120 000 pixels in the left eye). Runs `004408-poison2`, `004901-copy`.
+
+Cost (frame time, frame cap lifted, no pacing, ssr per eye off / on in turns, 5 s windows):
+
+| 2 x 3072x3264 | off | on | |
+|---|---|---|---|
+| start of the latest save | 9.30-9.39 ms | 8.98 ms | -0.37 ms |
+| alley after walking out | 7.85-7.91 ms | 7.32-7.37 ms | -0.54 ms |
+| open street | 9.57-9.65 ms | 9.13-9.23 ms | -0.43 ms |
+| turning in the street | 10.0-10.2 ms | 9.2-9.3 ms | -0.85 ms |
+
+At 2 x 3600x3600 the same views give -0.47, -0.67, -0.55 and -1.15 ms (table under
+"Measured").
+
+An observation from the colour-copy control that is not explained yet: filling the half the
+right view's copy writes did not show in the right eye at all (it did for the left view in the
+left eye). Either the right view's reflections read the previous colour from somewhere else, or
+they find no hits in these scenes. Square Enix's per-view passes have ignored the second
+view's offset three times before (bloom, ambient occlusion, UI); the right eye's reflections
+deserve a look on a shiny floor with `gpu trace`.
+
+## Render scale and dynamic resolution
+
+The game's own dynamic resolution (`r.DynamicRes.*`, active in the player's settings) does
+nothing in stereo: with `r.DynamicRes.FrameTimeBudget 6` (operation mode 1 or 2) at
+2 x 3600x3600, 11.5 ms per frame, the frame time and image stayed as they were. Lowering
+`r.ScreenPercentage` works (75: 11.5 -> 9.0 ms), but this build sizes its scene buffers from
+it, so every change reallocates them: toggling between 90 and 100 once a second gave frames of
+54 to 138 ms and short drops to the virtual screen, also with
+`r.SceneRenderTargetResizeMethod 2`.
+
+`[stereo] render_scale` therefore works through the views instead: each eye renders into the
+top-left `scale x scale` part of its half of the eye target (`AdjustViewRect`), the eye target
+and the scene buffers keep their size, and the eye rects handed to the XR layer are the
+smaller ones, so the runtime receives the image as the projection layer's sub-image and scales
+it to the display (one resampling, in the runtime's own distortion pass). A change takes
+effect at the next frame and reallocates nothing (`dynres scale 0.9` and `1` alternated once a
+second: no frame above 20 ms). Foveation follows the smaller rects (its surface is rebuilt
+for the new rects; `docs/render.md`). What temporal anti-aliasing does with its history when
+the rect changes was not examined (nothing was seen in still captures; not checked in motion).
+
+`[stereo] dynamic_resolution = 1` adjusts the scale from the GPU time of the stereo frames
+(scene start to Present, the foveation module's timestamps, so it needs foveation to be
+initialised; without it the scale stays at `render_scale`). Every 10 measured frames: if
+their median is above the budget (`dynamic_resolution_target` x the display's frame
+period), the scale drops at once to the estimate that fits (pixel count proportional, at most
+0.10 per step); if it stays below 90 % of the budget for 60 frames, it rises by at most 0.04.
+Steps of 0.02, between `dynamic_resolution_min` and `render_scale`. The 20 frames after a
+change are not counted: the engine reallocates buffers sized by the view rect then, and those
+frames take up to 30 ms of GPU time (with the average instead of the median and 4 frames
+skipped, the scale oscillated between 0.75 and 0.82 on exactly those frames). The log has one
+line per change (`dynres: scale 0.92 -> 0.86 (GPU median ... ms of 10 frames, budget ...
+ms)`). The GPU median is also kept while the scale is fixed: `dynres` shows it, which gives
+the game's GPU frame time in a headset session.
+
+Measured (2 x 3600x3600, start of the latest save, Null backend unpaced; frame time / GPU time
+of the scene):
+
+| render scale | frame | scene GPU | eye pixels |
+|---|---|---|---|
+| 1.00 | 11.53-11.61 ms | 10.07-10.11 ms | 3600x3600 |
+| 0.90 | 10.16 ms | 8.83 ms | 3240x3240 |
+| 0.80 | 8.63 ms | 7.70 ms | 2880x2880 |
+| 0.75 | 8.05 ms | 7.23 ms | 2704x2704 |
+
+Dynamic resolution at a target of 0.85 x 13.9 ms (72 Hz) = 11.8 ms in the street: the scale
+settled at 0.96 (GPU 11.2 ms); at 0.75 x 13.9 = 10.4 ms it went to 0.86 standing and moved
+between 0.75 and 0.98 while turning, following the GPU time of each 10-frame window (turning
+has single windows of 15 ms). Captures at 0.75 (`captures/perf/002659-scale2-3600x3600/s075_*`):
+geometry and framing as at 1.0, softer; nothing at the edges of the sub-image.
+
+Not on by default: it lowers the resolution exactly when the scene is heavy, and how a
+resolution change looks in motion (TAA reset, the runtime's scaling) and how the budget should
+be set against Virtual Desktop's own GPU work can only be judged in the headset.
+`render_scale` below 1 is the same trade as `[xr] resolution_scale`, but without
+reallocation and adjustable while playing (`dynres scale`).
 
 ## Movies
 

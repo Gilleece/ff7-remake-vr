@@ -679,6 +679,18 @@ feature switches itself off with one log line and nothing else changes.
   up to a multiple of 4) and is not a skipped format, and off for every other
   binding. The Present hook switches it off before any of this module's own
   work.
+- **Render scale below 1** (`[stereo] render_scale`, dynamic resolution;
+  `docs/engine-module.md`): each eye covers only the top-left part of its half of
+  the scene targets, which keep their size. The size rule then uses the targets'
+  size, not the rects' extent: twice the right eye's offset wide, and as high as
+  that half at the rects' aspect (both axes are scaled alike and rounded to 8
+  pixels, so the height is accepted within 16 pixels). Without this the mask was
+  silently off whenever the scale was below 1 (scale 0.85 at 2 x 3600x3600 saved
+  only 0.7 ms instead of the 1.4 ms of 0.9 with the mask).
+- **GPU frame time for others:** the scene and after-scene timestamps of each
+  stereo frame are summed and offered through `render::GetGpuFrameTime` (render.h);
+  the engine's dynamic resolution reads it. Only measured while foveation is
+  initialised (an NVIDIA GPU, `[foveation] enabled = 1`).
 - **Never affected:** mono frames, screen mode and the plain game (no stereo
   view family, so no scene is marked), the in-game UI pass (after the scene
   window), the post-processing chain including temporal AA, bloom and the
