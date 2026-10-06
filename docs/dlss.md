@@ -10,10 +10,10 @@ at headset resolution). The history is reset on camera cuts; upscale mode works 
 change of the size recreates the features, a hitch) and always hands the runtime the full
 eye. Everything here was measured headless (Null backend, no headset); nothing has been seen
 in a headset yet. Not handled: texture mip bias in upscale mode, mono frames. **GPU faults:**
-three driver resets in the test runs with DLSS on; the same kind of fault also happened once
-without DLSS, and in isolation runs DLSS failed only together with foveated rendering
-(variable rate shading): run DLSS with `[foveation] enabled = 0` until that is understood
-(section "GPU faults").
+the driver resets with DLSS on had one cause, found on 06/10 and fixed: the mod drew its
+motion vectors inside a device context state of its own (`SwapDeviceContextState`) in the
+middle of the engine's frame; at the title screen that hung the GPU within seconds, with or
+without NGX. The draws now happen in the game's own pipeline state (section "GPU faults").
 
 ## Building it
 
@@ -61,9 +61,17 @@ immediate context's `DrawIndexed` that the bloom and occlusion fixes use:
    render target (that eye's `TemporalAA` history target), so the bloom, the tonemapper and
    the next frame's history see the DLSS result. The game's draw is skipped.
 
-All of steps 3-5 run inside our own D3D11 pipeline state (`SwapDeviceContextState`), so the
-engine's bound state is exactly as it was afterwards. If anything is missing (no captured
-view rows, a failed evaluation), the game's own draw runs instead and `dlss status` says why.
+Steps 3-5 run in the game's own pipeline state: the motion vector draw saves the state it
+changes (shaders, input layout, topology, the pixel shader's constant buffers 0-1 and
+resources 0-1, render targets, viewports, rasterizer, blend and depth-stencil states) and
+puts it back; NGX keeps the immediate context's state itself (programming guide 5.2.5);
+copies need no state. A device context state of the mod's own (`CreateDeviceContextState`,
+`SwapDeviceContextState`) is no longer used for any of this: a draw inside it in the middle
+of the engine's frame hung the GPU (section "GPU faults"); `[dlss] context_state = own`
+brings the old way back for comparison. Before every evaluation its inputs are checked
+(section "Checks and diagnostics"); if anything is missing or a check fails (no captured
+view rows, a rectangle outside a texture, a failed evaluation), the game's own draw runs
+instead and `dlss status` says why.
 
 Lifetimes: a feature that is replaced (a new input size, a changed flag, `dlss off`,
 `dlss recreate`) and every texture an evaluation reads or writes that is replaced (the
@@ -362,6 +370,70 @@ evaluates outside the range NGX gives.
 
 ## GPU faults seen in the test runs
 
+### Cause and fix (06/10)
+
+**Fast reproduction.** The title screen in stereo with DLSS on: Null backend, eyes 3072x3264
+at 120 Hz, `[dlss] enabled = 1`, `input_scale = 0.58`, `[foveation] enabled = 0`,
+`[stereo] start_in_stereo = 1`, and no key pressed, so the game stays at "press any button"
+(the first player session with DLSS hung there, 5 s after the features were created). Every
+such run hung the GPU (System log `nvlddmkm` event 153, the game's device removed with
+`DXGI_ERROR_DEVICE_HUNG`) between 0.05 and 125 s after the features were created, most
+within 30 s. Earlier test runs never rendered the title in stereo (the harness switches
+stereo off for the menus), and in gameplay the same fault took minutes to hours. The eye
+image at the title is almost black (90 % of the pixels below one 10-bit step), the camera
+is still, the motion vectors are zero.
+
+**Bisection** (each line one run at the title, `captures/dlss` `b2`-`b16`, 180 or 300 s
+unless it hung earlier):
+
+| What ran | Result |
+|---|---|
+| DLSS as it was; DLAA mode at full size (inside NGX's input range); one eye only; a parameter map per feature; NGX in the game's state; each eye's inputs in textures of their own without sub-rectangles; evaluations at the end of the frame; a `Flush` after each evaluation; output not copied; jitter 0; auto exposure off; colour raised to at least 0.05; the frame rate capped at 45 (the card at 90 W instead of at its 360 W limit) | hang, every one (0.05 to 125 s) |
+| NGX alone: two evaluations per frame of the same size on textures of the mod's own, at the frame end, with or without jitter, rewritten inputs or a copied output (about 80,000 evaluations at the power limit) | clean, 4 x 180 s |
+| no DLSS, render scale 0.58; no DLSS at 4096x4352 per eye | clean, 300 s and 180 s |
+| the DLSS path without the NGX evaluation (`test_skip`): motion vectors drawn and the colour passed through at the anti-aliasing pass inside the mod's own context state | **hang** (also at render scale 1, and with NGX never initialised) |
+| the same, without the motion vector draw (pass-through copy only) | clean, 300 s |
+| the mod's context state swapped in and out around the copy, no draw | clean, 300 s |
+| the motion vector draw in the game's own state (saved and restored), no swap | clean, 300 s |
+
+So the trigger was a draw (the motion vectors) made inside a device context state of the
+mod's own, swapped in with `ID3D11DeviceContext1::SwapDeviceContextState` at the engine's
+anti-aliasing pass and swapped out after it. The swap alone, and the same draw in the
+game's own state, ran clean. NGX was not needed: with NGX never initialised the draw still
+hung the GPU in 10 s. Every DLSS variant tried before still drew the motion vectors that
+way, which is why none of them changed anything. Why the driver fails on this at the title
+screen, and much more rarely in gameplay, is not known (the state object was created with
+`CreateDeviceContextState` for `ID3D11Device1` at the device's feature level; the game's
+device has no multithread protection; no other thread used the immediate context, checked
+with hooks on `Map`, `Unmap` and `UpdateSubresource`).
+
+**Fix** (`[dlss] context_state = game`, the default): the motion vector draw runs in the
+game's own pipeline state and puts back what it changes; NGX creates and evaluates in the
+game's state too. The mod's own context state is only used by test switches and by
+`dlss bench`.
+
+### Proof of the fix (06/10, headless)
+
+Null backend, eyes 3072x3264 at 120 Hz, upscale mode at `input_scale` 0.58, preset L (the
+NVIDIA App override), the dev ini's `[stereo_cvars]` (including the level-of-detail lines),
+`r.BloomQuality 0`; after each run the System log was read for `nvlddmkm` events.
+
+| Run | Length | Result |
+|---|---|---|
+| Title screen in stereo, upscale, three runs (`captures/dlss/b16-fix-a`, `-b`, `-c`) | 3 x 5 min | no fault; 63,442 evaluations in the first, none failed, no failed check, no warning or error in the log; frames 9.28 ms (p95 9.4), DLSS 3.04 ms per eye |
+| Title screen in stereo, DLAA at 3072x3264 (`b16-fix-dlaa`) | 5 min | no fault |
+| The same build with `context_state = own` (`b16-own`), run between them | - | GPU hang after 115 s |
+| Gameplay, foveated rendering off (`e2-world-fovoff`): the latest save, walking forward and back, the emulated head turning, Insert (virtual screen) off and on every 2 minutes, a 150 degree head jump at 5 minutes | 20.1 min | no fault; 164,254 evaluations, none failed, no failed check, 22 history resets at cuts, no warning, error or NGX error in the log. Frames (30 s windows) after the level had streamed in: average 11.6 to 12.8 ms, 95th percentile 13.1 to 18.5 ms, longest 76 ms (at the Insert switches); the first 3 minutes after loading were slow (average 27 to 288 ms) while video memory was being moved (the System process's copy engine at 19 %) |
+
+| Gameplay, foveated rendering on at `performance` (`e3b-world-fovperf`): as above, started at `input_scale` 1.0 so that foveated rendering finds the views, then the render scale switched between 0.5 and 0.58 every 60 s (each switch rebuilds the shading-rate surface and, under the NVIDIA App override, recreates both features): the combination that hung within 3 minutes twice in the runs of 06/10 night | 20.0 min | no fault; 19 scale changes, 40 feature creations, 20 shading-rate surfaces, every replaced feature released after its fence; 208,712 evaluations, none failed, no failed check, no warning, error or NGX error. Frames after the first minute (which ran at full size): average 9.7 to 12.0 ms, 95th percentile 10.7 to 13.7 ms, longest 68 ms |
+
+Not covered: a loading screen between areas, a cutscene, a headset. Foveated rendering
+still does not start when the render scale is below 1 at start (so with `input_scale`
+below 1 from the ini it stays off, as before; a known problem of foveated rendering, not of
+DLSS).
+
+### History before the cause was found
+
 Three times during the headless runs of the upscale mode the GPU faulted, the driver reset
 (System log: `nvlddmkm` event 153, `Error occurred on GPUID`), the game's device was
 removed (`0x887A0005` in the next D3D call) and the game stopped presenting:
@@ -466,12 +538,14 @@ custom voltage curve and a memory offset at start-up. A control run without the 
 same route, and a run at the card's stock settings, are the next tests; nothing on the
 PC was changed.
 
-### Conclusion so far
+### Conclusion before 06/10 (superseded by "Cause and fix" above)
 
 The faults are not caused by DLSS alone: the same kind appeared without DLSS (once on
 05/10 and once on 06/10), and with DLSS they came both with and without foveated
 rendering, so the paragraph below describes the state of knowledge before the 05:16
-hang; its advice (foveated rendering off) is not sufficient. Foveated rendering uses
+hang; its advice (foveated rendering off) is not sufficient. (The two faults without
+DLSS are not explained by the cause found later; the PC's System log has about 25 such
+events from April to September, before this project.) Foveated rendering uses
 NVIDIA's variable rate shading through NVAPI (`src/render/src/foveation.cpp`). It is not
 simply "variable rate shading plus DLSS": the first DLSS runs (about 100 captures with
 DLSS and foveated rendering both on, `r.ScreenPercentage` changes, few feature
@@ -598,7 +672,7 @@ always uses AutoExposure"; the mod sets the auto-exposure flag.
 
 | With | Result | How it was checked |
 |---|---|---|
-| Foveated rendering (variable rate shading) | works; it shades the scene before the anti-aliasing pass, DLSS resolves the periphery like the game's pass does | `fov off` / `fov on` with DLSS on, `r3/sheet_fov.png` |
+| Foveated rendering (variable rate shading) | works; it shades the scene before the anti-aliasing pass, DLSS resolves the periphery like the game's pass does. No GPU fault together with DLSS since the fix (20 minutes with render scale changes, section "Proof of the fix"). It does not start when the render scale is below 1 at start (a foveation limitation) | `fov off` / `fov on` with DLSS on, `r3/sheet_fov.png`; `captures/dlss/e3b-world-fovperf` |
 | Bloom and ambient occlusion fixes | still applied once per stereo frame at 100 % | `stereo bloomfix`, `stereo aofix` counters with DLSS on |
 | Bloom and ambient occlusion fixes below 100 % | with `r.ScreenPercentage` 58 and 67 at eyes 3072 wide the right view's rectangle reaches 1-3 pixels past the scaled buffer; before `bbe071a` the fixes skipped those frames (`missed 4759`, `failed 4844` in `r9`, the right eye showed the left eye's bloom and occlusion ghost, `r8/sheet_up_R.png`), since then they clamp the rectangle. With `input_scale` / `render_scale` the rectangles never overhang | counters, captures |
 | Light sort-key fix, UI layer | unaffected (the UI is drawn into its own layer; the light fix is in the scene) | captures show the HUD layer and lit scenes as before |
@@ -616,8 +690,11 @@ always uses AutoExposure"; the mod sets the auto-exposure flag.
   is built explicitly without DLSS, and the script checks the DLL for NGX names either way).
 - `[dlss] enabled = 1` in `ff7vr.ini`; `mode = upscale` and `input_scale = 0.5` (or 0.58, 0.67)
   are the defaults. Leave `[stereo] dynamic_resolution` off while the NVIDIA App override is set.
-- `[foveation] enabled = 0` while DLSS is on (section "GPU faults seen in the test runs":
-  with both on the GPU stopped within minutes in the stress runs).
+- A build from commit `ef2688a` or later: before it, DLSS could hang the GPU (within seconds
+  at the title screen; section "GPU faults seen in the test runs"). Foveated rendering may
+  stay on (tested together with DLSS and render scale changes, section "Proof of the fix"),
+  but it does not start when `input_scale` (the render scale) is below 1 at start, so with
+  DLSS from the ini it is off for now.
 - A DLSS model: if the NVIDIA App's override is set for the game, the driver's own copy is
   used and nothing else is needed; otherwise `nvngx_dlss.dll` (310.5.0 or later for presets
   L/M) next to the game's exe or in `[dlss] dll_dir`. The game folder may already have one
@@ -647,8 +724,50 @@ by the project's maintainers on how an MIT-licensed project and NVIDIA's terms f
 | `camera_cut_reset` | `1` | reset an eye's history on a camera cut (see "Camera cuts") |
 | `cut_distance`, `cut_angle` | `100`, `30` | a camera move of more than this many world units (cm) or degrees in one frame counts as a cut |
 | `dll_dir` | empty | extra folder searched for `nvngx_dlss.dll` (searched before the mod's folder) |
-| `log_ngx` | `1` | NGX's own messages in `ff7vr.log` (the first 400) |
-| `log_verbose` | `0` | `1`: NGX's most detailed log level (read when NGX starts; the first 4000 messages). Shows its kernel allocations, feature creation and release, and its garbage collection |
+| `log_ngx` | `1` | NGX's own messages in `ff7vr.log` (the first 400, or `log_lines`) |
+| `log_verbose` | `0` | `1`: NGX's most detailed log level (read when NGX starts; the first 20000 messages). Shows its kernel allocations, feature creation and release, and its garbage collection |
+| `log_lines` | `0` | how many NGX messages go to the log; `0`: 400, or 20000 with `log_verbose` |
+| `context_state` | `game` | `game`: the motion vectors are drawn and NGX runs in the game's own pipeline state (the fix of the GPU hangs); `own`: inside a device context state of the mod's own, the way that hung the GPU (only to compare) |
+| `eval_at` | `pass` | upscale mode: `pass` evaluates at each eye's last pass; `frame_end` draws the game's last pass first and evaluates both eyes at the end of the frame (tested while looking for the hangs; no advantage found) |
+| `validate` | `1` | check every evaluation's inputs first and run the game's pass if a check fails (section "Checks and diagnostics") |
+| `input_stats` | `0` | `1`: GPU statistics of every evaluation's inputs, read back late (diagnostics; only together with `context_state = own`, inside whose state its compute pass runs) |
+| `params` | `shared` | `shared`: one NGX parameter map for every call; `feature`: a map of its own per feature (`NVSDK_NGX_D3D11_AllocateParameters`) |
+
+The fault-isolation keys (`test_eyes`, `test_zero_mv`, `test_mv_sanitize`, `test_flush`,
+`test_skip`, `test_no_ngx`, `test_copy_inputs`, `test_color_floor`, `test_color_noise`,
+`test_depth_const`, `test_no_copyout`, `test_jitter`, `test_bench`, `test_bench_jitter`,
+`test_bench_write`, `test_bench_copyout`) set the tests of "Dev commands" from the first frame;
+`dlss.cpp` describes each at its setting. They are for finding faults, not for play.
+
+## Checks and diagnostics
+
+- **Checks before every evaluation** (`[dlss] validate`, on by default): the feature exists
+  and accepts the input size; the colour, depth and motion vector rectangles lie inside
+  their textures and the formats are the expected ones; the output rectangle lies inside a
+  texture with unordered access; the jitter is finite and at most a pixel; in upscale mode
+  the eye's anti-aliasing pass ran this frame. A failed check skips the evaluation (the
+  game's pass runs), is logged the first time and at every power of two, and is counted in
+  `dlss status`. The engine's depth texture is compared with the previous frame's and a
+  change is counted.
+- **Event ring**: the last 400 DLSS events (the passes seen with their textures and
+  rectangles, every evaluation with its parameters and result, feature creation and release,
+  video memory every 2 s, failed checks, statistics) are written to `ff7vr.log` when the
+  device is removed (`dlss: the D3D11 device was removed`) and by `dlss events`, which
+  works also while the RHI thread is blocked. The GPU runs a few frames behind the RHI
+  thread, so the evaluation a fault came from is among the last ones written.
+- **Input statistics** (`[dlss] input_stats = 1`, only with `context_state = own`, the way
+  used while the faults were hunted): a compute pass over each evaluation's
+  input rectangle counts motion vectors that are not finite or larger than the input,
+  depth that is not finite, outside 0..1, 0 or at least 0.999, black pixels of the
+  display-referred colour (upscale) or non-finite HDR colour (DLAA), and the largest
+  values; read back two frames later, logged when something is off. At camera cuts the
+  motion vectors overflow FP16 (the engine keeps its previous camera across the mod's
+  switches); those frames reset the history.
+- **Other threads on the immediate context**: calls of `Map`, `Unmap` and
+  `UpdateSubresource` on the immediate context from any thread but the RHI thread are logged
+  (none were seen) and counted, separately if they came during an NGX call.
+- Video memory (local budget and use, DLSS's own share from `NGX_DLSS_GET_STATS`) is in every
+  feature creation line and in the event ring.
 
 ## Dev commands
 
@@ -666,7 +785,11 @@ by the project's maintainers on how an MIT-licensed project and NVIDIA's terms f
 | `dlss hdr <0\|1>`, `dlss sharpness <v>`, `dlss preexp <v>`, `dlss nograin <0\|1>` | upscale mode tests: the input flagged HDR, `InSharpness`, `InPreExposure`, the last pass at the reduced size without its noise texture |
 | `dlss maxinput <full\|setting>` | upscale mode test: size a dynamic feature for render scale 1 instead of `[stereo] render_scale` |
 | `dlss reset`, `dlss recreate` | reset the history, release and recreate the features |
-| `dlss skip <0\|1>` | upscale mode fault test: everything runs (motion vectors, the graded copy at the reduced size) except the NGX evaluation; the game's own last pass scales the image up |
+| `dlss skip <0\|1>` | upscale mode fault test: everything runs (motion vectors, the graded copy at the reduced size) except the NGX evaluation; the game's own last pass scales the image up. `[dlss] test_skip` from the ini also has levels 2 (no graded copy either), 3 (pass-through copy only), 4 (nothing replaced), 5 (the mod's context state swapped in and out, no draw), 6 (motion vectors drawn in the game's state) |
+| `dlss events` | write the event ring to the log (section "Checks and diagnostics") |
+| `dlss eyes <0\|1\|2>` | both eyes, left only, right only (the other eye runs the game's passes) |
+| `dlss ownstate <0\|1>`, `dlss evalend <0\|1>`, `dlss params <shared\|feature>` | `[dlss] context_state`, `eval_at`, `params` while the game runs |
+| `dlss zeromv`, `mvsanitize`, `flush`, `validate`, `stats`, `copyinputs` `<0\|1>` | tests: motion vectors zero or sanitised, `Flush` after each evaluation, the checks, the input statistics, per-eye input copies |
 | `dlss stall [ms]` | fault test: at the next frame end, wait until the GPU has finished everything (what a blocking read-back such as `capture` does), then stay away `ms` milliseconds (default 40) with the GPU idle |
 | `dlss dump` | log the view uniform buffer rows 110-145 of the next two views |
 | `dlss timing` | restart the GPU time averages |

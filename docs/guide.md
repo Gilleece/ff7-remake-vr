@@ -408,7 +408,10 @@ DLSS model L) 0.5 cost about as much as the game at full size (5 % more at 3072x
 eye, between 9 % less and 4 % more at 3600x3600), with detail close to it and far sharper
 than rendering at 0.5 without DLSS; hair and soft shadow edges are grainier than at full
 size; 0.67 is calmer and closer to full size but costs about half as much again.
-What it looks like in a headset has not been seen yet. It needs an NVIDIA RTX graphics
+What it looks like in a headset has not been seen yet. Earlier `-dlss` packages could hang
+the graphics card (within seconds at the title screen); that was a fault in the mod, fixed
+in commit `ef2688a` (a package's folder name contains the commit it was built from; any
+later one has the fix). It needs an NVIDIA RTX graphics
 card with a current driver: the DLSS model comes with the driver (or from an
 `nvngx_dlss.dll` in the game folder), and if the NVIDIA App's DLSS override is set for
 this game, the App's choice of model applies, not `[dlss] preset`; with that override,

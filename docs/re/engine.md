@@ -1009,6 +1009,19 @@ room):
 - **Thread names.** The RHI thread is the one that presents (`d3d11:` log line "the main swap
   chain is now presented from thread N 'RHIThread'"); the mod's DLSS and frame-end work log
   with the same thread id.
+- **Do not draw inside a swapped-in device context state in the middle of the frame**
+  (VERIFIED 06/10, `captures/dlss` runs `b10`-`b16`, notes in `docs/dlss.md` "GPU faults"):
+  a full-screen draw made inside an `ID3DDeviceContextState` of the mod's own
+  (`ID3D11Device1::CreateDeviceContextState`, emulated interface `ID3D11Device1`, the
+  device's feature level), swapped in with `ID3D11DeviceContext1::SwapDeviceContextState`
+  at the temporal anti-aliasing pass (both views) and swapped out after it, made the GPU
+  fault (`nvlddmkm` 153, `DXGI_ERROR_DEVICE_HUNG`) within 4 to 125 s while the game sat at
+  its title screen in stereo, also with NGX never initialised. The swap without a draw, and
+  the same draw in the game's own state with the touched state saved and restored by hand,
+  each ran clean for 300 s at the title. In gameplay the same draw ran for 40 minutes
+  without a fault the night before, so the scene matters; why is not known. The game's
+  device has creation flags 0 (no multithread protection) and no thread other than the RHI
+  thread was seen calling `Map`, `Unmap` or `UpdateSubresource` on the immediate context.
 
 ## Tools
 
