@@ -197,8 +197,10 @@ rectangles and constants of every later pass of each view (the flat-screen Luma 
 that for its single view). Not attempted; the upscale mode here uses the one pass that
 already changes size.
 
-Not done in upscale mode: a texture mip bias for the lower render size (DLSS guide 3.5;
-`r.MipMapLODBias -1` in `[stereo_cvars]` is the candidate, untested), a check of the game's
+Texture mip bias for the lower render size (DLSS guide 3.5): `r.MipMapLODBias` exists in
+this build (0 by default); at 50 % with `-1` the crops checked (`r14/sheet_bias.png`, the
+counter top and the gramophone) show no clear difference, so it is left to the player
+(`[stereo_cvars] r.MipMapLODBias = -1`). Not done in upscale mode: a check of the game's
 dynamic resolution (it never changed the view size in any run, also not at 26 ms frames),
 and the history reset on camera cuts.
 
@@ -258,6 +260,7 @@ always uses AutoExposure"; the mod sets the auto-exposure flag.
 | Stereo off and on | the features keep their size; an eye not evaluated in the previous frame is reset; first frames clean | `r3/sheet_after_on.png` |
 | Camera cuts | not handled yet (the history is not reset on a cut; row 140 of the view buffer is a candidate flag, unverified) | - |
 | The game's dynamic resolution | a change of the view size recreates the feature (a hitch of 15-100 ms); the view size never changed in any run, also not at 26 ms frames | feature creation lines in the logs |
+| `[stereo] render_scale` / `dynamic_resolution` (the mod's own, view rects inside full-size targets) | not tested together. DLAA follows the view rectangle, but a feature is recreated at every size change; with dynamic resolution the features would have to be created at the largest size and evaluated with `InRenderSubrectDimensions`. For upscaling with it, DLSS would write the full eye rectangle and the layer's sub-image would go back to full size (a change in the render host) | - |
 | Mono frames (menus, virtual screen) | nothing happens (the pass is only replaced while the engine renders in stereo) | - |
 
 ## What a player needs to try it
