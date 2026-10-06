@@ -40,6 +40,10 @@ endif()
 # docs/dlss.md). Off by default. The NVIDIA DLSS SDK has its own licence and is not part of
 # this repository: with -DFF7VR_DLSS=ON it is taken from FF7VR_DLSS_SDK_DIR, or fetched
 # into third_party/_fetched/dlss-sdk (github.com/NVIDIA/DLSS) if that folder is missing.
+# tools/dev/build.ps1 -With dlss / -Without dlss pass FF7VR_WITH_DLSS: the same switch.
+if(DEFINED FF7VR_WITH_DLSS)
+    set(FF7VR_DLSS ${FF7VR_WITH_DLSS} CACHE BOOL "Build the DLSS anti-aliasing (needs the NVIDIA DLSS SDK)" FORCE)
+endif()
 option(FF7VR_DLSS "Build the DLSS anti-aliasing (needs the NVIDIA DLSS SDK)" OFF)
 if(FF7VR_DLSS)
     set(FF7VR_DLSS_SDK_DIR "${FETCHCONTENT_BASE_DIR}/dlss-sdk" CACHE PATH "NVIDIA DLSS SDK checkout")

@@ -28,16 +28,24 @@
 
   The package does not need this repository: copy the folder anywhere.
 
+  -Dlss builds the mod with NVIDIA DLSS (-DFF7VR_DLSS=ON, docs\dlss.md; the NVIDIA DLSS
+  SDK is fetched at build time and is not part of the package) in build\release-dlss and
+  names the package ff7vr-<date>-<commit>-dlss. Without it the build is explicitly
+  without DLSS.
+
 .EXAMPLE
   powershell -NoProfile -ExecutionPolicy Bypass -File tools\package\package.ps1
   powershell -NoProfile -ExecutionPolicy Bypass -File tools\package\package.ps1 -Clean
+  powershell -NoProfile -ExecutionPolicy Bypass -File tools\package\package.ps1 -Dlss
 #>
 param(
-    [string]$BuildDir = 'build\release',
+    [string]$BuildDir = '',
     [string]$OutDir = 'dist',
     [switch]$Clean,
-    [switch]$NoZip
+    [switch]$NoZip,
+    [switch]$Dlss
 )
+if (-not $BuildDir) { $BuildDir = if ($Dlss) { 'build\release-dlss' } else { 'build\release' } }
 
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
@@ -50,9 +58,11 @@ if ($repo.Length -gt 60) {
 
 # ---- build
 $buildArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $repo 'tools\dev\build.ps1'),
-               '-BuildDir', $BuildDir, '-Config', 'Release', '-Target', 'ff7vr', '-Without', 'xr_smoke')
+               '-BuildDir', $BuildDir, '-Config', 'Release', '-Target', 'ff7vr')
+# DLSS is a cached CMake option of the build folder: state it on every build.
+if ($Dlss) { $buildArgs += @('-Without', 'xr_smoke', '-With', 'dlss') } else { $buildArgs += @('-Without', 'xr_smoke,dlss') }
 if ($Clean) { $buildArgs += '-Clean' }
-Step "Building the mod (Release, $BuildDir)"
+Step "Building the mod (Release, $BuildDir$(if ($Dlss) { ', with DLSS' }))"
 & powershell @buildArgs
 if ($LASTEXITCODE -ne 0) { throw "Build failed ($LASTEXITCODE)" }
 
@@ -60,6 +70,10 @@ $bd = $BuildDir
 if (-not [System.IO.Path]::IsPathRooted($bd)) { $bd = Join-Path $repo $bd }
 $dll = Join-Path $bd 'src\loader\xinput1_3.dll'
 if (-not (Test-Path -LiteralPath $dll)) { throw "Build output missing: $dll" }
+# Whether DLSS is in the DLL is checked on the DLL itself (NGX names in its strings).
+$hasNgx = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($dll)).Contains('NVSDK_NGX')
+if ($Dlss -and -not $hasNgx) { throw 'Built without DLSS although -Dlss was given (is the NVIDIA DLSS SDK there? see the CMake output)' }
+if (-not $Dlss -and $hasNgx) { throw 'The DLL contains DLSS although -Dlss was not given' }
 
 # ---- version
 $commit = 'unknown'
@@ -75,6 +89,7 @@ if ($dirty) {
     $name += '-modified'
     Step 'WARNING: the working tree has uncommitted changes; the package is marked "-modified".'
 }
+if ($Dlss) { $name += '-dlss' }
 
 $od = $OutDir
 if (-not [System.IO.Path]::IsPathRooted($od)) { $od = Join-Path $repo $od }
@@ -102,7 +117,8 @@ $ver = @(
     "ff7vr $name",
     "commit:  $commit$(if ($dirty) { ' (with uncommitted changes)' })",
     "built:   $((Get-Item -LiteralPath $dll).LastWriteTime.ToString('yyyy-MM-dd HH:mm'))",
-    "dll sha256: $((Get-FileHash -LiteralPath $dll -Algorithm SHA256).Hash)"
+    "dll sha256: $((Get-FileHash -LiteralPath $dll -Algorithm SHA256).Hash)",
+    "dlss:    $(if ($Dlss) { 'built in (NVIDIA DLSS SDK; the DLSS model comes from the NVIDIA driver or nvngx_dlss.dll in the game folder)' } else { 'not built in' })"
 )
 [System.IO.File]::WriteAllLines((Join-Path $pkg 'VERSION.txt'), [string[]]$ver)
 
