@@ -433,7 +433,8 @@ The game itself never polled XInput in this run (`ping`: `xinput_calls=0`, also 
 | `ssr_per_eye` | `1` | each eye's screen-space reflection run limited to its half of the target, and the per-view colour copy for it halved (see "Reflections per eye"); same image, about 0.45 ms less per frame at 2 x 3072x3264 |
 | `ssr_fix` | `1` | right-eye screen-space reflections: without it the right eye has none (see "Right-eye reflections fix") |
 | `hzb_skip` | `0` | `1` leaves out the further mips of the hierarchical depth chain nothing reads, while `r.HZBOcclusion` is 0 (see "Volumes and hierarchical depth per view"); gain within noise |
-| `tonemap_shift` | `auto` | with ReShade's Luma add-on loaded, the right view's tonemapping input shifted to the origin (Luma's shader reads it there; without it both eyes show the left eye's image). `auto`: only while Luma is loaded; `0` off; `1` always (breaks the right eye without Luma). `docs/render.md`, "ReShade and Luma" |
+| `tonemap_shift` | `auto` | with ReShade's Luma add-on loaded, the right view's bloom-combine input shifted to the origin (Luma's shader reads it there; without it both eyes show the left eye's image). `auto`: only while Luma is loaded; `0` off; `1` always (breaks the right eye without Luma). See "ReShade and Luma: the tonemapping shift and Luma's DLSS" |
+| `luma_dlss` | `0` | `0`: while stereo renders, Luma's own DLSS calls into NGX are refused (Luma's DLSS takes the double-wide target for a 50 % frame and leaves the right eye a squeezed quarter); `1`: allowed, for comparison. No effect without Luma; the mod's own DLSS is not affected |
 | `render_scale` | `1.0` | share of each eye's target the views render, per axis (0.3 to 1); the runtime scales the smaller image to the display. Also the upper bound of the dynamic resolution (see "Render scale and dynamic resolution") |
 | `dynamic_resolution` | `0` | adjust the render scale every few frames to hold the GPU frame time below `dynamic_resolution_target` of the display's frame period |
 | `dynamic_resolution_min` | `0.75` | lowest scale the dynamic resolution may use (per axis; 0.75 is 56 % of the pixels) |
@@ -507,7 +508,8 @@ Through the dev pipe (`[dev] pipe = 1`, `tools\dev\send-input.ps1 -Pipe "<comman
 | `stereo window [<w>x<h>\|0]` | window size while VR renders in a fullscreen mode, and the state |
 | `stereo frametime <s>` | frame time window length in seconds; restarts the window (for A/B measurements) |
 | `stereo swap <0\|1>` | test: render the right eye into the left half of the target and the left eye into the right half (the eyes then come out swapped). Tells a bug that follows a view's position in the target from one that follows the view |
-| `gpu names on`, `gpu trace <prefix> [dump fullscreen \| dump <from> <to>] [scale <n>]`, `gpu status` | one-frame GPU trace (`docs/re/engine.md`, Tools) |
+| `gpu names on`, `gpu trace <prefix> [dump fullscreen \| dump <from> <to>] [scale <n>]`, `gpu status` | one-frame GPU trace (`docs/re/engine.md`, Tools); every bound pixel-shader constant buffer slot is listed, and for read-back events slots 12 and 13 (add-ons such as Luma) are dumped |
+| `tonemapshift [0\|1\|2]`, `lumadlss [0\|1]` | with Luma loaded: the right view's bloom-combine input shift (2 = auto) and Luma's own DLSS in stereo (0 = refused); both print their counters (see "ReShade and Luma: the tonemapping shift and Luma's DLSS") |
 | `re peek <rva> <n>`, `re poke <rva> <hex bytes>` | read or patch the game image (to try a patch in a running game) |
 | `stereo host <render\|fixed>` | switch the source of eye size and views (for tests; switching away from `render` leaves the render module in stereo mode) |
 | `fp status` | controlled pawn, view target, follow camera, mode, blend, hidden meshes, toggles (keyboard/dev and pad), pawn location, which eye base the last frame used |
@@ -1073,6 +1075,93 @@ on every frame (+552, +600), at 67 % on none (bloom `missed` +537, occlusion `fa
 middle and fits the buffer). Right eye at 67 % with all three fixes off and on:
 `014336-scales/sheet_sp67_R_allfix0_allfix1_L.png` (off: the orange streak and the doorway's
 copy from the left eye's bloom; on: gone).
+
+## ReShade and Luma: the tonemapping shift and Luma's DLSS
+
+With ReShade and the Luma add-on installed as the game's `dxgi.dll` (start-up with it:
+`docs/render.md`, "ReShade and Luma"), two of Luma's behaviours break the right eye. Both are
+handled while stereo renders, so a player can leave Luma in place.
+
+**Luma's replacement for the bloom combine ("Apply Bloom", game pixel shader `4D6F937E`, with
+Luma's vertex shader `6667BA2`) reads its input relative to the origin.** Without a
+correction both eyes show the left eye's image. `[stereo] tonemap_shift` (`auto` by default:
+only while a module named `Luma-Final Fantasy VII Remake.addon` is loaded) runs the right
+view's draw with its input 0 copied from the view's rectangle to the origin of a scratch
+texture, the bloom fix's mechanism (`bloom_fix.cpp`, `tonemap_shift`; recognised by shape: a
+full-screen draw whose viewport starts at the middle of an `R16G16B16A16` target, input 0 of
+the target's size, input 1 a quarter to a half of it).
+
+**Luma's own DLSS takes the double-wide target for a 50 % frame.** When Luma's super
+resolution is on (`SRUserType` in the `[Luma]` section of `ReShade.ini`; on in the setup
+tested: NVIDIA's `nvngx_dlss.dll` is loaded with the mod's own DLSS off), Luma
+runs DLSS on the game's anti-aliasing draw. It reads that draw's viewport as the render
+resolution and the target's size as the output resolution: in stereo the viewport is one
+view, half the target, so Luma takes the frame for 50 % dynamic resolution, upscales the
+first view's rectangle to the whole target (one evaluation per frame) and sets its own
+constant `DrewUpscaling` (`LumaData.GameData`, constant buffer slot 12) for the rest of the
+frame. Its replacement shaders (Apply Bloom and the output pass) then use
+`OutputResolution` = the whole target (2 x eye width) in place of the view's size, so every
+coordinate of the right view is scaled by two: the right eye showed only its leftmost quarter
+(516 of 2064 columns) with the shift on, and a squeezed pair of images with smeared columns
+after the middle with the shift off. Fix (`bloom_fix.cpp`, `hook_ngx_for_luma`): once Luma
+and NVIDIA's NGX library (`_nvngx.dll`, the driver's) are loaded, inline hooks on NGX's
+`NVSDK_NGX_D3D11_CreateFeature` and `NVSDK_NGX_D3D11_EvaluateFeature` refuse the calls whose
+return address lies in Luma's module while stereo renders (result `0xBAD00000`, the NGX
+failure code). Luma then treats DLSS as failed for that frame and the game's own
+anti-aliasing draw runs, as on a card without DLSS; `DrewUpscaling` stays 0. Calls from any
+other module (the mod's own DLSS, `docs/dlss.md`) pass; outside stereo (menus in the virtual
+screen) Luma's calls pass too. `[stereo] luma_dlss = 1` (dev command `lumadlss 1`) lets
+Luma's calls through, for comparison only. Without Luma no hook is installed. Cost: one
+refused call per frame; not measured separately (frames stayed paced at 11.1 ms, 90 Hz, in
+the runs below).
+
+Found with the GPU trace, which now lists every constant buffer slot and dumps slots 12 and
+13 (where Luma binds its constants) for the read-back events: Luma's `LumaData` row 2 holds
+`RenderResolution` 2064 2208, row 3 `OutputResolution` 4128 2208, row 4 `ViewportRect`
+0 0 4128 2208, row 5 the resolution scale 0.5 2 and `DrewUpscaling`, which turned 1 after
+the left view's anti-aliasing draw (`captures/render2/luma/r2/tr.txt`, events 6389 to 6423)
+and stays 0 with the calls refused (`r3/tr.txt`). Not a regression of the mod: the build
+from the night of 06/10 (`c4ff799`), whose capture with Luma had a complete right eye then,
+shows the same strip today in the same spot (`captures/render2/luma/old1`). What changed in
+between is outside the mod; the likeliest candidate (not proven) is the NVIDIA App's DLSS
+override, set back to the application's choice on 06/10 at midday: before that, NGX accepted
+only DLAA input sizes, so Luma's DLSS at the views' sizes probably never ran.
+
+Evidence (Null backend, eyes 2064x2208, the street outside Seventh Heaven, Luma loaded unless
+stated; `stat2.py` in the run folder measures each eye's last non-black column, columns
+without vertical detail, and the horizontal shift that best matches the right eye to the
+left):
+
+| Run | Result |
+|---|---|
+| `r1` (HEAD before the fix) | right eye: last non-black column 958 of 2064, 1277 columns flat; shift off: whole width but the right half smeared |
+| `old1` (`c4ff799`) | the same numbers: not a regression |
+| `r3` (fix) | refused: both eyes complete, parallax 368 px (as without Luma), `evaluate calls 501 refused 501` in 501 stereo frames; `lumadlss 1`: the strip again (last column 958); `lumadlss 0`: complete again; shift off with the calls refused: both eyes show the left image (mean difference 1.1), so the shift is still needed |
+| `r4dlss` (DLSS build, the mod's DLSS on at `input_scale` 0.75) | both eyes complete, parallax 368 px; the mod's NGX calls pass (`other callers` 2114 after 1056 frames, 0 evaluation failures); Luma made one evaluation call in the whole run |
+| `r5noluma` (`dxgi.dll` set aside) | hooks off, shift inactive, both eyes complete with 368 px parallax; image means 45.6/45.8 against 45.8/46.1 with Luma and the calls refused |
+| `r6soak`, `r8soak` (5 minutes each, emulated head yaw) | every minute bloom fix, occlusion fix, right-eye reflections fix and tonemapping shift applied once per stereo frame (`r8soak`: 25773 each at the end, `missed 0`, `failed 0`), Luma's evaluations all refused; no warning or error in the log; both eyes complete at the start and the end. Frame times: see below |
+
+**Frame times in the 5-minute runs (open, not caused by the refusal).** In every 5-minute run
+with emulated head yaw in which the game's own anti-aliasing pass ran for both views, the GPU
+scene time stepped up a few minutes in and kept rising: with Luma and its calls refused
+`r6soak` 6.2 -> 22 to 29 ms after 3.0 min, `r8soak` 6.1 -> 19.5 ms after 4.3 min, `r11ab`
+6.3 -> 20 to 53 ms after 3.6 min; without Luma `r9noluma` 5.4 -> 10.5 to 12 ms after 3.3 min,
+`r14noluma` 5.5 -> 47 to 72 ms after 2.2 min. `nvidia-smi` in `r9noluma`: the same clock and
+power (2700 MHz, about 150 W) with the load going from about 50 % to 99 %, like state 3 in
+"Video memory and slow phases" (`docs/benchmarking.md`). The two runs with
+Luma's DLSS allowed (`r12allowed`, `r13allowed`: Luma's DLSS replaces an anti-aliasing draw,
+the right eye broken) stayed at 5.8 ms for 5 minutes. `r7soak` was slow from the loading
+screen on, before stereo and before the hooks were installed. Allowing Luma's calls in the
+middle of the slow phase (`r11ab`) did not bring the time back down. So the refusal leaves
+Luma's frame work like that of a game without Luma, including this slowdown, which is a
+separate fault of the standard path to be traced (one-frame GPU trace in the slow phase,
+compared with the fast phase).
+
+Not seen: the interior where the save started on 06/10 (the save now starts in the street);
+Luma's HDR output path (`Output_HDR`, used when the game's HDR is on); other Luma versions
+(tested: the add-on installed in the game folder, 19/06/2026, with ReShade 6.7.1). If a later
+Luma takes the view rectangle into account, the shift would double-shift the right eye: set
+`tonemap_shift = 0` then.
 
 ## Volumes and hierarchical depth per view
 

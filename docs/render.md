@@ -799,6 +799,14 @@ Luma passes have the same fault in scenes not traced (one frame of the first
 room was traced). Luma's own fix (taking the view rectangle into account)
 would make the shift unnecessary.
 
+With Luma's own DLSS on (as in the setup tested), Luma takes the
+double-wide target for a 50 % frame and its shaders scale the right view to the
+whole target, which left the right eye a squeezed quarter of the image. While
+stereo renders the engine module refuses Luma's calls into NGX, so Luma uses
+the game's anti-aliasing pass (`[stereo] luma_dlss`, `docs/engine-module.md`,
+"ReShade and Luma: the tonemapping shift and Luma's DLSS"). With both, Luma can
+stay in place for VR.
+
 ## Stereo interface
 
 Declared in `src/render/include/ff7vr/render/render.h`, used by the engine's
