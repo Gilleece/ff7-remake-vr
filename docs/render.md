@@ -29,7 +29,7 @@ What it does:
 Contents: [Modes](#modes) · [Switching between stereo and the screen](#switching-between-stereo-and-the-screen) ·
 [Frame wait and pacing](#frame-wait-and-pacing) · [ini keys](#ini-keys) ·
 [Session life cycle](#session-life-cycle) · [Dev commands](#dev-commands) ·
-[Captures](#captures) · [Timing](#timing) · [Measured overhead](#measured-overhead) ·
+[Captures](#captures) · [Picture controls](#picture-controls) · [Timing](#timing) · [Measured overhead](#measured-overhead) ·
 [The game's D3D11 usage](#the-games-d3d11-usage) · [D3D11 hooks](#d3d11-hooks) ·
 [Stereo interface](#stereo-interface) · [UI layer](#ui-layer) · [Foveated rendering](#foveated-rendering) · [First test on a Quest 3](#first-test-on-a-quest-3-through-virtual-desktop)
 
@@ -168,6 +168,8 @@ All keys are optional. `ff7vr.ini` sits next to the DLL.
 | `[ui] mirror` | `1` | also draw the UI over the desktop window in stereo (the window shows an eye image, which no longer has the UI) |
 | `[ui] once_per_frame` | `1` | engine side: draw the UI for the first eye only (`0`: the game draws it for both eyes, as without the mod) |
 | `[foveation] ...` | on, `quality` | foveated rendering in stereo; keys in [Foveated rendering](#foveated-rendering) |
+| `[picture] brightness`, `contrast`, `saturation`, `gamma`, `black_level` | `0`, `1`, `1`, `1`, `0` | colour adjustment of the eye images and the virtual screen, not the UI layer; the defaults change nothing (see [Picture controls](#picture-controls)) |
+| `[controls] brightness_up_key`, `brightness_down_key`, `brightness_step` | `0`, `0`, `0.05` | keys (virtual-key codes, 0 = none) that change `[picture] brightness` by the step while the game window has the focus |
 
 Screen size: 1.8 m at 2 m covers about 48 x 28 degrees for a 16:9 image, so
 the whole picture including the HUD in the corners is visible with small eye
@@ -387,6 +389,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev\send-input.ps1 -Pi
 | `uihook once <0\|1>` | draw the UI for the first eye only, or for both |
 | `uihook proj` | log the projection matrices of the next two views the UI pass receives (in screen mode: the game camera's FOV) |
 | `fov ...` | foveated rendering: status, settings, one-frame trace, timing ([Foveation dev commands](#foveation-dev-commands)) |
+| `picture status` / `picture reset` / `picture <key> <value>` | the colour adjustment now, back to no change, or one key (`brightness`, `contrast`, `saturation`, `gamma`, `black_level`) set and clamped; applies from the next image copied to the headset ([Picture controls](#picture-controls)) |
 | `xr-sim status` | Null backend: emulated tracker head, LOCAL origin, head in LOCAL, recenter offset, the head the game sees, validity |
 | `xr-sim head <yaw deg> [pitch deg] [x y z m]` | Null backend: sets the emulated head pose (on top of `[xr] null_motion`) |
 | `xr-sim recenter-event [nopose] [delay <frames>]` | Null backend: the headset's own recenter: LOCAL moves to the current leveled head and a LOCAL change event is sent, with `poseInPreviousSpace` or without (`nopose`, like Virtual Desktop), change time `delay` frames ahead (default 3) |
@@ -464,6 +467,98 @@ So for this submission the runtime passes the swapchain textures unchanged,
 tagged sRGB, to Virtual Desktop's own (closed) compositor and encoder. Any
 difference between a capture and the headset arises after that point, the
 same point every other OpenXR application goes through.
+
+## Picture controls
+
+`[picture]` adjusts the colour of what the headset shows, for a headset or
+streaming path that looks washed out or too dark. It is applied in the shader
+blit that copies each eye image into its swapchain (`blit.hlsl`,
+`AdjustPicture`), so it covers every image the eyes receive, including DLSS's
+output texture with `[dlss] output = runtime` (that texture replaces the
+engine's eye texture in the `SubmitDesc` and goes through the same
+`TransferEye`). The virtual screen (an opaque quad marked
+`QuadLayer::adjustPicture`) gets it too; its image is the game's back buffer,
+which carries the game's own HUD there. The UI layer in stereo is left as the
+game drew it, so text and markers keep their colours. A captured frame
+(`capture`) shows the adjusted image, since it is composed from the swapchain
+images.
+
+| Key | Range, no change | Where | What |
+|---|---|---|---|
+| `brightness` | -1..1, `0` | linear light | a gain of 2^brightness (stops): `0.1` is 7 % more light, `-1` half. Black stays black, so it darkens or brightens without greying the floor |
+| `saturation` | 0..2, `1` | linear light | mixes each pixel towards its Rec. 709 luminance (`0` = grey) or away from it; the luminance itself is kept |
+| `contrast` | 0.5..2, `1` | linear light, in stops | `c = 0.18 * (c / 0.18)^contrast`: a slope on a log scale around 18 % grey (sRGB 118). Black stays black; no shade is clipped to black and contrast below 1 does not raise the floor |
+| `gamma` | 0.5..2, `1` | sRGB-encoded value | `e = e^(1 / gamma)`: above 1 lifts the mid-tones and shadows, below 1 darkens them; black and white stay |
+| `black_level` | -0.1..0.1, `0` | sRGB-encoded value | `e = e * (1 - b) + b`: white stays, the floor moves by `b`. Negative values turn the darkest `-b / (1 - b)` of the encoded range black |
+
+The order is brightness, saturation, contrast, gamma, black level. Why these
+spaces: brightness and saturation are operations on light, so linear light
+keeps black at black and keeps hues. A contrast around mid-grey on the
+encoded value (`(e - 0.5) * k + 0.5`, tried first) halved the median of the
+dark first room at `1.15` and turned half its pixels black at `1.5` (median
+30 to 0, measured), and below 1 it raised the black floor, the washed-out
+look this is meant to fix; on a log scale it does neither. Black level and
+gamma act on the encoded value because it is close to perceptual: a black
+level of `-0.01` is a small visible step, while `-0.01` of linear light would
+turn everything below sRGB 25 black.
+
+Implementation: saturation is computed in the shader; the rest is one curve
+per channel, evaluated on the CPU into a 4096-entry `R32_FLOAT` texture over
+`t = sqrt(linear / 2)` whenever the values change, and read with linear
+filtering. With all keys at their defaults the shader skips the adjustment
+(one uniform branch) and a source that could be copied as it is still is.
+
+Live: dev command `picture status | reset | <key> <value>` (values are
+clamped to the ranges above; the log records each change), and optional
+`[controls] brightness_up_key` / `brightness_down_key` (virtual-key codes,
+default none) step the brightness by `brightness_step` (default 0.05) while
+the game window has the focus. An eye or quad that keeps its last image
+(a held frame) keeps the adjustment it was copied with until the next copy.
+
+Checked on the Null backend at 3072x3264 per eye in the street of the
+latest save, third person, with `capture <prefix>+raw` (the source texture
+and each eye's swapchain bytes of the same frame) and
+`tools/re/picture_check.py`, which runs the source through a reference of the
+formulas above (exact, in double precision) and compares it with what the
+swapchain received:
+
+| Setting | Received minus reference, per pixel | What moved (left eye, encoded 0..255 luma) |
+|---|---|---|
+| defaults | max 1.0, mean +0.03 (the 10-bit source rounded to 8 bits, as before the change) | nothing: mean 44.25 -> 44.29, p1 7.9 -> 8.2 |
+| `brightness 0.1` | max 1.0, mean +0.02 | mean 44.17 -> 45.90 (reference 45.91); the 118 band -> 121.9 |
+| `saturation 0` | max 1.1 | chroma (max - min channel) mean 13.3 -> 0.00, max 190 -> 0; mean luma 44.3 -> 44.6 (reference 44.5) |
+| `contrast 0.7` | max 1.4 | the 118 band stays (117.98 -> 117.90); spread in stops 1.98 -> 1.38 (x 0.70); p1 7.9 -> 23.7, p99 227 -> 187 |
+| `contrast 1.5` | virtual screen, statistics | spread in stops 1.89 -> 2.76 (reference 2.77), p1 11.1 -> 1.9, mean 61.4 -> 50.0 (reference 49.7) |
+| `brightness 0.3`, `saturation 0` | virtual screen | chroma max 233 -> 0 (the image is the back buffer, so the game's own HUD there turns grey too) |
+| `black_level -0.02` | max 1.0 | p1 7.9 -> 3.7 (reference 2.9), p50 30.1 -> 25.7 |
+| `gamma 1.5` / `0.7` | max 1.5 / 1.2 | mean 44.2 -> 73.1 / 26.1, p1 7.9 -> 25.7 / 1.9 |
+| example below | max 1.6 | mean 44.3 -> 36.7, p1 7.9 -> 1.9, p50 30.0 -> 20.4, p99 227 -> 246, chroma 13.3 -> 14.7 |
+
+The rows for `contrast 0.7`, `black_level`, the defaults and `brightness`
+were taken with the curve texture; the others with the same formulas
+evaluated directly in the shader (an earlier version), and every setting was
+taken again with the curve texture on the virtual screen, where its
+statistics match the reference within the frame-to-frame motion of the
+crowd (for example `gamma 0.7` mean 39.03 against 39.24, `contrast 1.5`
+stops 2.760 against 2.766). The UI layer is not adjusted: with `saturation 0`
+the eye swapchain has no colour at all (chroma max 0) while the composited
+capture still has 6382 coloured pixels, the HUD's.
+
+Cost, GPU time of the copies into the swapchains per frame (`gpu copy`,
+both eyes and the UI quad), alternating 25 s with and without an adjustment
+in the same run: the powers evaluated in the shader added 0.12 ms (0.158 ->
+0.281 ms; the pixel shader became limited by its transcendental units at
+20 million pixels per frame); the curve texture adds 0.02 ms (0.161 ->
+0.184 ms, p50), about 0.2 % of an 11 ms frame. At the defaults the shader
+runs the same instructions as before plus one uniform branch.
+
+Example, not a default, for a picture that looks washed out in the
+headset: `brightness = -0.05`, `contrast = 1.15`, `saturation = 1.1`,
+`black_level = -0.01`. In the street it deepens the blacks (1st percentile
+8 -> 2) and darkens the shadows (median 30 -> 20) while the highlights
+get a little brighter and the colours a little stronger; side-by-side crops in
+`captures\picture\r2\crops_def_vs_example.png` (local, not in the
+repository).
 
 ## Timing
 
