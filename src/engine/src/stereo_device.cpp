@@ -448,7 +448,9 @@ void frame_end_execute(void*, rhi::Command* self) {
         gpu_trace::frame_boundary(c->eyes.texture);
         bloom_fix::frame(c->eyes.texture);
 #if FF7VR_ENGINE_WITH_DLSS
-        dlss::output_rects(c->eyes.eyes);  // DLSS upscaling wrote the whole half: the runtime and the mirror get it
+        // DLSS upscaling wrote the whole half (of the eye texture, or with [dlss] output =
+        // runtime of its own texture at the runtime's size): the runtime and the mirror get it
+        dlss::output_texture(c->eyes);
 #endif
         if (StereoHost* h = g_host.load()) h->eye_texture_ready(c->eyes);
         if (c->mirror != mirror::Mode::Off)
@@ -641,6 +643,10 @@ void update_wanted_size() {
     if ((h && h->eye_render_size(w, hh)) || (!g.want_w && g_fixed && g_fixed->eye_render_size(w, hh))) {
         w = std::clamp<std::uint32_t>(w, 64, 8192);
         hh = std::clamp<std::uint32_t>(hh, 64, 8192);
+#if FF7VR_ENGINE_WITH_DLSS
+        // [dlss] output = runtime: the engine renders at DLSS's input size, DLSS writes w x hh.
+        dlss::engine_eye_size(w, hh);
+#endif
         g.want_w = w;
         g.want_h = hh;
     }

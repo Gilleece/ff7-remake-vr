@@ -47,9 +47,23 @@ bool on_draw_indexed(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base,
 
 // RHI thread, at the end of a stereo frame (after frame()), before the eye texture goes to
 // the runtime: in upscale mode an eye whose image DLSS wrote this frame gets the rectangle
-// DLSS wrote (the whole half of the eye texture), also when the view rendered only part of
-// it ([stereo] render_scale, dynamic resolution). Other eyes keep the rectangle given.
+// DLSS wrote (the whole half of the eye texture, or of DLSS's own output texture with
+// [dlss] output = runtime), also when the view rendered only part of it ([stereo]
+// render_scale, dynamic resolution). Other eyes keep the rectangle given.
 void output_rects(EyeRect rects[2]);
+
+// Game thread, whenever the stereo device sizes its eye target from the runtime's eye size
+// (w x h, the XR swapchain's size). With [dlss] output = runtime (DLSS on, upscale mode) the
+// engine renders at [dlss] input_scale of that size and DLSS writes the runtime's size into
+// a texture of its own: w and h become the engine's eye size. Otherwise they are unchanged.
+void engine_eye_size(std::uint32_t& w, std::uint32_t& h);
+
+// RHI thread, at the end of a stereo frame (after frame()), before the image goes to the
+// runtime and the desktop mirror: with [dlss] output = runtime, the eye image is DLSS's
+// output texture (two eyes of the runtime's size side by side) instead of the engine's eye
+// target; an eye DLSS did not write this frame is copied into it at the engine's size (the
+// runtime scales it). Otherwise only the rectangles change, as output_rects does.
+void output_texture(EyeTexture& eyes);
 
 // Dev pipe: "dlss ..." (see docs/dlss.md).
 std::string command(const std::string& args);
