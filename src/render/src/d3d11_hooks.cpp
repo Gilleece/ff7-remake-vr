@@ -552,6 +552,43 @@ HRESULT WINAPI D3D11CreateDeviceAndSwapChainDetour(IDXGIAdapter* adapter, D3D_DR
 
 LRESULT CALLBACK DummyWndProc(HWND h, UINT m, WPARAM w, LPARAM l) { return DefWindowProcW(h, m, w, l); }
 
+// The path of the loaded dxgi.dll if it is not the one in the system directory (ReShade,
+// Luma, Special K and similar wrappers are installed as the game's dxgi.dll); empty otherwise.
+std::string ForeignDxgi() {
+    HMODULE m = GetModuleHandleW(L"dxgi.dll");
+    if (!m) return {};
+    wchar_t path[MAX_PATH]{}, sys[MAX_PATH]{};
+    if (!GetModuleFileNameW(m, path, MAX_PATH) || !GetSystemDirectoryW(sys, MAX_PATH)) return {};
+    std::wstring p(path), s(sys);
+    const auto lower = [](std::wstring v) {
+        for (auto& c : v) c = static_cast<wchar_t>(towlower(c));
+        return v;
+    };
+    p = lower(p);
+    s = lower(s) + L"\\";
+    if (p.rfind(s, 0) == 0 && p.find(L'\\', s.size()) == std::wstring::npos) return {};
+    return log::narrow(path);
+}
+
+// Hooks IDXGIFactory::CreateSwapChain and IDXGIFactory2::CreateSwapChainForHwnd through a
+// factory created with the loaded dxgi.dll's CreateDXGIFactory1 (no device, no swap chain).
+bool HookFactoryOnly() {
+    using CreateFactory1Fn = HRESULT(WINAPI*)(REFIID, void**);
+    HMODULE m = GetModuleHandleW(L"dxgi.dll");
+    const auto create = m ? reinterpret_cast<CreateFactory1Fn>(GetProcAddress(m, "CreateDXGIFactory1")) : nullptr;
+    ComPtr<IDXGIFactory2> factory;
+    if (!create || FAILED(create(IID_PPV_ARGS(&factory))) || !factory) {
+        log::error("render: CreateDXGIFactory1 failed; swap chains are not hooked");
+        return false;
+    }
+    void** fvt = *reinterpret_cast<void***>(factory.Get());
+    const bool a = g_createSwapChain.create(fvt[kCreateSwapChain], &CreateSwapChainDetour);
+    const bool b = g_createSwapChainForHwnd.create(fvt[kCreateSwapChainForHwnd], &CreateSwapChainForHwndDetour);
+    log::info("render: factory hooks: CreateSwapChain {} ({}), CreateSwapChainForHwnd {} ({})", DescribeCode(fvt[kCreateSwapChain]),
+              a ? "hooked" : "FAILED", DescribeCode(fvt[kCreateSwapChainForHwnd]), b ? "hooked" : "FAILED");
+    return a || b;
+}
+
 }  // namespace
 
 int64_t QpcNow() {
@@ -634,6 +671,21 @@ bool InstallD3D11Hooks(const HookCallbacks& callbacks) {
     if (!d3d11) {
         log::error("render: d3d11.dll not loadable ({})", GetLastError());
         return false;
+    }
+    if (const std::string foreign = ForeignDxgi(); !foreign.empty()) {
+        // ReShade (and Luma, its add-on) as the game's dxgi.dll set up their runtime on every
+        // swap chain created through them, the throwaway one too, and Luma's set-up on that
+        // one never returns (blocked in user32 on this thread; docs/render.md, "ReShade and
+        // Luma"). So no throwaway swap chain: hook the factory's CreateSwapChain methods,
+        // found through a factory alone, and hook Present when the game creates its swap chain.
+        const bool ok = HookFactoryOnly();
+        if (void* p = GetProcAddress(d3d11, "D3D11CreateDevice")) g_createDevice.create(p, &D3D11CreateDeviceDetour);
+        if (void* p = GetProcAddress(d3d11, "D3D11CreateDeviceAndSwapChain"))
+            g_createDeviceAndSwapChain.create(p, &D3D11CreateDeviceAndSwapChainDetour);
+        log::info("render: dxgi.dll is {} (not the system's): no throwaway swap chain; Present is hooked when the game creates its swap "
+                  "chain (factory hooks {})",
+                  foreign, ok ? "installed" : "NOT installed");
+        return ok;
     }
     // Throwaway device and swap chain on a hidden window, to find the vtables.
     WNDCLASSEXW wc{sizeof(wc)};
