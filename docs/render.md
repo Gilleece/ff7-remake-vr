@@ -306,6 +306,58 @@ SteamVR names its adapter (`xrGetD3D11GraphicsRequirementsKHR` LUID) only
 once its compositor runs. A LUID of 0 is asked again for up to 2 s, then the
 session is created on the game's adapter.
 
+### The headset's own recenter
+
+The mod's recenter (End, `recenter`, and once at session start with
+`[screen] recenter_on_start`) is an offset on top of the runtime's LOCAL space.
+A headset can also recenter by itself (holding the Meta button on a Quest,
+SteamVR's reset view). OpenXR then makes "the current leveled head space the
+new LOCAL space" and queues `XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING`
+for LOCAL; located poses follow the new origin for display times from the
+event's `changeTime` on. `poseInPreviousSpace` (the new origin in the old space)
+is optional: Virtual Desktop's runtime (1.0.10 source) never gives it
+(`poseValid` false, `changeTime` = the moment it noticed the recenter) and sends
+a second event for STAGE.
+
+The backend keeps the LOCAL event and, at the first frame whose predicted
+display time reaches `changeTime`, clears its own recenter offset: the new
+origin already is where the user faces, and the old offset would turn the view
+away again (recomposing it with `poseInPreviousSpace` would keep the old
+forward direction, which undoes what the user asked for). World-locked quads
+(the virtual screen, the UI panel) are placed relative to that offset, so they
+come back in front of the user in the same frame; head-locked quads use VIEW
+space, which a recenter does not move. STAGE and other spaces are ignored (not
+used). One line is logged:
+
+```
+xr: runtime recentred its LOCAL space (event 1 of this session, applied at frame 4515, 33 ms after the event; pose of the new origin in the old space yaw 70.0 deg, position (0.100, 0.000, 0.000) m): recenter offset was yaw 30.0 deg, position (0.100, 0.000, 0.000) m -> cleared; head in the new space yaw -0.0 deg, position (0.000, 0.000, 0.000) m
+```
+
+Frames already waited before the change (one or two) keep the old offset;
+their images are still submitted with the poses they were rendered with.
+
+### Lost tracking (pose validity)
+
+`xrLocateViews` (`viewStateFlags`) and `xrLocateSpace` (`locationFlags`) say
+whether orientation and position are valid; the values of an invalid part are
+undefined. Every frame's views and head pass through one filter in the backend
+(`BackendBase::SanitizePoses`, both backends):
+
+| Runtime reports | Views and head given to the game and the layers |
+|---|---|
+| orientation and position valid | as located |
+| orientation valid, position not (3DoF) | the runtime's orientation; the head at the last fully tracked position, each eye at its last known offset from the head (half the IPD before any) |
+| orientation not valid (or any value not finite) | the last views and head that had a valid orientation, held; the recenter basis is not updated |
+
+Changes of state are logged once each (`xr: tracking: not tracked: last views
+held ... from frame 7715 (after 7714 frames tracked ...)`, `xr: tracking:
+tracked from frame 8165 (after 450 frames ...)`); `status` adds `tracking full|3dof|held`
+and the frame counts. The projection layer is submitted whenever the poses are
+real or held (a held image stays where it was rendered), not with the neutral
+stand-in used before any orientation was seen. The game thread
+(`BeginGameFrame`) checks once more that every pose is finite and a unit
+rotation and otherwise repeats the last views given to the game.
+
 ## Dev commands
 
 Sent through the dev pipe (`[dev] pipe = 1`), for example:
@@ -335,6 +387,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev\send-input.ps1 -Pi
 | `uihook once <0\|1>` | draw the UI for the first eye only, or for both |
 | `uihook proj` | log the projection matrices of the next two views the UI pass receives (in screen mode: the game camera's FOV) |
 | `fov ...` | foveated rendering: status, settings, one-frame trace, timing ([Foveation dev commands](#foveation-dev-commands)) |
+| `xr-sim status` | Null backend: emulated tracker head, LOCAL origin, head in LOCAL, recenter offset, the head the game sees, validity |
+| `xr-sim head <yaw deg> [pitch deg] [x y z m]` | Null backend: sets the emulated head pose (on top of `[xr] null_motion`) |
+| `xr-sim recenter-event [nopose] [delay <frames>]` | Null backend: the headset's own recenter: LOCAL moves to the current leveled head and a LOCAL change event is sent, with `poseInPreviousSpace` or without (`nopose`, like Virtual Desktop), change time `delay` frames ahead (default 3) |
+| `xr-sim lose orientation\|position <frames>` | Null backend: the next frames report that part invalid, with NaN values |
 
 Modules register commands with `ff7vr::dev_commands::add` (`src/core`); the
 pipe passes every line it does not handle itself to `dev_commands::dispatch`.

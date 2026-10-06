@@ -68,7 +68,7 @@ const SourceFormat kSourceFormats[] = {
 
 struct Options {
     xr::BackendType backend = xr::BackendType::Null;
-    std::string runtime = "virtualdesktop";
+    std::string runtime = "auto";  // the library's default, as in the game
     uint32_t frames = 300;
     std::string capturePrefix;  // "" = no capture
     bool captureSet = false;
@@ -103,8 +103,9 @@ void PrintUsage() {
         "xr_smoke - test app for the ff7vr XR layer\n"
         "\n"
         "  --backend null|openxr       backend (default null)\n"
-        "  --runtime NAME              OpenXR runtime: virtualdesktop (default), steamvr, system,\n"
-        "                              inherit (use XR_RUNTIME_JSON as set), or a path to a runtime JSON\n"
+        "  --runtime NAME              OpenXR runtime: auto (default: the first runtime with a headset),\n"
+        "                              virtualdesktop, steamvr, system, inherit (use XR_RUNTIME_JSON as set),\n"
+        "                              or a path to a runtime JSON\n"
         "  --frames N                  frames to submit (default 300)\n"
         "  --capture PREFIX            capture first and last frame to PREFIX_f<frame>_L.png / _R.png\n"
         "                              and verify them (default for null: xr_smoke_out\\null)\n"
@@ -265,7 +266,8 @@ void XrLog(xr::LogLevel level, std::string_view msg) {
         case xr::LogLevel::Debug:
             if (g_verbose) Log("xr:d", msg);
             break;
-        case xr::LogLevel::Info: Log("xr", msg); break;
+        case xr::LogLevel::Info:
+        case xr::LogLevel::Notice: Log("xr", msg); break;
         case xr::LogLevel::Warn: Log("xr:W", msg); break;
         case xr::LogLevel::Error: Log("xr:E", msg); break;
     }

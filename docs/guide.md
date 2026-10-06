@@ -201,8 +201,11 @@ during a scripted camera shot the game's camera is used as it is. A battle switc
 to third person and its end back to first person; a manual switch lasts until the
 next battle starts or ends.
 
-The headset's own recenter (on a Quest, holding the Meta button) has not been tried
-with the mod; End does the same job.
+The headset's own recenter (on a Quest, holding the Meta button) is handled: the
+mod drops its own recenter offset, so the view faces where you face and the HUD panel
+and the virtual screen come back in front of you. It was tested with a simulated
+headset but not yet seen on a real one; if it ever leaves the view turned, End does
+the same job.
 
 ## First-session checklist
 
@@ -275,8 +278,11 @@ session it is `ff7vr.log` in the game's `End\Binaries\Win64` folder).
   button states (no pad was connected; the game reads the pad only while one is),
   so what the game does with the View/Back press handed over on release is not
   known. The keys (Home, End, Insert, Page Down/Up) were tested in the game.
-- **The headset's own recenter** (holding the Meta button) with the mod. The mod's
-  own recenter (End) was tested with a simulated headset.
+- **The headset's own recenter** (holding the Meta button) on a real headset. It is
+  handled and was tested with a simulated headset, as was the mod's own recenter (End).
+- **Lost tracking** (covering the headset's cameras, a dark room): the mod holds the
+  last view, or keeps turning with the head at a fixed position when only the position
+  is lost. Tested with a simulated headset only.
 - **Disconnecting and reconnecting the headset** during a session, and quitting from
   Virtual Desktop's menu, were tested with SteamVR's virtual headset only.
 - **Other save games and areas** than the first rooms of the save used in testing

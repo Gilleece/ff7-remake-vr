@@ -95,7 +95,8 @@ never changed. `InitDesc::runtime` (and `xr_smoke --runtime`) accepts:
 
 | Value | Runtime |
 |---|---|
-| `virtualdesktop` (default), `vdxr` | Virtual Desktop's VDXR runtime (`virtualdesktop-openxr.json`, found in the registry list of available runtimes or the Streamer's install folder) |
+| `auto` (default) | the first runtime found on the machine that has a headset connected (see `docs/render.md`, "Runtime selection") |
+| `virtualdesktop`, `vdxr` | Virtual Desktop's VDXR runtime (`virtualdesktop-openxr.json`, found in the registry list of available runtimes or the Streamer's install folder) |
 | `steamvr` | SteamVR (`steamxr_win64.json`, found through `%LOCALAPPDATA%\openvr\openvrpaths.vrpath`, the Steam install or the registry list) |
 | `system` | the machine default (registry `ActiveRuntime`) |
 | `inherit` | whatever `XR_RUNTIME_JSON` already says in the environment |
@@ -248,9 +249,11 @@ start SteamVR before `launch.ps1`); the harness's lock is re-entrant for the
 same owner, and taking both locks in the same order everywhere avoids two
 people each holding one and waiting for the other.
 
-The default runtime, `virtualdesktop`, needs a connected headset; without one
-the game runs normally and the log shows the retries (that is itself a useful
-test, see below).
+The default runtime choice, `auto`, takes the first runtime that has a headset
+connected (with SteamVR's null driver running, SteamVR); with none the game
+runs normally and the log shows one line per round of retries (that is itself a
+useful test, see below). Pin a runtime with `xr.runtime=steamvr` to be sure
+which one a run uses.
 
 ### Driving a run through the dev pipe
 
