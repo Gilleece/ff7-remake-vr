@@ -562,7 +562,7 @@ chain, `status`) on game version 1.0.0.7 launched with `-d3d11 -windowed
 | Back buffer | `R10G10B10A2_UNORM` holding sRGB-encoded values (SDR output), sized to the window or fullscreen resolution (1280x720 in the test runs), bind flags render target + shader resource |
 | Present | sync interval 0 with `DXGI_PRESENT_ALLOW_TEARING`; the frame limit is the game's own, not vsync |
 | Presenting thread | the main thread for the first frames, then the engine's `RHIThread` for the rest of the session (logged as `the main swap chain is now presented from thread ... 'RHIThread'`); the render thread is `RenderThread 1` |
-| With ReShade/Luma as `dxgi.dll` | the game presents ReShade's swap chain proxy; the module's vtable hook sees the image with ReShade's effects applied |
+| With ReShade/Luma as `dxgi.dll` | the game presents ReShade's swap chain proxy (recorded with the earlier vtable hooks; see "ReShade and Luma" for the current state) |
 
 The screen layer's swapchain is created in the sRGB variant of the back
 buffer's format family the runtime offers (`R8G8B8A8_UNORM_SRGB` on the Null
@@ -573,13 +573,12 @@ that decodes its sRGB values, so brightness matches the desktop.
 
 All hooks are installed from `start()` on the loader's bootstrap thread:
 
-- `Present`, `Present1`, `ResizeBuffers`, `ResizeBuffers1`: slots of DXGI's
-  swap chain vtable, found through a throwaway swap chain on a NULL-driver
-  device. Every swap chain the game creates is checked and a new class gets
-  its own hooks. A vtable slot hook chains with inline hooks that other
-  software places on the same functions (the Steam overlay, ReShade, a frame
-  timer): callers through the vtable reach us first, we call what was in the
-  slot.
+- `Present`, `Present1`, `ResizeBuffers`, `ResizeBuffers1`: inline hooks on
+  the functions DXGI's swap chain vtable points to (found through a throwaway
+  swap chain on a NULL-driver device); the vtable slots themselves are left
+  alone. Every swap chain the game creates is checked and a class whose
+  functions are not hooked yet gets its own hooks. See "Coexisting with other
+  Present hooks" for why these are not slot hooks.
 - `IDXGIFactory::CreateSwapChain`, `IDXGIFactory2::CreateSwapChainForHwnd`,
   `D3D11CreateDevice`, `D3D11CreateDeviceAndSwapChain`,
   `ID3D11Device::CreateDeferredContext`: inline hooks, for logging facts only.
@@ -590,6 +589,49 @@ The main swap chain is the largest one with a visible window among those that
 presented during the last second. No reference to a back buffer is kept beyond
 a Present call, so the game's `ResizeBuffers` always succeeds; window mode and
 size changes recreate the screen layer at the new size on the next Present.
+
+### Coexisting with other Present hooks
+
+Until October 2026 the four functions were hooked by replacing their vtable
+slots. Started by Steam (so with `gameoverlayrenderer64.dll` injected at
+process start), the game then died on its first frame with a stack overflow
+inside the overlay; started directly it did not, and with the render module
+off it did not. What happened, from the crash dump's stack and the overlay's
+code (`gameoverlayrenderer64.dll` 10.96.30.42):
+
+1. The overlay is loaded before the mod and patches the body of DXGI's
+   `CDXGISwapChain::Present` (`dxgi.dll+0x19530`) with a jump to its hook
+   (the hook function starts at `+0x93e50`; it calls its saved original
+   through a pointer at `+0x167340`, the call returns to `+0x93f6f`).
+2. The mod replaced the vtable slot with its own detour, keeping
+   `dxgi.dll+0x19530` (now the overlay's jump) as its original.
+3. At the game's first Present the overlay's hook is entered straight from the
+   game (`ff7remake_.exe+0x1f492ca` -> overlay `+0x93f6f`), calls its original,
+   which is now the mod's detour (`XINPUT1_3.dll` frame), which calls
+   `dxgi.dll+0x19530`, which jumps into the overlay's hook again; from there on
+   only overlay frames repeat (`+0x93f6f` every 0x50 bytes of stack): the mod's
+   detour passes nested calls straight on with a tail jump. So the overlay
+   hooked Present a second time when it found the slot changed and kept one
+   original for both of its hooks. Which exact address the second hook patched
+   (the slot or the mod's function) was not established; the loop through the
+   saved original is what the stack shows.
+
+Now the slots keep pointing to DXGI's functions and the mod puts MinHook inline
+hooks on those functions. The first Present logs the chain
+(`d3d11:   Present chain: vtable ... slot -> ...; our original -> ...`), with
+every jump at the start of a function followed:
+
+| Start | Chain logged |
+|---|---|
+| through Steam (`steam -applaunch`), runs `captures/render2/steam1`, `steam2` | slot -> `dxgi.dll+0x19530` [jump] -> MinHook relay -> mod's detour; mod's original -> trampoline -> jump -> overlay `+0x93e50`: the overlay patched DXGI's body first, and the mod's hook runs before it |
+| direct (launcher, harness) | slot -> `dxgi.dll+0x19530` [jump] -> MinHook relay [jump] -> overlay `+0x93e50`: the overlay is loaded later (when the game initialises Steam) and hooks in front of the mod's hook |
+
+Both orders chain: each hook calls the code that was at the function's start
+before it was patched. Two starts through Steam reached gameplay in 3D on the
+Null backend (37 and 40 s, eye captures in both runs, no crash, no warning);
+the launcher path reached gameplay in 3D with the same build
+(`captures/render2/launcher`). A hook that replaces the vtable slot (as UEVR or
+ReShade's proxy do) calls DXGI's body and so still reaches the mod's hook.
 
 ## Stereo interface
 
