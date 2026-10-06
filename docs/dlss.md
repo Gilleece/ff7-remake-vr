@@ -9,8 +9,10 @@ at headset resolution). The history is reset on camera cuts; upscale mode works 
 `[stereo] render_scale` and dynamic resolution (under the NVIDIA App's DLSS override each
 change of the size recreates the features, a hitch) and always hands the runtime the full
 eye. Everything here was measured headless (Null backend, no headset); nothing has been seen
-in a headset yet. Not handled: texture mip bias in upscale mode, mono frames. **Open: three
-GPU faults (driver resets) in the test runs with DLSS on**, one explained and fixed, two not
+in a headset yet. Not handled: texture mip bias in upscale mode, mono frames. **GPU faults:**
+three driver resets in the test runs with DLSS on; the same kind of fault also happened once
+without DLSS, and in isolation runs DLSS failed only together with foveated rendering
+(variable rate shading): run DLSS with `[foveation] enabled = 0` until that is understood
 (section "GPU faults").
 
 ## Building it
@@ -62,6 +64,19 @@ immediate context's `DrawIndexed` that the bloom and occlusion fixes use:
 All of steps 3-5 run inside our own D3D11 pipeline state (`SwapDeviceContextState`), so the
 engine's bound state is exactly as it was afterwards. If anything is missing (no captured
 view rows, a failed evaluation), the game's own draw runs instead and `dlss status` says why.
+
+Lifetimes: a feature that is replaced (a new input size, a changed flag, `dlss off`,
+`dlss recreate`) and every texture an evaluation reads or writes that is replaced (the
+motion vectors, the outputs, the graded copy) is released only after the GPU has finished
+the frame that last used it: it waits for an event query issued at that frame's end and at
+least three more frames (`dlss status`: "deferred release"). The SDK guide requires this for
+features (section 5.5: a feature handle should only be released once the command lists used
+in its evaluations are no longer in flight). The engine's depth texture that an evaluation
+reads is held the same way. NGX itself delays the destruction of a released feature's
+resources by about 10 s (its verbose log: `NGXStoreCallToReleaseFeature`, then
+`NGXCubinGeneric::CollectGarbage` exactly 10 s later); DLSS on D3D11 runs NVIDIA's kernels
+through the driver ("cubin" kernels), and NGX keeps per-resource caches keyed by the
+resource pointer.
 
 NGX is initialised at the first stereo frame on the RHI thread (`NVSDK_NGX_D3D11_Init_with_ProjectID`,
 custom engine type), which blocks that thread for about 1 to 1.6 s once.
@@ -362,13 +377,85 @@ removed (`0x887A0005` in the next D3D call) and the game stopped presenting:
    recreated for a test switch, during the fourth `capture` of a burst with `dlss nograin 1`.
    No NGX message.
 
-The second and third are not explained. Both came during a `capture` (which waits on the
-GPU for a read-back) a few seconds after features had been recreated; about 150 captures
-with DLSS on succeeded, and no fault was seen in runs without DLSS tonight. They were not
-reproduced on purpose, since each one resets the driver for the whole machine. Until it is
-understood, use the DLSS build without the capture helper, and treat a stutter followed by
-a frozen picture as this fault (the log then shows `stereo mode, but the game thread is not
-starting frames`).
+### What the faults have in common, and what they do not
+
+- The game's own crash report says which kind of device loss it was:
+  `Documents\My Games\FINAL FANTASY VII REMAKE\Saved\Crashes\<id>\CrashContext.runtime-xml`,
+  `<ErrorMessage>`. All three: "Unreal Engine is exiting due to D3D device being lost.
+  (Error: 0x887A0006 - 'HUNG')", that is `DXGI_ERROR_DEVICE_HUNG`: the GPU stopped while
+  executing this process's commands (a loss caused by another process reads `RESET`).
+- Faults 2 and 3 came 0.80 s and 0.77 s after a `capture` was requested. The capture itself
+  completed in both (its images were written, so the GPU was working at its read-back), and
+  the reset followed in less than the 2 s TDR delay: a fault the driver detected, not a
+  timeout.
+- The same kind of fault happened once without DLSS: in a development run the day before
+  (before any DLSS code existed), 1.1 s after a `capture` request, also `HUNG`, also on the
+  Null backend with foveated rendering on. Counting all development runs: 1 such fault in
+  about 490 captures without DLSS, 2 in about 160 captures in the DLSS runs, which is not a
+  significant difference.
+- Foveated rendering was on in all three faults and in the one without DLSS.
+- No D3D11 debug layer was available (the Windows "Graphics Tools" feature is not installed
+  and installing it needs administrator rights), so the hazards were looked for by reading
+  the code and by the isolation runs below.
+
+### Hazards looked for in the code
+
+- A feature released while its last evaluation may still be on the GPU: found (every size
+  change, flag change and switch-off released it at once, against the SDK guide) and fixed
+  (see "Lifetimes" in "How it works"). NGX's own 10 s delay before it frees a released
+  feature's resources probably covered it already; the faults do not line up with those
+  10 s.
+- Textures NGX reads or writes released or resized while in use: our textures are now kept
+  until the GPU has finished the frame; the engine's depth texture is held the same way.
+- The immediate context used from two threads: not found. The anti-aliasing and last-pass
+  replacements, the frame end (`dlss::frame`), the Present hook, the XR submission and the
+  capture's blit and read-back all run on the engine's RHI thread; the capture's worker
+  thread only encodes PNG files; dev commands only set atomics. The game's device has no
+  multithread protection (creation flags 0), so a second thread would be a real hazard.
+- The capture's read-back (`CaptureEye` in `src/xr/src/capture.cpp`) maps its staging
+  texture with a blocking `Map`: the RHI thread waits until the GPU has drained, then
+  converts the pixels (20-40 ms with the GPU idle). That is legal D3D11, but it is the event
+  the faults followed.
+
+### Isolation runs
+
+All on the Null backend at 3072x3264, upscale mode at 0.58 with changes between 0.5 and
+0.58 (each one recreates both features under the NVIDIA App's override), walking between
+the first room and the street with the emulated head turning (`xr.null_motion = yaw`). "Late"
+means the run started at render scale 1 with DLSS off and switched both on by command,
+which is what the earlier faulting runs did; started from the ini with `input_scale` below 1,
+foveated rendering does not find the eye views and stays off (its log says "view rect ...
+not found in the eye views").
+
+| Run | Foveated rendering | Load | Length | Result |
+|---|---|---|---|---|
+| r31 | off (ini start) | capture every ~4 s (74), recreation every 20 s (24), scale change every 30 s (18) | 10.1 min | clean |
+| r32 | **on** (late) | `dlss stall` every ~3 s (62), recreation every 30 s, scale change every 60 s | 2.9 min | **hang**: no GPU reset, the game stopped presenting; Unreal's 30 s render thread watchdog ended it |
+| r33 | **on** (late) | as r31 | 2.7 min | **hang**, same place as r32 |
+| r34 | off (`[foveation] enabled = 0`, late) | as r31 (79 captures, 26 recreations, 18 scale changes) | 10 min | clean; no warning or error in the log |
+| r36 | **on** (late), DLSS off (NGX not started) | as r31 without DLSS (82 captures, 18 scale changes) | 10 min | clean |
+| r35 (soak) | off (`[foveation] enabled = 0`, ini start as a player would have it) | capture every 15 s (64), scale change every 60 s (19, each recreating both features) | 20 min | clean: no driver event, no warning, error or NGX error in the log, no failed evaluation; frame times per 30 s window 10.3 to 12.6 ms average, 95th percentile 11.1 to 13.6 ms, no drift |
+
+In both hangs the RHI thread was blocked inside the NVIDIA driver in the engine's own
+`Flush` after its per-frame query (`docs/re/engine.md` section 13), with none of the mod's
+code on the blocked call chain; the GPU had stopped finishing work without being reset.
+With foveated rendering off, the same DLSS load ran clean for 40 minutes in all (r31, r34
+and the 20-minute soak r35); foveated rendering with the same load but without DLSS ran
+clean for 10 minutes (r36). Only the two together failed, both times within 3 minutes.
+
+### Conclusion so far
+
+The faults are not caused by DLSS alone: the same kind appeared once without DLSS, and
+with DLSS the runs fail only while foveated rendering is on. Foveated rendering uses
+NVIDIA's variable rate shading through NVAPI (`src/render/src/foveation.cpp`). It is not
+simply "variable rate shading plus DLSS": the first DLSS runs (about 100 captures with
+DLSS and foveated rendering both on, `r.ScreenPercentage` changes, few feature
+recreations) had no fault. The faulting runs added changes of `[stereo] render_scale`
+(view rectangles inside full-size targets, for which foveated rendering rebuilds its
+shading-rate surface each time), frequent feature recreations, and a newer foveated
+rendering. Which part is involved is not known yet. Until then, run DLSS with
+`[foveation] enabled = 0`; started from the ini with an `input_scale` below 1, foveated
+rendering is off anyway (see above).
 
 ## Camera cuts
 
@@ -503,6 +590,8 @@ always uses AutoExposure"; the mod sets the auto-exposure flag.
   is built explicitly without DLSS, and the script checks the DLL for NGX names either way).
 - `[dlss] enabled = 1` in `ff7vr.ini`; `mode = upscale` and `input_scale = 0.5` (or 0.58, 0.67)
   are the defaults. Leave `[stereo] dynamic_resolution` off while the NVIDIA App override is set.
+- `[foveation] enabled = 0` while DLSS is on (section "GPU faults seen in the test runs":
+  with both on the GPU stopped within minutes in the stress runs).
 - A DLSS model: if the NVIDIA App's override is set for the game, the driver's own copy is
   used and nothing else is needed; otherwise `nvngx_dlss.dll` (310.5.0 or later for presets
   L/M) next to the game's exe or in `[dlss] dll_dir`. The game folder may already have one
@@ -533,6 +622,7 @@ by the project's maintainers on how an MIT-licensed project and NVIDIA's terms f
 | `cut_distance`, `cut_angle` | `100`, `30` | a camera move of more than this many world units (cm) or degrees in one frame counts as a cut |
 | `dll_dir` | empty | extra folder searched for `nvngx_dlss.dll` (searched before the mod's folder) |
 | `log_ngx` | `1` | NGX's own messages in `ff7vr.log` (the first 400) |
+| `log_verbose` | `0` | `1`: NGX's most detailed log level (read when NGX starts; the first 4000 messages). Shows its kernel allocations, feature creation and release, and its garbage collection |
 
 ## Dev commands
 
@@ -550,6 +640,8 @@ by the project's maintainers on how an MIT-licensed project and NVIDIA's terms f
 | `dlss hdr <0\|1>`, `dlss sharpness <v>`, `dlss preexp <v>`, `dlss nograin <0\|1>` | upscale mode tests: the input flagged HDR, `InSharpness`, `InPreExposure`, the last pass at the reduced size without its noise texture |
 | `dlss maxinput <full\|setting>` | upscale mode test: size a dynamic feature for render scale 1 instead of `[stereo] render_scale` |
 | `dlss reset`, `dlss recreate` | reset the history, release and recreate the features |
+| `dlss skip <0\|1>` | upscale mode fault test: everything runs (motion vectors, the graded copy at the reduced size) except the NGX evaluation; the game's own last pass scales the image up |
+| `dlss stall [ms]` | fault test: at the next frame end, wait until the GPU has finished everything (what a blocking read-back such as `capture` does), then stay away `ms` milliseconds (default 40) with the GPU idle |
 | `dlss dump` | log the view uniform buffer rows 110-145 of the next two views |
 | `dlss timing` | restart the GPU time averages |
 

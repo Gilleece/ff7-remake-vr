@@ -985,6 +985,31 @@ room):
 - Frame times of the game's own path (third person, first room, 6 s windows): 100 % 10.16 ms,
   67 % 7.18 ms, 50 % 5.35 ms; street: 9.82, 5.86 (67 %), 5.05 (58 %), 4.49 ms (50 %).
 
+## 13. GPU faults and hangs: where the evidence is (LIVE)
+
+- **Crash reports.** The game writes Unreal's crash context for every fatal error to
+  `Documents\My Games\FINAL FANTASY VII REMAKE\Saved\Crashes\UE4CC-Windows-<guid>_0000\`
+  (`CrashContext.runtime-xml` and a small `UE4Minidump.dmp` with every thread's stack).
+  `<ErrorMessage>` tells the kinds apart:
+  - "Unreal Engine is exiting due to D3D device being lost. (Error: 0x887A0006 - 'HUNG')":
+    `DXGI_ERROR_DEVICE_HUNG`, the driver reset the GPU (System log: `nvlddmkm` event 153)
+    and blamed this process's commands.
+  - the same with `0x887A0007 - 'RESET'`: the reset was caused by another process.
+  - "GameThread timed out waiting for RenderThread after 30.00 secs" (RenderingThread.cpp
+    line 1144): the render or RHI thread blocked for 30 s; with no `nvlddmkm` event, the GPU
+    stopped making progress without a reset (it waits on something that never completes).
+- **Where a blocked RHI thread sits.** In two such 30 s hangs (DLSS test runs, minidumps
+  read with a stack scan of return addresses, the exe disassembled with capstone) the RHI
+  thread waited inside the NVIDIA D3D11 driver (`nvwgf2umx.dll`) under `d3d11.dll`, called
+  from `ff7remake_.exe+0x1f373b1`: `call [rax+0x378]`, `ID3D11DeviceContext::Flush` (slot
+  111), right after `call [r8+0xe0]` at `+0x1f3739f`, `End` (slot 28) of a query (inferred:
+  the RHI's per-frame event query). The driver blocks a flush when its queue of submitted
+  work is full and the GPU does not retire it (inferred from where it waits). The caller chain above it:
+  `+0x1f3cc73`, `+0x1f3cb9e`, `+0x26e871f`, `+0x1c029d3`, `+0x26ef120` (RHI thread loop).
+- **Thread names.** The RHI thread is the one that presents (`d3d11:` log line "the main swap
+  chain is now presented from thread N 'RHIThread'"); the mod's DLSS and frame-end work log
+  with the same thread id.
+
 ## Tools
 
 All in `tools/re/`, run with the repo's `.venv` Python. The exe is found through Steam's
