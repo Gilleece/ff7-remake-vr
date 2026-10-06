@@ -1062,9 +1062,52 @@ absolute difference to a 5x5 median, and share of pixels 40 levels above it):
 full rate 2.7 to 4.1 and 0.2 to 0.4 %; all 2x2 3.6 to 4.3 and 0.6 to 1.0 %;
 G-buffer at full rate, rest 2x2, 4.1 to 5.1 and 0.8 to 1.2 %; only the
 G-buffer at 2x2, 2.8 and 0.1 to 0.5 %; all 2x1 2.5 to 3.0 and 0.3 to 0.6 %.
-Which of the later passes it is, and whether keeping it at full rate would be
-cheap, is not known yet (the next step is `fov exclude` over the bindings 54
-to 107, as for the subsurface recombine).
+
+Bisection with `fov exclude` (all rings 2x2, the face in the first room, crops
+compared by eye because the measure above moves with the idle animation as
+much as with the shading rate): excluding `b54`-`b107` cleans the hair, but no
+single range does (`b54`-`b64`, `b65`-`b79`, `b80`-`b92`, `b93`-`b101`,
+`b103`-`b107` each left it mottled, as did the single bindings `b68`, `b71`,
+`b80`, `b81`, `b84`, `b85`, `b88`, `b94`, `b98`). The reverse test, only one
+range coarse and the rest of `b54`-`b107` at full rate: `b54`-`b64` coarse or
+`b93`-`b107` coarse leaves the hair clean, `b54`-`b79` coarse mottles it. So
+two groups each produce it on their own: the shadow projection and first light
+(`b65`-`b79`: the per-eye `R8G8_UNORM` passes, a scene-size
+`R16G16B16A16_FLOAT` pass with depth and the screen shadow mask
+`B8G8R8A8_UNORM`) and the further lights (`b80`-`b92`: shadow mask and light
+accumulation pairs with depth). Occlusion (`b54`-`b64`), reflections and the
+subsurface chain (`b93`-`b107`) are not involved.
+
+Mechanism (inferred, shaders not disassembled): hair is a masked material whose
+coverage, normal and tangent change from one pixel to the next (strand, gap,
+strand). A light pass at 2x2 reads the G-buffer and the shadow mask at one
+position per block and writes that light to all four pixels, so strands
+receive the light and shadow of a neighbouring strand or of the gap behind it:
+the highlights break into blocks and the gaps spread as dark speckles. Smooth
+surfaces change slowly across a block, so the same sharing is not visible
+there; the G-buffer pass itself at 2x2 does no harm because it still writes
+per-pixel attributes (only the material evaluation is shared).
+
+The fix is a switch, off by default because it is dear: `[foveation]
+lighting_full_rate = 1` (or `fov lighting 1`) keeps every binding after the
+G-buffer pass of the frame at full rate, so the mask covers the G-buffer pass
+only. With all rings at 2x2 it gives hair like full rate (captures
+`c22L` against `c22` in the test run). Cost (scene GPU time, p50 of 8 s
+windows, `quality` preset, Null backend unpaced, 2 x 3072x3264): first room
+ahead 8.02 / 8.04 ms without against 9.31 / 9.29 ms with it (`fov off` 9.52);
+the same room, head turned 150 degrees, 7.92 / 7.92 against 9.26 / 9.26
+(`fov off` 9.48). That is +1.3 ms, nearly all of the preset's 1.5 ms saving.
+Keeping only `b65`-`b92` at full rate would be cheaper (those bindings take
+about 1.3 ms with the mask on in the traced frame, so roughly half of that
+would come back), but it is selected by binding number only and was not
+measured as a rule.
+
+The remedy without that cost is the ring radii: at the `quality` preset (2x2
+from 0.90) the face is inside the full-rate zone whenever it is looked at, and
+the mottling is limited to hair in the outer rings, at 44 degrees or more from
+the view axis. Players who notice it there can move the 2x2 ring out (`radii
+0.7 0.9 1.15` to, for example, `0.7 1.0 1.25`) or use `2x1` for the middle
+ring, which shows no mottling (neither change was measured for cost), before reaching for `lighting_full_rate`.
 
 ### Settings
 
@@ -1078,6 +1121,7 @@ to 107, as for the subsurface recombine).
 | `[foveation] passes` | `scene` | `scene`: matching targets inside the scene window; `no-gbuffer`: the same without the G-buffer pass (3 or more targets); `all`: matching targets from the scene's start until Present, including post-processing (for comparison only) |
 | `[foveation] skip_formats` | `35` | DXGI formats of render target 0 that never get the mask (35 = `R16G16_UNORM`, the velocity buffer) |
 | `[foveation] subsurface_full_rate` | `1` | `1`: the subsurface recombine passes run at full rate ([Skin edges](#skin-edges-the-subsurface-recombine)); `0`: they take the mask (grey-white line on skin edges under 2x2) |
+| `[foveation] lighting_full_rate` | `0` | `1`: every pass after the G-buffer runs at full rate, which removes the mottled hair in the coarse rings ([Hair at 2x2](#skin-edges-the-subsurface-recombine)) but costs about 1.3 ms of the 1.5 ms the `quality` preset saves; dev command `fov lighting 0\|1` |
 | `[debug] foveation_unsupported` | `0` | `1`: behave as on a GPU without variable rate shading (tests the fallback) |
 | `[foveation] eye_tracking` | `0` | `1` or `auto`: the rings follow the eye gaze when the headset has an eye tracker ([Eye-tracked foveation](#eye-tracked-foveation)); `0`: fixed at the optical centres. Read when the XR session starts |
 | `[foveation] gaze_margin_deg` | `5` | degrees added to the full-rate zone's radius while the gaze drives it (covers the gaze sample's age and tracker error) |
@@ -1163,6 +1207,7 @@ BENCH_TABLE_PLACEHOLDER
 | `fov on` / `fov off` | switch the mask; after `fov off` the scene's GPU time keeps being measured, so on and off compare in one session |
 | `fov preset <name>`, `fov radii <a> <b> <c>`, `fov rates <a> <b> <c>`, `fov hidden off\|coarse\|cull`, `fov passes scene\|no-gbuffer\|all`, `fov skip [formats]` | change the settings at run time (the surface is rebuilt at the next stereo frame) |
 | `fov subsurface 0\|1` | the subsurface recombine at full rate (1) or with the mask (0) |
+| `fov lighting 0\|1` | every pass after the G-buffer at full rate (1) or with the mask (0); see [Hair at 2x2](#skin-edges-the-subsurface-recombine) |
 | `fov exclude <first> [<last>]`, `fov exclude off` | keep the scene window's render target bindings `first` to `last` (counted from the scene's start, `b<n>` in `fov trace`) at full rate; for finding which pass causes an artefact |
 | `fov trace` | log every render target binding of the next stereo frame, from the scene's start to Present, with GPU times and binding numbers |
 | `fov timing` | log and reply the scene GPU time, the GPU time after the scene and the hooks' CPU time since the last report |

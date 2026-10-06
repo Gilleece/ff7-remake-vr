@@ -53,6 +53,9 @@ struct Settings {
     // Subsurface recombine at full rate (docs/render.md, "Skin edges"): after the lights,
     // the full-size colour passes without depth that follow the half-size subsurface blur.
     bool subsurfaceFullRate = true;
+    // Every binding after the G-buffer pass at full rate, so the mask covers the G-buffer pass only
+    // (docs/render.md, "Hair at 2x2"): removes the mottled hair under 2x2, keeps a small part of the saving.
+    bool lightingFullRate = false;
     // Dev only (`fov exclude`): bindings of the scene window, counted from its start, kept at full rate.
     int excludeFrom = -1, excludeTo = -1;
     // Eye-tracked foveation: the rings follow the gaze (docs/render.md, "Eye-tracked foveation").
@@ -153,6 +156,7 @@ std::string Describe(const Settings& s) {
                        s.passes == Passes::All ? "all (size rule only)" : s.passes == Passes::NoGBuffer ? "scene without the G-buffer pass" : "scene",
                        s.skipFormats.empty() ? std::string() : std::format(", skipping {} render target format(s)", s.skipFormats.size())) +
            (s.subsurfaceFullRate ? "; subsurface recombine at full rate" : "; subsurface recombine coarse") +
+           (s.lightingFullRate ? "; passes after the G-buffer at full rate" : std::string()) +
            (s.excludeFrom >= 0 ? std::format("; bindings {}-{} excluded", s.excludeFrom, s.excludeTo) : std::string()) +
            (s.eyeTracking == EyeTracking::Off
                 ? std::string()
@@ -244,6 +248,7 @@ struct State {
     bool viewBound = false; // our surface is bound on the context
     bool sawLights = false;   // this frame's scene window has bound the screen shadow mask (lights running)
     bool sawSssBlur = false;  // ... and after that a half-size colour target (subsurface blur)
+    bool sawGBuffer = false;  // this frame's scene window has bound the G-buffer (3 or more colour targets)
     uint64_t frames = 0, bindings = 0, matched = 0;
     uint64_t bindingsThisFrame = 0, matchedThisFrame = 0;
     int64_t cpuTicksThisFrame = 0;
@@ -425,6 +430,11 @@ void OnTargets(ID3D11DeviceContext* ctx, UINT n, ID3D11RenderTargetView* const* 
                 want = false;
                 note = "subsurface recombine at full rate";
             }
+            if (want && g.settings.lightingFullRate && g.sawGBuffer) {
+                want = false;
+                note = "after the G-buffer at full rate";
+            }
+            if (SizeMatches(f) && colour >= 3) g.sawGBuffer = true;
             if (want && ord >= g.settings.excludeFrom && ord <= g.settings.excludeTo) {
                 want = false;
                 note = "excluded";
@@ -1107,6 +1117,7 @@ void Configure(const Config& c) {
         if (ec == std::errc() && p == f.data() + f.size()) s.skipFormats.push_back(v);
     }
     s.subsurfaceFullRate = c.get_bool("foveation", "subsurface_full_rate", true);
+    s.lightingFullRate = c.get_bool("foveation", "lighting_full_rate", false);
     // Eye-tracked foveation, off by default (docs/render.md, "Eye-tracked foveation").
     const std::string et = Lower(c.get_string("foveation", "eye_tracking", "0"));
     if (et == "1" || et == "on" || et == "true" || et == "yes")
@@ -1241,7 +1252,7 @@ void SceneBegin(const FoveationEye eyes[2]) {
     }
     if (g.settings.eyeTracking != EyeTracking::Off && (g.frames & 7) == 0) SetGazeLine();
     ++g.frames;
-    g.sawLights = g.sawSssBlur = false;
+    g.sawLights = g.sawSssBlur = g.sawGBuffer = false;
     g.open = true;
     if (g_traceRequested.exchange(false)) StartTrace(ctx);
     // The render target bound right now may already be a scene target.
@@ -1350,6 +1361,12 @@ std::string Command(const std::string& argsIn) {
             s.subsurfaceFullRate = a[1] == "1";
             return std::string();
         });
+    if (a[0] == "lighting" && a.size() == 2)
+        return update([&](Settings& s) {
+            if (a[1] != "0" && a[1] != "1") return std::string("lighting 0|1");
+            s.lightingFullRate = a[1] == "1";
+            return std::string();
+        });
     if (a[0] == "exclude" && (a.size() == 2 || a.size() == 3))
         return update([&](Settings& s) {
             if (a[1] == "off") {
@@ -1451,7 +1468,7 @@ std::string Command(const std::string& argsIn) {
         return out;
     }
     return "err usage: fov status | on | off | preset quality|balanced|performance|off | radii <r1> <r2> <r3> | rates <a> <b> <c> | "
-           "hidden off|coarse|cull | passes scene|no-gbuffer|all | skip [dxgi formats] | subsurface 0|1 | exclude <first> [<last>]|off | trace | timing | gaze status|mode|margin|smoothing|dump";
+           "hidden off|coarse|cull | passes scene|no-gbuffer|all | skip [dxgi formats] | subsurface 0|1 | lighting 0|1 | exclude <first> [<last>]|off | trace | timing | gaze status|mode|margin|smoothing|dump";
 }
 
 bool EyeTrackingRequested() { return g_eyeTrackingRequested.load(); }
