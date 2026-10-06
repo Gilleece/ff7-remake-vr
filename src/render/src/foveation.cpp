@@ -224,7 +224,7 @@ struct State {
         float smoothed[3]{0, 0, -1};  // head space
         bool loggedNoSource = false;
         // Statistics since the session start (and since the last `fov gaze status` for the rate).
-        uint64_t rebuilds = 0, rebuildsWindow = 0, switches = 0, samples = 0, snaps = 0;
+        uint64_t rebuilds = 0, rebuildsWindow = 0, switches = 0, samples = 0, snaps = 0, bridged = 0;
         int64_t windowStartQpc = 0;
         double rebuildMsTotal = 0, rebuildMsMax = 0, rebuildMsLast = 0;
         double ageMs = -1;
@@ -908,7 +908,10 @@ bool UpdateGaze(float out[2][3]) {
             if (z.mode == State::Gaze::Mode::Fixed) {
                 if (++z.trackedRun >= kEnterSamples) switchTo(State::Gaze::Mode::Gaze, std::format("source {}", gs.source));
             } else {
-                switchTo(State::Gaze::Mode::Gaze, "tracked again");
+                // Back from Holding (a blink): the centre never left the gaze, so this is
+                // neither logged nor counted as a switch.
+                if (z.mode == State::Gaze::Mode::Holding) ++z.bridged;
+                z.mode = State::Gaze::Mode::Gaze;
             }
         } else {
             z.trackedRun = 0;
@@ -960,10 +963,10 @@ void SetGazeLine() {
     }
     std::string line = std::format(
         "eye_tracking {}; source {}{}; {} ({}tracked{}, sample {} ms older than its display time, {} samples); rings: {}; surface refills {} "
-        "({:.1f} per s over the last window, {:.3f} ms avg, {:.3f} ms max, {:.3f} ms last CPU incl. upload), {} switches, {} saccade jumps; {}",
+        "({:.1f} per s over the last window, {:.3f} ms avg, {:.3f} ms max, {:.3f} ms last CPU incl. upload), {} switches, {} losses bridged, {} saccade jumps; {}",
         EyeTrackingText(g.settings.eyeTracking), gs.source.empty() ? "none" : gs.source, gs.note.empty() ? "" : " (" + gs.note + ")", GazeModeText(z.mode),
         z.tracked ? "" : "not ", gs.nominal ? ", nominal" : "", z.ageMs >= 0 ? std::format("{:.1f}", z.ageMs) : std::string("?"), z.samples,
-        centres, z.rebuilds, ratePerS, z.rebuilds ? z.rebuildMsTotal / double(z.rebuilds) : 0.0, z.rebuildMsMax, z.rebuildMsLast, z.switches, z.snaps,
+        centres, z.rebuilds, ratePerS, z.rebuilds ? z.rebuildMsTotal / double(z.rebuilds) : 0.0, z.rebuildMsMax, z.rebuildMsLast, z.switches, z.bridged, z.snaps,
         g.surfaceText);
     std::lock_guard lk(g_statusMutex);
     g_gazeLine = std::move(line);
@@ -1324,6 +1327,12 @@ std::string Command(const std::string& argsIn) {
         });
     if (a[0] == "gaze") {
         if (a.size() == 1 || a[1] == "status") {
+            bool off = false;
+            {
+                std::lock_guard lk(g_settingsMutex);
+                off = g_settings.eyeTracking == EyeTracking::Off;
+            }
+            if (off) return "ok eye_tracking 0: the rings stay at the optical centres ([foveation] eye_tracking = 1 or auto, or 'fov gaze mode 1')";
             std::lock_guard lk(g_statusMutex);
             return "ok " + g_gazeLine;
         }

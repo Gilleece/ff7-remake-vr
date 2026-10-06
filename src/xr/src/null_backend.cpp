@@ -164,7 +164,7 @@ public:
             gazeEnabled_ = desc.eyeGaze;
             if (gazeEnabled_) {
                 info_.gazeSource = "simulated";
-                info_.gazeNote = "not tracked until 'xr-sim gaze'";
+                info_.gazeNote = "Null backend, driven by 'xr-sim gaze'";
             }
         }
         if (gazeEnabled_) log_.Info("eye gaze: source simulated (not tracked until 'xr-sim gaze <yaw> <pitch>' or 'xr-sim gaze sweep')");
