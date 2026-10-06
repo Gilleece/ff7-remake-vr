@@ -404,8 +404,8 @@ What helps, measured:
   game held 1.3 GB less.
 - `r.ScreenPercentage` for the DLSS input instead of `input_scale` sizes the scene buffers (and
   the mod's scratch textures) to the rendered size: 3.9 GB less at 4608x4224. Foveated rendering
-  does not follow it (its surface is still laid out for the full eye: the rings are in the wrong
-  place); not looked at in an image.
+  does not follow it (its surface is still laid out for the full eye, so the rings most likely
+  sit in the wrong place; not looked at in an image).
 - Fewer other programs on the card (each holds some of the 2-3 GB the game cannot have).
 
 The third state is not explained by memory and none of these settings removed it at 4032x3648.
