@@ -269,7 +269,7 @@ Facts established on this game build (exe file version 1.0.0.7):
 ```
 launch.ps1 [-Until none|title|gameplay] [-Screenshot] [-ScreenshotPath <png>]
            [-WaitLog <regex>] [-WaitSeconds <n>] [-KeepRunning]
-           [-BuildDir <dir>] [-Ini <file>] [-NoMod] [-KeepLuma]
+           [-BuildDir <dir>] [-Ini <file>] [-Set "section.key=value;..."] [-NoMod] [-KeepLuma]
            [-Width 1280 -Height 720 | -Fullscreen] [-ExtraArgs "<args>"]
            [-GameEnv "NAME=value;NAME2=value2"] [-Via direct|steam]
            [-StartTimeout 120] [-UntilTimeout 240] [-LockWaitSeconds 900]
@@ -302,8 +302,20 @@ launch.ps1 -Until gameplay -GameEnv "XR_RUNTIME_JSON=C:\Program Files (x86)\Stea
 launch.ps1 -Ini my-crash-test.ini -WaitSeconds 40
 ```
 
-Exit codes: 0 success, 1 a step failed, 3 lock not obtained or the game was
-already running.
+`-Set` overrides ini keys for one run without editing a file: `section.key=value` items
+separated by `;` (or a PowerShell array), appended to a copy of the ini so they win over
+the same keys earlier in it; the merged ini is kept in `captures\runs\<time>-ini\`. For
+example `-Set "xr.backend=null;xr.eye_width=3264;xr.eye_height=3072;dlss.enabled=1"`. Keys
+of sections with dots work too (`stereo_cvars.r.BloomQuality=0`: section `stereo_cvars`,
+key `r.BloomQuality`). The script refuses, before it takes the lock or starts anything, a
+value that contains a comma but no `;` (a comma-separated list would become one key with
+the rest glued to its value, and the run would silently use the defaults for the other keys,
+for example a real OpenXR runtime instead of the Null backend) and any item that is not
+`section.key=value`. If one value really contains commas (`foveation.radii=0.4,0.6,0.9`),
+end the list with `;`.
+
+Exit codes: 0 success, 1 a step failed, 2 a bad `-Set` value, 3 lock not obtained or the
+game was already running.
 
 ### `stop.ps1`: stop and clean up
 

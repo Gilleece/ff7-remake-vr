@@ -70,6 +70,23 @@ param(
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\common.ps1"
 
+# -Set: items are separated by ';' (or given as an array). A list joined with commas would
+# reach the ini as one key with the rest glued to its value, and the run would silently use
+# the defaults for the other keys (for example a real OpenXR runtime instead of the Null
+# backend), so such values are refused before anything starts.
+foreach ($raw in $Set) {
+    if ($raw -match ',' -and $raw -notmatch ';') {
+        Write-Step "Bad -Set value '$raw': separate the items with ';', not ',' (for example -Set `"xr.backend=null;log.level=trace`"). If one value really contains commas, end the list with ';'."
+        exit 2
+    }
+    foreach ($item in @($raw -split ';' | Where-Object { $_ -and $_.Trim() })) {
+        if ($item.Trim() -notmatch '^[^=\s]+\.[^=\s]+\s*=') {
+            Write-Step "Bad -Set item '$($item.Trim())': expected section.key=value (items separated by ';')."
+            exit 2
+        }
+    }
+}
+
 $owner = Get-DefaultOwner
 $runStamp = (Get-Date).ToString('yyyyMMdd-HHmmss')
 $failures = @()
