@@ -136,6 +136,14 @@ private:
     ComPtr<ID3D11ShaderResourceView> CreateSrv(ID3D11Texture2D* tex, DXGI_FORMAT fmt, uint32_t slice, uint32_t mip);
     ID3D11RenderTargetView* GetRtv(ID3D11Texture2D* tex, DXGI_FORMAT fmt, uint32_t slice);
     ID3D11Texture2D* GetTemp(DXGI_FORMAT fmt, uint32_t w, uint32_t h, UINT bind);
+    // Fills the picture curve for `p` unless it already holds it. False without the texture.
+    bool UpdateCurve(ID3D11DeviceContext* ctx, const PictureAdjust& p);
+
+    static constexpr uint32_t kCurveSize = 4096;
+    ComPtr<ID3D11Texture1D> curve_;  // R32_FLOAT, see blit.hlsl
+    ComPtr<ID3D11ShaderResourceView> curveSrv_;
+    PictureAdjust curveFor_{};
+    bool curveValid_ = false;
 
     const Logger* log_ = nullptr;
     ComPtr<ID3D11Device> device_;

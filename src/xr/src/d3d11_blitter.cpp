@@ -176,9 +176,9 @@ struct BlitConstants {
     uint32_t alphaMode;  // BlitAlpha
     uint32_t encodeSrgb;  // 1: store gamma-encoded values (non-sRGB view of a gamma-encoded target)
     uint32_t pad;
-    float pic0[4];  // brightness gain, saturation, contrast, 1 / gamma
-    float pic1[4];  // black level
-    uint32_t picture;  // 1: apply pic0/pic1 (opaque output only)
+    float pic0[4];  // saturation, curve coordinate scale, offset
+    float pic1[4];
+    uint32_t picture;  // 1: apply the picture adjustment (opaque output only)
     uint32_t pad2[3];
 };
 static_assert(sizeof(BlitConstants) == 80, "must match BlitConstants in blit.hlsl");
@@ -187,13 +187,37 @@ static bool WantsPicture(const BlitSource& src) {
     return src.picture && src.alpha == BlitAlpha::Opaque && !src.picture->IsIdentity();
 }
 
-static void FillPicture(BlitConstants& c, const PictureAdjust& p) {
-    c.picture = 1;
-    c.pic0[0] = std::exp2(p.brightness);
-    c.pic0[1] = p.saturation;
-    c.pic0[2] = p.contrast;
-    c.pic0[3] = p.gamma > 0.0f ? 1.0f / p.gamma : 1.0f;
-    c.pic1[0] = p.blackLevel;
+static bool SamePicture(const PictureAdjust& a, const PictureAdjust& b) {
+    return a.brightness == b.brightness && a.contrast == b.contrast && a.saturation == b.saturation && a.gamma == b.gamma &&
+           a.blackLevel == b.blackLevel;
+}
+
+// The per-channel part of PictureAdjust (everything but saturation) for linear light `lin`,
+// returning linear light. Steps and spaces as documented in xr.h.
+static double PictureCurve(const PictureAdjust& p, double lin) {
+    lin *= std::exp2(double(p.brightness));
+    lin = 0.18 * std::pow(lin / 0.18, double(p.contrast));
+    // Values above 1 (a gain above 1) keep their excess here: the render target clips them.
+    double e = lin <= 0.0031308 ? lin * 12.92 : 1.055 * std::pow(lin, 1.0 / 2.4) - 0.055;
+    e = std::pow(std::max(e, 0.0), 1.0 / double(p.gamma));
+    e = std::max(e * (1.0 - p.blackLevel) + p.blackLevel, 0.0);
+    return e <= 0.04045 ? e / 12.92 : std::pow((e + 0.055) / 1.055, 2.4);
+}
+
+bool Blitter::UpdateCurve(ID3D11DeviceContext* ctx, const PictureAdjust& p) {
+    if (!curveSrv_) return false;
+    if (curveValid_ && SamePicture(curveFor_, p)) return true;
+    // Entry i is the curve at t = i / (N - 1), linear light 2 t^2: the square-root spacing
+    // puts most entries into the shadows, where the eye sees small steps.
+    std::vector<float> v(kCurveSize);
+    for (uint32_t i = 0; i < kCurveSize; ++i) {
+        const double t = double(i) / (kCurveSize - 1);
+        v[i] = static_cast<float>(PictureCurve(p, 2.0 * t * t));
+    }
+    ctx->UpdateSubresource(curve_.Get(), 0, nullptr, v.data(), 0, 0);
+    curveFor_ = p;
+    curveValid_ = true;
+    return true;
 }
 
 bool Blitter::Init(ID3D11Device* device, const Logger* log) {
@@ -245,6 +269,22 @@ bool Blitter::Init(ID3D11Device* device, const Logger* log) {
         log_->Error("blitter: state creation failed {}", HResultString(hr));
         return false;
     }
+    // The picture adjustment's curve (16 KB). Without it the adjustment is skipped.
+    D3D11_TEXTURE1D_DESC cd{};
+    cd.Width = kCurveSize;
+    cd.MipLevels = 1;
+    cd.ArraySize = 1;
+    cd.Format = DXGI_FORMAT_R32_FLOAT;
+    cd.Usage = D3D11_USAGE_DEFAULT;
+    cd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    hr = device->CreateTexture1D(&cd, nullptr, &curve_);
+    if (SUCCEEDED(hr)) hr = device->CreateShaderResourceView(curve_.Get(), nullptr, &curveSrv_);
+    if (FAILED(hr)) {
+        log_->Warn("blitter: picture curve texture failed {}; [picture] has no effect", HResultString(hr));
+        curve_.Reset();
+        curveSrv_.Reset();
+    }
+    curveValid_ = false;
     return true;
 }
 
@@ -259,6 +299,9 @@ void Blitter::Shutdown() {
     blend_.Reset();
     blendOver_.Reset();
     dss_.Reset();
+    curveSrv_.Reset();
+    curve_.Reset();
+    curveValid_ = false;
     device_.Reset();
 }
 
@@ -386,7 +429,7 @@ bool Blitter::Transfer(ID3D11DeviceContext* ctx, const BlitSource& src, const Re
 
     // A copy keeps the source's alpha bits: right for opaque and premultiplied sources only.
     const bool alphaAsIs = src.alpha == BlitAlpha::Opaque || src.alpha == BlitAlpha::Premultiplied;
-    const bool picture = WantsPicture(src);
+    const bool picture = WantsPicture(src) && curveSrv_;
     const bool canCopy = fits && alphaAsIs && !picture && sd.SampleDesc.Count == 1 && dd.SampleDesc.Count == 1 &&
                          TypelessFamily(sd.Format) == TypelessFamily(dd.Format) && srcBitsSrgb == dstBitsSrgb &&
                          TypelessFamily(srcFmt) == TypelessFamily(dstFmt);
@@ -461,7 +504,13 @@ bool Blitter::Transfer(ID3D11DeviceContext* ctx, const BlitSource& src, const Re
     c.uvScale[1] = float(readRect.height) / readH;
     c.decodeSrgb = (src.encoding == ColorEncoding::Srgb && !IsSrgbFormat(readFmt)) ? 1u : 0u;
     c.alphaMode = static_cast<uint32_t>(src.alpha);
-    if (picture) FillPicture(c, *src.picture);
+    const bool usePicture = picture && UpdateCurve(ctx, *src.picture);
+    if (usePicture) {
+        c.picture = 1;
+        c.pic0[0] = src.picture->saturation;
+        c.pic0[1] = float(kCurveSize - 1) / kCurveSize;  // t in [0, 1] -> the first and last texel centres
+        c.pic0[2] = 0.5f / kCurveSize;
+    }
     memcpy(m.pData, &c, sizeof(c));
     ctx->Unmap(cb_.Get(), 0);
 
@@ -487,9 +536,15 @@ bool Blitter::Transfer(ID3D11DeviceContext* ctx, const BlitSource& src, const Re
     ctx->PSSetShaderResources(0, 1, &srv);
     ID3D11SamplerState* smp = (fits && w == rect.width && h == rect.height) ? pointSampler_.Get() : linearSampler_.Get();
     ctx->PSSetSamplers(0, 1, &smp);
+    if (usePicture) {
+        ID3D11ShaderResourceView* curveSrv = curveSrv_.Get();
+        ID3D11SamplerState* curveSmp = linearSampler_.Get();
+        ctx->PSSetShaderResources(1, 1, &curveSrv);
+        ctx->PSSetSamplers(1, 1, &curveSmp);
+    }
     ctx->Draw(3, 0);
-    ID3D11ShaderResourceView* nullSrv = nullptr;
-    ctx->PSSetShaderResources(0, 1, &nullSrv);
+    ID3D11ShaderResourceView* nullSrv[2] = {};
+    ctx->PSSetShaderResources(0, usePicture ? 2 : 1, nullSrv);
 
     if (usedPath) *usedPath = Path::Blit;
     if (outW) *outW = w;
