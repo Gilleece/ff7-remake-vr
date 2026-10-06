@@ -673,15 +673,35 @@ What was seen with ReShade and Luma loaded (Null backend, eyes 2064x2208, runs
 | | Result |
 |---|---|
 | Start-up, direct start and start through Steam (overlay too) | the module initialises, the XR session runs, gameplay reached in stereo, no warning or error in the module's log; ReShade's log shows Luma loaded on the game's device |
-| Eye images | BOTH EYES SHOW THE LEFT EYE'S IMAGE (left and right eye captures differ by 0.7 to 0.8 of 255 on average, no parallax; without ReShade 22.6 and a 368-pixel shift). Not fixed |
+| Eye images, without the tonemapping shift below | BOTH EYES SHOW THE LEFT EYE'S IMAGE (left and right eye captures differ by 0.7 to 0.8 of 255 on average, no parallax; without ReShade 22.6 and a 368-pixel shift) |
 | Where | one-frame GPU trace with read-backs (`reshade3/tr`): the two views' anti-aliasing outputs differ as they should (events 2702 and 2735, mean difference 25.8 between the left half and the right half), but the right view's tonemapping pass (2766, viewport at x 2064, reading the right view's anti-aliasing output as `t0`) writes the left view's image (mean difference 0.14 from the left view's tonemapping output, 2733). Without ReShade this pass is correct, so the pass Luma puts in place of the game's tonemapping (Luma replaces shaders when the game creates them) reads its input relative to the origin of the target and ignores the view's offset: the same kind of fault as the game's bloom, occlusion and reflections. Several bloom passes also run Luma's shaders (`ps` objects created later than the game's) |
 | Not tested | ReShade's effects on the virtual screen; ReShade's OpenXR layer (the Null backend does not use the OpenXR loader; the module keeps that layer disabled for the process with a real runtime); Luma's DLSS in VR; performance |
 
-A fix in the module would be a per-draw input shift like the bloom fix (copy
-the right view's part of the input to the origin of a scratch texture for that
-one draw), but it depends on which of the replaced shader's inputs are read
-relative to the origin, and on Luma's version; a fix in Luma (taking the view
-rectangle into account) would be the clean one.
+`[stereo] tonemap_shift` (`src/engine/src/bloom_fix.cpp`, `tonemap_shift`;
+`auto` by default, `0` off, `1` always; dev command `tonemapshift [0|1|2]`)
+runs the right view's tonemapping draw with its input 0 (the anti-aliased
+scene colour) copied from the view's rectangle to the origin of a scratch
+texture, the bloom fix's mechanism. Recognised by shape: a full-screen draw
+whose viewport starts at the middle of an `R16G16B16A16` target, input 0 of the
+target's size, input 1 between a quarter and a half of it (the bloom result).
+The game's own tonemapping shader reads at the view's rectangle, so the shift
+must not run without Luma: `auto` applies it only while a module named
+`Luma-Final Fantasy VII Remake.addon` is loaded (checked every 600 stereo
+frames; the log says `tonemap input shift: Luma add-on loaded`). Evidence:
+
+| Run | Result |
+|---|---|
+| `reshade6` (8 captures, modes 2, 0, 0, 2, 2, 1, 0, 2, 2 s apart) | shift on: eyes differ by 21.6 to 23.0 with a 368 to 384-pixel parallax shift; off: 0.69 to 0.98, no shift. `applied` grows by about 400 per 4 s while on, by at most 1 while off |
+| `reshade8` (render scale 0.8 and 1.0, modes 2 and 0) | the same at both scales (on: 22.7 / 22.9, parallax; off: 0.53 / 0.86); `reshade8/sheet.png`: left eye, right eye at 0.8, right eye at 1.0 |
+| `025324-noreshade` (no ReShade) | `auto (inactive; Luma add-on not loaded): applied 0`; eyes 22.4 apart with the usual parallax |
+| `reshade5` counters with Luma | bloom fix, occlusion fix and reflections fix applied once per stereo frame (542 each), `missed 0`, `failed 0` |
+
+Not known: whether every Luma setting replaces the tonemapping shader (with
+one that does not, `auto` would shift the game's own shader's input and break
+the right eye: set `tonemap_shift = 0`); other Luma versions; whether other
+Luma passes have the same fault in scenes not traced (one frame of the first
+room was traced). Luma's own fix (taking the view rectangle into account)
+would make the shift unnecessary.
 
 ## Stereo interface
 

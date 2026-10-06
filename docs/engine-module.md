@@ -394,6 +394,7 @@ hidden buttons, is inferred from the filter's output.
 | `ao_fix` | `1` | right-eye ambient occlusion fix (below) |
 | `ssr_per_eye` | `1` | each eye's screen-space reflection run limited to its half of the target, and the per-view colour copy for it halved (see "Reflections per eye"); same image, about 0.45 ms less per frame at 2 x 3072x3264 |
 | `ssr_fix` | `1` | right-eye screen-space reflections: without it the right eye has none (see "Right-eye reflections fix") |
+| `tonemap_shift` | `auto` | with ReShade's Luma add-on loaded, the right view's tonemapping input shifted to the origin (Luma's shader reads it there; without it both eyes show the left eye's image). `auto`: only while Luma is loaded; `0` off; `1` always (breaks the right eye without Luma). `docs/render.md`, "ReShade and Luma" |
 | `render_scale` | `1.0` | share of each eye's target the views render, per axis (0.3 to 1); the runtime scales the smaller image to the display. Also the upper bound of the dynamic resolution (see "Render scale and dynamic resolution") |
 | `dynamic_resolution` | `0` | adjust the render scale every few frames to hold the GPU frame time below `dynamic_resolution_target` of the display's frame period |
 | `dynamic_resolution_min` | `0.75` | lowest scale the dynamic resolution may use (per axis; 0.75 is 56 % of the pixels) |
