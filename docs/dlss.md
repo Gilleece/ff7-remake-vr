@@ -109,6 +109,54 @@ The cost follows the input pixel count more than the output. NVIDIA's table for 
 should cost about 0.6 times and M about 0.8 times these numbers (not measured here: the
 override forces L).
 
+## Upscale mode (`[dlss] mode = upscale`, with `r.ScreenPercentage` below 100)
+
+Below 100 % screen percentage this engine renders each eye at the reduced size up to and
+including the tonemapper, and its last pass (colour grading and grain) scales the result up
+into the eye texture (`docs/re/engine.md` section 12). In upscale mode:
+
+1. the anti-aliasing pass only copies the jittered scene colour through (and the motion
+   vectors are drawn then, at the reduced size);
+2. at each eye's last pass, the same draw is first run once more into a texture of the
+   reduced size, with a reduced viewport and scissor and a copy of its pixel shader
+   constants whose output rectangle (rows 34/35) is the reduced rectangle, so it grades
+   without scaling; the constants are checked once against the viewport and the mode stops
+   if they do not match;
+3. DLSS (display-referred input, one feature per eye, output sub-rectangles) scales that
+   into the eye's rectangle of an `R10G10B10A2_UNORM` texture, which is copied into the eye
+   texture; the game's scaling draw is skipped.
+
+The percentage is the game's own console variable, for example in `[stereo_cvars]`:
+`r.ScreenPercentage = 50` (Performance), `58` (Balanced), `67` (Quality). With the driver
+override described below forcing DLAA as the "performance mode", explicit input and output
+sizes still upscale (checked: a 1536x1632 input gives a full 3072x3264 eye image).
+
+Measured at eyes 3072x3264 (first room, third person, still camera; `captures/dlss/r8`,
+`r9`; preset L):
+
+| Path | Rendered per eye | Frame time | DLSS GPU per eye |
+|---|---|---|---|
+| game, 100 % | 3072x3264 | 10.16 ms | - |
+| game, 67 % (its own upscale) | 2059x2187 | 6.84 to 7.18 ms | - |
+| game, 50 % (its own upscale) | 1536x1632 | 5.35 ms | - |
+| DLSS upscale, 67 % | 2059x2187 | 14.23 to 14.35 ms | 3.83 ms |
+| DLSS upscale, 58 % | 1782x1893 | 11.80 to 11.93 ms | 3.14 ms |
+| DLSS upscale, 50 % | 1536x1632 | 9.81 to 9.92 ms | 2.50 ms |
+
+Picture (`r8/sheet_up_a.png`, `sheet_up_c.png`, `r9/sheet_up_all.png`,
+`r9/sheet_up50_R.png`): DLSS from 50 % is close to the native 100 % image in texture detail
+and edges and far sharper than the game's own 50 % (blurred, stair-stepped grille edges);
+Cloud's dithered hair is grainier at 50 % than at 58 or 67 %; both eyes correct (the right
+eye was black before the scissor fix). With preset L this is a quality gain at equal cost,
+not a speed gain: DLSS from 50 % costs as much as rendering 100 % with the game's
+anti-aliasing. With K (about 0.6 times the cost, inferred from NVIDIA's table) 50 % would
+come to roughly 8 ms; not measured.
+
+Not done in upscale mode: a texture mip bias for the lower render size (DLSS guide 3.5;
+`r.MipMapLODBias -1` in `[stereo_cvars]` is the candidate, untested), a check of the game's
+dynamic resolution (it never changed the view size in any run, also not at 26 ms frames),
+and the history reset on camera cuts.
+
 ## The NVIDIA App's DLSS override decides the model
 
 NGX applies the driver profile of the game (`ff7remake_.exe`, profile "FINAL FANTASY VII
