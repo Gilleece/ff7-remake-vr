@@ -2,6 +2,9 @@
 
 #include "fixed_host.h"
 #include "bloom_fix.h"
+#if FF7VR_ENGINE_WITH_DLSS
+#include "dlss.h"
+#endif
 #include "fixes.h"
 #include "gpu_trace.h"
 #include "player.h"
@@ -349,6 +352,9 @@ void frame_end_execute(void*, rhi::Command* self) {
     try {
         gpu_trace::frame_boundary(c->eyes.texture);
         bloom_fix::frame(c->eyes.texture);
+#if FF7VR_ENGINE_WITH_DLSS
+        dlss::output_rects(c->eyes.eyes);  // DLSS upscaling wrote the whole half: the runtime and the mirror get it
+#endif
         if (StereoHost* h = g_host.load()) h->eye_texture_ready(c->eyes);
         if (c->mirror != mirror::Mode::Off)
             mirror::draw(c->eyes.texture, c->back_buffer, c->eyes.eyes[0], c->eyes.eyes[1], c->mirror);
