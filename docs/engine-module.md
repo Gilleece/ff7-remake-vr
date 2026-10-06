@@ -883,12 +883,23 @@ Cost (frame time, frame cap lifted, no pacing, ssr per eye off / on in turns, 5 
 At 2 x 3600x3600 the same views give -0.47, -0.67, -0.55 and -1.15 ms (table under
 "Measured").
 
-An observation from the colour-copy control that is not explained yet: filling the half the
-right view's copy writes did not show in the right eye at all (it did for the left view in the
-left eye). Either the right view's reflections read the previous colour from somewhere else, or
-they find no hits in these scenes. Square Enix's per-view passes have ignored the second
-view's offset three times before (bloom, ambient occlusion, UI); the right eye's reflections
-deserve a look on a shiny floor with `gpu trace`.
+**The right eye has no screen-space reflections at all (a fault of the game's pass in
+stereo, independent of this change).** The colour-copy control above showed nothing in the
+right eye, so both runs were read back with per-eye reflections off (`gpu trace <prefix> dump
+fullscreen scale 4`, 2 x 3072x3264, start of the save and the street; run
+`captures/perf/20261006-012224-ssrcheck-3072x3264`, sheets `tr_ssr_sheet.png`,
+`trs_ssr_sheet.png`). After the left view's run (event 2656) the target holds reflections in
+both halves (left half: mean colour 1.73 of 255, alpha 8.7; right half 7.14 / 24.8). After the
+right view's run (2658) the right half is exactly 0 in every channel and the left half holds a
+shifted image of the right view's reflections (1.93 / 9.9); the right eye's composite (2659,
+viewport at x 3072) reads the right half, so it adds nothing. The same in the street (3471 /
+3473: right half 0.0 after the right run). So the right view's reflection pass works at the
+origin of the target instead of at its view rect, the fourth pass of Square Enix's with this
+flaw after bloom, ambient occlusion and the UI composite. Visible as reflections (wet floors,
+metal, glass) present in the left eye and missing in the right. Not fixed here. A fix would
+make the right run write its own half (as the occlusion fix shifts its input); the scissor of
+`ssr_per_eye` keeps the right run to the right half and would then still be correct, but has
+to be re-checked with `ssr poison` together with any such fix.
 
 ## Render scale and dynamic resolution
 
