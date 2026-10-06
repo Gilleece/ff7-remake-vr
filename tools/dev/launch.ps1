@@ -84,6 +84,11 @@ foreach ($raw in $Set) {
             Write-Step "Bad -Set item '$($item.Trim())': expected section.key=value (items separated by ';')."
             exit 2
         }
+        # An array passed through 'powershell -File' arrives joined with commas, also after a ';' list.
+        if ($item -match ',\s*[^=,;\s]+\.[^=,;\s]+\s*=') {
+            Write-Step "Bad -Set item '$($item.Trim())': it holds several section.key=value items joined with ','; separate them with ';'."
+            exit 2
+        }
     }
 }
 

@@ -308,7 +308,7 @@ the same keys earlier in it; the merged ini is kept in `captures\runs\<time>-ini
 example `-Set "xr.backend=null;xr.eye_width=3264;xr.eye_height=3072;dlss.enabled=1"`. Keys
 of sections with dots work too (`stereo_cvars.r.BloomQuality=0`: section `stereo_cvars`,
 key `r.BloomQuality`). The script refuses, before it takes the lock or starts anything, a
-value that contains a comma but no `;` (a comma-separated list would become one key with
+value that contains a comma but no `;`, or an item holding several `section.key=value` joined with commas (an array passed through `powershell -File` arrives that way, also after a `;` list) (a comma-separated list would become one key with
 the rest glued to its value, and the run would silently use the defaults for the other keys,
 for example a real OpenXR runtime instead of the Null backend) and any item that is not
 `section.key=value`. If one value really contains commas (`foveation.radii=0.4,0.6,0.9`),
