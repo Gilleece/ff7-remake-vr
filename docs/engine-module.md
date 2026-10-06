@@ -959,8 +959,11 @@ rectangle that lies inside the buffer. Counters over 5 s with `r.BloomQuality 5`
 (`014336-scales/counters.txt`): at 100 %, 67 %, 58 % and render scale 0.9 and 0.8, bloom fix
 `applied` and occlusion fix `applied` grow by the number of stereo frames to within one (the
 counters are read one after the other: +526 at 100 %, +602 at 67 %, +601 at 58 %, +600/+601 at
-0.9 and 0.8), `missed 0`, `failed 0`. Not compared with the old build at 67 % in this run; the
-failure counts before (`applied 3354 missed 4759`) come from a run with the DLSS prototype. Right eye at 67 % with all three fixes off and on:
+0.9 and 0.8), `missed 0`, `failed 0`. The build before the change (`c1a6f44`), same spot and
+windows (`captures/render2/030051-before`): at 100 % and at render scale 0.8 both fixes applied
+on every frame (+552, +600), at 67 % on none (bloom `missed` +537, occlusion `failed` +537 in
+537 frames). The render scale path was not affected (its right view starts exactly at the
+middle and fits the buffer). Right eye at 67 % with all three fixes off and on:
 `014336-scales/sheet_sp67_R_allfix0_allfix1_L.png` (off: the orange streak and the doorway's
 copy from the left eye's bloom; on: gone).
 
