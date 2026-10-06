@@ -368,7 +368,7 @@ To narrow a problem down, change one setting at a time and start a new session:
 | first person in a battle, or third person outside one | `[first_person] battle_signal =` (empty) and `default = 0` |
 | first person at the wrong height or inside the head | `[first_person] eye = offset` (a fixed height above the character's position instead of its eyes) |
 | anything else in first person | `[first_person] enabled = 0` |
-| stutter or low frame rate | `[xr] resolution_scale = 0.8`, then `[foveation] preset = balanced` |
+| stutter or low frame rate | `[xr] resolution_scale = 0.8` |
 | the headset stays on its runtime's own view although the game runs | look in the log for `OpenXR runtime (auto)`: if it chose another runtime than the headset's, pin the right one with `[xr] runtime`. Otherwise quit the game, wait for the launcher window to finish (it closes by itself), start again; if that does not help, restart the headset's PC app (for example the Virtual Desktop Streamer) |
 | the game does not start or crashes at once | `restore.cmd`, then start the game from Steam without the mod to rule out the game itself |
 

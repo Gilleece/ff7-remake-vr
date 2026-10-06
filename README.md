@@ -78,7 +78,7 @@ package folder.
 | `[stereo] enabled` | `1` | `0` = no 3D: the whole game is shown on the virtual screen. The fallback if 3D misbehaves |
 | `[xr] runtime` | `auto` | which OpenXR runtime drives the headset. `auto` takes the first one with a headset connected (runtimes whose PC app runs first, then the PC's default); pin one with `virtualdesktop`, `steamvr`, `system` or the path of a runtime's `.json` |
 | `[xr] resolution_scale` | `1.0` | per-eye render size relative to what the headset's runtime asks for. `0.8` renders 64 % of the pixels: faster, softer |
-| `[foveation] preset` | `quality` | lower detail at the outer edges of each eye to save GPU time: `quality` (barely visible), `balanced`, `performance` (visibly blocky edges), `off` |
+| `[foveation] preset` | `performance` | lower detail at the outer edges of each eye to save GPU time: `performance` (not noticeable on a Quest 3 in play), `balanced`, `quality` (smaller saving), `off` |
 | `[foveation] eye_tracking` | `0` | `1`: the full-detail area follows your eyes on a headset with eye tracking (untested with a real one) |
 | `[ui] distance`, `[ui] size` | `3.0`, `2.0` | distance and height in metres of the HUD/menu panel (Page Down/Up change the distance during play, until the game is restarted). `size = 1.57` lines the markers over enemies up with the enemies; `2.0` is easier to read |
 | `[ui] follow_head` | `0` | `1` = the panel follows your head |
@@ -125,7 +125,7 @@ down, change one setting at a time:
 - anything in 3D: `[stereo] enabled = 0` (if the virtual screen works, 3D is at fault)
 - HUD or menus missing or cut off: `[ui] layer = 0`
 - blocky edges or odd shading: `[foveation] enabled = 0`
-- stutter: `[xr] resolution_scale = 0.8`, then `[foveation] preset = balanced`
+- stutter: `[xr] resolution_scale = 0.8`
 
 The full table is in the guide.
 
