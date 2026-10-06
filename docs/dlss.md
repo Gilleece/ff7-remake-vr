@@ -453,10 +453,25 @@ right at a change (22 s and about 50 s after the last one), so the trigger is no
 down further; with two failures, a single clean 10-minute run is evidence (at the failing
 runs' rate a clean 10 minutes would have a chance of about 4 %), not proof.
 
+Later the same morning the picture changed. During the release check of the `-dlss`
+package (06/10 05:16:16, `input_scale` 0.58, `[foveation] enabled = 0`, dynamic resolution
+off, a steady size, no captures, no recreations) the GPU hung about two minutes after DLSS
+started (`nvlddmkm` 153, `DXGI_ERROR_DEVICE_HUNG`; `captures/release-check/morning/dlss-fault`).
+Three minutes after that reset, a run of the standard package without DLSS faulted too
+(05:19:00, 14 s into walking; `captures/soak/morning-attempt1`), and a 20-minute soak of the
+same standard package then ran clean. So "foveated rendering off is enough" no longer
+holds, and the standard package is not clear of suspicion either: the PC's System log holds
+about 35 such events since April, before this project, and MSI Afterburner applies a
+custom voltage curve and a memory offset at start-up. A control run without the mod on the
+same route, and a run at the card's stock settings, are the next tests; nothing on the
+PC was changed.
+
 ### Conclusion so far
 
-The faults are not caused by DLSS alone: the same kind appeared once without DLSS, and
-with DLSS the runs fail only while foveated rendering is on. Foveated rendering uses
+The faults are not caused by DLSS alone: the same kind appeared without DLSS (once on
+05/10 and once on 06/10), and with DLSS they came both with and without foveated
+rendering, so the paragraph below describes the state of knowledge before the 05:16
+hang; its advice (foveated rendering off) is not sufficient. Foveated rendering uses
 NVIDIA's variable rate shading through NVAPI (`src/render/src/foveation.cpp`). It is not
 simply "variable rate shading plus DLSS": the first DLSS runs (about 100 captures with
 DLSS and foveated rendering both on, `r.ScreenPercentage` changes, few feature
