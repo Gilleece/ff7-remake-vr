@@ -81,11 +81,17 @@ Frame times are the intervals between consecutive calls of
 `IDXGISwapChain::Present` on the game's swap chain, measured by the frame
 timer in `src/dev/frame_timer.cpp` inside the game:
 
-- It is an inline hook on the body of `Present` in `dxgi.dll`, installed once
-  the game window exists. UEVR (and the Steam overlay) hook Present by
-  replacing the vtable slot; their hook runs first and calls the original
-  function, which lands in ours. Both work regardless of which is installed
-  first, and nothing in the measurement depends on hook order.
+- It is installed once the game window exists, as an inline hook on the body
+  of `Present` in `dxgi.dll` when it can. UEVR (and the Steam overlay) hook
+  Present by replacing the vtable slot; their hook runs first and calls the
+  original function, which lands in ours, whichever is installed first.
+- When the body is already hooked through the same hook library (the render
+  module hooks it too, and the library hooks a function only once), the timer
+  replaces the vtable slot instead and logs `Present's body is already hooked
+  through the same hook library; using the vtable slot`. It then runs before
+  the render module's hook and calls into it. Either way it sees each Present
+  once, and the frame interval does not depend on hook order; `present_ms`
+  then also includes the render module's work inside Present.
 - Per frame it takes two `QueryPerformanceCounter` readings and one store into
   a preallocated array: no allocation, lock or I/O on the render thread.
 - It records the time at entry to Present (the frame interval) and the time
@@ -248,9 +254,9 @@ ini keys that switch the mode on in `Set`, for example:
 ```
 
 `Set` keys are appended to `tools/bench/bench.ini`, so the frame timer stays
-on. The render module hooks Present through the swap chain's vtable slot, so
-it chains with the frame timer's inline hook on the function body; both see
-every Present.
+on. The render module and the frame timer both hook Present; whichever comes
+second falls back or chains (see "Frame times: Present"), and both see every
+Present.
 
 The mod's stereo mode: give the configuration `Stereo = $true` (or start it
 with `stereo.start_in_stereo=0`). `launch.ps1` reaches gameplay with stereo
