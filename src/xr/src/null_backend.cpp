@@ -6,9 +6,16 @@
 #include "backend_base.h"
 
 #include <algorithm>
+#include <cctype>
+#include <charconv>
 #include <chrono>
 #include <cmath>
+#include <format>
+#include <limits>
+#include <mutex>
+#include <string>
 #include <thread>
+#include <vector>
 
 namespace ff7vr::xr {
 namespace {
@@ -165,6 +172,12 @@ public:
             SetHiddenAreaMesh(Eye::Right, {});
         }
         nextDeadline_ = 0;
+        {
+            std::lock_guard sl(simMutex_);
+            sim_ = Sim{};
+        }
+        origin_ = Pose{};
+        originChange_ = false;
         initialized_ = true;
         state_ = SessionState::Focused;
         log_.Info("null backend: {}x{} per eye, {} Hz, IPD {:.1f} mm, swapchain {}, motion {}", opt_.eyeWidth, opt_.eyeHeight,
@@ -196,18 +209,65 @@ public:
             if (wait > 0) SleepPrecise(wait);
             nextDeadline_ += period;
         }
-        Pose rawHead;
         {
             std::lock_guard lk(frameMutex_);
             FrameRecord& r = NewFrameLocked();
             r.displayTime = QpcNowNs() + period;
             r.period = period;
             r.shouldRender = true;
-            r.orientationValid = r.positionValid = true;
-            rawHead = HeadPose(r.id);
+            Sim sim;
+            {
+                std::lock_guard sl(simMutex_);
+                sim = sim_;
+                sim_.recenterEventRequested = false;
+                if (sim_.loseOrientation) --sim_.loseOrientation;
+                if (sim_.losePosition) --sim_.losePosition;
+            }
+            // The emulated tracker: scripted motion, then the head pose set with `head`.
+            const Pose tracker = PoseMultiply(sim.head, HeadPose(r.id));
+            if (sim.recenterEventRequested) {
+                // Like a runtime's own recenter: the current leveled head becomes the new
+                // LOCAL origin, from a change time a few frames ahead (midway between two
+                // display times, as the OpenXR specification recommends).
+                Pose level;
+                level.orientation = QuatFromAxisAngle(Vec3{0, 1, 0}, QuatYaw(tracker.orientation));
+                level.position = tracker.position;
+                originChange_ = true;
+                newOrigin_ = level;
+                originChangeTime_ = r.displayTime + int64_t(sim.recenterDelayFrames) * period - period / 2;
+                const Pose inPrevious = PoseMultiply(PoseInverse(origin_), level);
+                NoteLocalSpaceChange(originChangeTime_, sim.recenterPoseValid, sim.recenterPoseValid ? inPrevious : Pose{}, QpcNowNs());
+                log_.Info("null backend: runtime recenter simulated at frame {}: LOCAL space change event, change time in {} frames, pose of the "
+                          "new origin {} (yaw {:.1f} deg, position ({:.3f}, {:.3f}, {:.3f}) m in the old space)",
+                          r.id, sim.recenterDelayFrames, sim.recenterPoseValid ? "given" : "not given",
+                          QuatYaw(inPrevious.orientation) * kRadToDeg, inPrevious.position.x, inPrevious.position.y, inPrevious.position.z);
+            }
+            if (originChange_ && r.displayTime >= originChangeTime_) {
+                origin_ = newOrigin_;
+                originChange_ = false;
+            }
+            const Pose rawHead = PoseMultiply(PoseInverse(origin_), tracker);
             ComputeViews(rawHead, r.raw);
             r.rawHead = rawHead;
-            r.recenter = UpdateRecenter(rawHead, true);
+            bool o = true, p = true;
+            const float nan = std::numeric_limits<float>::quiet_NaN();
+            if (sim.loseOrientation) {
+                // Undefined values, as a runtime may return them with the flags cleared.
+                o = p = false;
+                for (Pose* q : {&r.rawHead, &r.raw[0].pose, &r.raw[1].pose}) *q = Pose{Quat{nan, nan, nan, nan}, Vec3{nan, nan, nan}};
+            } else if (sim.losePosition) {
+                p = false;
+                for (Pose* q : {&r.rawHead, &r.raw[0].pose, &r.raw[1].pose}) q->position = Vec3{nan, nan, nan};
+            }
+            ApplySpaceChange(r.displayTime, r.id, r.rawHead, o && p);
+            SanitizePoses(r, o, p, o, p);
+            r.recenter = UpdateRecenter(r.rawHead, r.orientationValid);
+            lastRawHead_ = r.rawHead;
+            lastTracker_ = tracker;
+            lastRecenter_ = r.recenter;
+            lastO_ = r.orientationValid;
+            lastP_ = r.positionValid;
+            lastId_ = r.id;
             FillFrameInfo(r, info);
         }
         CountStat(&FrameStats::framesWaited);
@@ -276,6 +336,8 @@ public:
                     // Alternate-eye mode: an eye that is not updated shows its previous image.
                     if (img.hasImage) projection[e] = LayerImage{img.texture.Get(), format_, img.w, img.h};
                 }
+                // Same rule as the OpenXR backend: no projection layer without real poses.
+                if (!rec.posesUsable && !(desc.eyes[0].viewOverride && desc.eyes[1].viewOverride)) projection[0] = projection[1] = LayerImage{};
             }
             for (uint32_t i = 0; i < desc.quadCount; ++i) {
                 const QuadLayer& q = desc.quads[i];
@@ -360,7 +422,123 @@ public:
         return Result::Ok;
     }
 
+    // Commands (any thread):
+    //   status                                   emulated tracker, LOCAL origin, head, recenter, flags
+    //   head <yaw deg> [pitch deg] [x y z m]      the emulated head pose (on top of [xr] null_motion)
+    //   recenter-event [nopose] [delay <frames>]  the runtime's own recenter: LOCAL moves to the current
+    //                                            leveled head; event with or without poseInPreviousSpace
+    //   lose orientation|position <frames>       the next frames report that part invalid (values NaN)
+    std::string Simulate(std::string_view command) override {
+        std::vector<std::string> a;
+        {
+            std::string cur;
+            for (char c : command) {
+                if (c == ' ' || c == '\t') {
+                    if (!cur.empty()) a.push_back(std::move(cur));
+                    cur.clear();
+                } else {
+                    cur += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                }
+            }
+            if (!cur.empty()) a.push_back(std::move(cur));
+        }
+        auto num = [](const std::string& s, double* out) {
+            const auto [p, ec] = std::from_chars(s.data(), s.data() + s.size(), *out);
+            return ec == std::errc() && p == s.data() + s.size();
+        };
+        const char* usage =
+            "err usage: xr-sim status | head <yaw deg> [pitch deg] [x y z m] | recenter-event [nopose] [delay <frames>] | lose "
+            "orientation|position <frames>";
+        if (!initialized_) return "err null backend not initialised";
+        if (a.empty() || a[0] == "status") {
+            std::lock_guard lk(frameMutex_);
+            std::lock_guard sl(simMutex_);
+            auto text = [](const Pose& p) {
+                return std::format("yaw {:.1f} pitch {:.1f} pos ({:.3f} {:.3f} {:.3f})", QuatYaw(p.orientation) * kRadToDeg,
+                                   std::asin(std::clamp(2.0f * (p.orientation.w * p.orientation.x - p.orientation.y * p.orientation.z), -1.0f, 1.0f)) *
+                                       kRadToDeg,
+                                   p.position.x, p.position.y, p.position.z);
+            };
+            const Pose seen = ApplyRecenter(lastRecenter_, lastRawHead_);
+            return std::format("ok frame {} tracker head {} | LOCAL origin {}{} | head in LOCAL {} | recenter {} | head seen by the game {} | "
+                               "orientation {} position {} | lose orientation {} position {} frames",
+                               lastId_, text(lastTracker_), text(origin_), originChange_ ? " (change pending)" : "", text(lastRawHead_),
+                               text(lastRecenter_), text(seen), lastO_ ? "valid" : "INVALID", lastP_ ? "valid" : "INVALID", sim_.loseOrientation,
+                               sim_.losePosition);
+        }
+        if (a[0] == "head") {
+            double v[5]{};
+            const size_t n = a.size() - 1;
+            if (!(n == 1 || n == 2 || n == 4 || n == 5)) return usage;
+            for (size_t i = 0; i < n; ++i)
+                if (!num(a[i + 1], &v[i])) return usage;
+            const double yaw = v[0], pitch = (n == 2 || n == 5) ? v[1] : 0.0;
+            const double* xyz = n == 4 ? &v[1] : n == 5 ? &v[2] : nullptr;
+            Pose p;
+            p.orientation = QuatMultiply(QuatFromAxisAngle(Vec3{0, 1, 0}, float(yaw) * kDegToRad), QuatFromAxisAngle(Vec3{1, 0, 0}, float(pitch) * kDegToRad));
+            if (xyz) p.position = Vec3{float(xyz[0]), float(xyz[1]), float(xyz[2])};
+            {
+                std::lock_guard sl(simMutex_);
+                sim_.head = p;
+            }
+            log_.Info("null backend: emulated head yaw {:.1f} deg, pitch {:.1f} deg, position ({:.3f}, {:.3f}, {:.3f}) m", yaw, pitch, p.position.x,
+                      p.position.y, p.position.z);
+            return std::format("ok head yaw {:.1f} pitch {:.1f} position {:.3f} {:.3f} {:.3f}", yaw, pitch, p.position.x, p.position.y, p.position.z);
+        }
+        if (a[0] == "recenter-event") {
+            bool poseValid = true;
+            double delay = 3;
+            for (size_t i = 1; i < a.size(); ++i) {
+                if (a[i] == "nopose") {
+                    poseValid = false;
+                } else if (a[i] == "delay" && i + 1 < a.size() && num(a[i + 1], &delay) && delay >= 0 && delay <= 1000) {
+                    ++i;
+                } else {
+                    return usage;
+                }
+            }
+            std::lock_guard sl(simMutex_);
+            sim_.recenterEventRequested = true;
+            sim_.recenterPoseValid = poseValid;
+            sim_.recenterDelayFrames = static_cast<uint32_t>(delay);
+            return std::format("ok runtime recenter with the next frame (pose {}, change time {} frames ahead)", poseValid ? "given" : "not given",
+                               sim_.recenterDelayFrames);
+        }
+        if (a[0] == "lose" && a.size() == 3) {
+            double frames = 0;
+            if (!num(a[2], &frames) || frames < 0 || frames > 1e6) return usage;
+            std::lock_guard sl(simMutex_);
+            if (a[1] == "orientation")
+                sim_.loseOrientation = static_cast<uint32_t>(frames);
+            else if (a[1] == "position")
+                sim_.losePosition = static_cast<uint32_t>(frames);
+            else
+                return usage;
+            log_.Info("null backend: the next {} frames report the {} invalid", static_cast<uint32_t>(frames), a[1]);
+            return std::format("ok the next {} frames report the {} invalid", static_cast<uint32_t>(frames), a[1]);
+        }
+        return usage;
+    }
+
 private:
+    struct Sim {
+        Pose head{};
+        bool recenterEventRequested = false;
+        bool recenterPoseValid = true;
+        uint32_t recenterDelayFrames = 3;
+        uint32_t loseOrientation = 0, losePosition = 0;
+    };
+    std::mutex simMutex_;
+    Sim sim_{};  // under simMutex_
+    // GT (read by `status` under frameMutex_): the emulated LOCAL origin in tracker space.
+    Pose origin_{};
+    bool originChange_ = false;
+    Pose newOrigin_{};
+    int64_t originChangeTime_ = 0;
+    Pose lastRawHead_{}, lastTracker_{}, lastRecenter_{};
+    bool lastO_ = true, lastP_ = true;
+    uint64_t lastId_ = 0;
+
     struct EyeImage {
         ComPtr<ID3D11Texture2D> texture;
         bool hasImage = false;

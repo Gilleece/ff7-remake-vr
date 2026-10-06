@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <thread>
 
@@ -646,9 +647,17 @@ void OpenXrBackend::PollEvents() {
                 state_ = SessionState::Lost;
                 break;
             case XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING: {
+                // The headset's own recenter (Meta button held, SteamVR's reset view, ...).
+                // Only LOCAL matters here: the eye and world-locked layers use LOCAL, head-locked
+                // layers VIEW (which a recenter does not move); STAGE is not used.
                 const auto& e = reinterpret_cast<const XrEventDataReferenceSpaceChangePending&>(ev);
-                log_.Info("runtime reference space change pending (space type {}, the runtime recentred)",
-                          static_cast<int>(e.referenceSpaceType));
+                if (e.referenceSpaceType == XR_REFERENCE_SPACE_TYPE_LOCAL) {
+                    NoteLocalSpaceChange(e.changeTime, e.poseValid != XR_FALSE, ToPose(e.poseInPreviousSpace), QpcNowNs());
+                    log_.Info("runtime reference space change pending: LOCAL, change time {}, pose of the new origin {}", e.changeTime,
+                              e.poseValid ? "given" : "not given");
+                } else {
+                    log_.Debug("runtime reference space change pending for space type {} (not used)", static_cast<int>(e.referenceSpaceType));
+                }
                 break;
             }
             case XR_TYPE_EVENT_DATA_DISPLAY_REFRESH_RATE_CHANGED_FB: {
@@ -789,9 +798,10 @@ Result OpenXrBackend::WaitFrame(FrameInfo& info) {
     LocateViews(fs.predictedDisplayTime, raw, &ov, &pv);
     XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
     Pose rawHead;
-    bool headValid = false;
+    bool headO = false, headP = false;
     if (XR_SUCCEEDED(xrLocateSpace(viewSpace_, localSpace_, fs.predictedDisplayTime, &head))) {
-        headValid = (head.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) && (head.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT);
+        headO = (head.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0;
+        headP = (head.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0;
         rawHead = ToPose(head.pose);
     }
     {
@@ -800,12 +810,13 @@ Result OpenXrBackend::WaitFrame(FrameInfo& info) {
         r.displayTime = fs.predictedDisplayTime;
         r.period = fs.predictedDisplayPeriod;
         r.shouldRender = fs.shouldRender != XR_FALSE;
-        r.orientationValid = ov;
-        r.positionValid = pv;
         r.raw[0] = raw[0];
         r.raw[1] = raw[1];
         r.rawHead = rawHead;
-        r.recenter = UpdateRecenter(rawHead, headValid);
+        // Located poses for this display time are already in the new LOCAL space once it reaches changeTime.
+        ApplySpaceChange(fs.predictedDisplayTime, r.id, rawHead, headO && headP);
+        SanitizePoses(r, ov, pv, headO, headP);
+        r.recenter = UpdateRecenter(r.rawHead, r.orientationValid);
         FillFrameInfo(r, info);
     }
     {
@@ -881,7 +892,13 @@ Result OpenXrBackend::RelocateViews(uint64_t frameId, View outViews[2]) {
     std::lock_guard fl(frameMutex_);
     FrameRecord* r = FindFrameLocked(frameId);
     if (!r) return Result::CallOrder;
-    if (ov) {
+    // Late update only with fully tracked views; otherwise the filtered views from WaitFrame stay.
+    bool finite = true;
+    for (int e = 0; e < 2; ++e)
+        for (float v : {raw[e].pose.orientation.x, raw[e].pose.orientation.y, raw[e].pose.orientation.z, raw[e].pose.orientation.w,
+                        raw[e].pose.position.x, raw[e].pose.position.y, raw[e].pose.position.z})
+            finite = finite && std::isfinite(v);
+    if (ov && pv && finite && r->orientationValid && r->positionValid) {
         r->raw[0] = raw[0];
         r->raw[1] = raw[1];
         r->orientationValid = ov;
@@ -1073,8 +1090,11 @@ Result OpenXrBackend::SubmitFrame(uint64_t frameId, const SubmitDesc& desc) {
                 pv[e].subImage.imageArrayIndex = 0;
                 captureImages[e] = sc.Last();
             }
-            // A projection layer needs valid tracking for its poses (or poses given by the host).
-            const bool posesKnown = rec.orientationValid || (desc.eyes[0].viewOverride && desc.eyes[1].viewOverride);
+            // A projection layer needs real poses: tracked, 3DoF or held ones from the pose
+            // filter (the image then stays where it was rendered), or poses given by the host
+            // (which come from the same filtered views). Not the neutral stand-ins used before
+            // any orientation was seen.
+            const bool posesKnown = rec.posesUsable || (desc.eyes[0].viewOverride && desc.eyes[1].viewOverride);
             if (eyesOk && posesKnown) {
                 projection.space = localSpace_;
                 projection.viewCount = 2;

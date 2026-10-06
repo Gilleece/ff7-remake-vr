@@ -61,7 +61,8 @@ protected:
         bool shouldRender = false;
         bool begun = false;
         bool ended = false;
-        bool orientationValid = false, positionValid = false;
+        bool orientationValid = false, positionValid = false;  // after SanitizePoses
+        bool posesUsable = false;  // raw/rawHead hold real or held poses (false: neutral stand-ins, nothing seen yet)
         View raw[2]{};     // views in the runtime's LOCAL space (what goes into the layer)
         Pose rawHead{};    // head pose in LOCAL space
         Pose recenter{};   // recenter transform in effect for this frame
@@ -84,6 +85,20 @@ protected:
 
     // GT: consume a pending recenter request using the raw head pose; returns the active recenter pose.
     Pose UpdateRecenter(const Pose& rawHead, bool headValid);
+
+    // GT: makes r.raw / r.rawHead usable whatever the runtime reported (see POSE
+    // VALIDITY in xr.h) and sets r.orientationValid / positionValid / posesUsable.
+    // The flags are the runtime's: views (viewStateFlags) and head (locationFlags).
+    void SanitizePoses(FrameRecord& r, bool viewOrientation, bool viewPosition, bool headOrientation, bool headPosition);
+
+    // GT: the runtime announced a change of its LOCAL space (the headset's own
+    // recenter). Applied by ApplySpaceChange from the first frame whose display
+    // time reaches changeTime. A newer event replaces one not yet applied.
+    void NoteLocalSpaceChange(int64_t changeTime, bool poseValid, const Pose& poseInPreviousSpace, int64_t now);
+    // GT, before UpdateRecenter: applies a due LOCAL space change (clears this
+    // library's recenter) and logs the old and new state. rawHead: this frame's head
+    // in the new space. Returns true when it applied one.
+    bool ApplySpaceChange(int64_t displayTime, uint64_t frameId, const Pose& rawHead, bool headValid);
     static View ApplyRecenter(const Pose& recenter, const View& raw);
     static Pose ApplyRecenter(const Pose& recenter, const Pose& raw);
     static View RemoveRecenter(const Pose& recenter, const View& v);
@@ -160,6 +175,30 @@ protected:
 
     std::atomic<int> recenterRequest_{0};
     Pose recenter_{};  // GT only
+
+    // Pose filter state (GT only), see SanitizePoses.
+    struct PoseTrack {
+        bool haveUsed = false;   // a frame with a valid orientation was seen
+        View lastRaw[2]{};       // the last views with a valid orientation (after the filter)
+        Pose lastHead{};
+        bool haveFull = false;   // a fully tracked frame was seen
+        Vec3 fullHeadPosition{};  // head position of the last fully tracked frame
+        Pose eyeInHead[2]{};     // each eye relative to the head, from the last fully tracked frame
+        int state = 0;           // 0 tracked, 1 orientation only (3DoF), 2 held, -1 not seen yet
+        uint64_t stateSince = 0;  // frame id the current state began
+        uint64_t transitions = 0;
+    };
+    PoseTrack track_{};
+
+    struct SpaceChange {
+        bool pending = false;
+        int64_t changeTime = 0;
+        bool poseValid = false;
+        Pose pose{};
+        int64_t receivedNs = 0;  // QPC time the event arrived
+        uint64_t count = 0;      // events received this session
+    };
+    SpaceChange spaceChange_{};  // GT only
 
     mutable std::mutex statsMutex_;
     FrameStats stats_;

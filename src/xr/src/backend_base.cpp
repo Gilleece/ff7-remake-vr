@@ -1,6 +1,9 @@
 #include "backend_base.h"
 
 #include <algorithm>
+#include <cmath>
+#include <format>
+#include <string>
 
 namespace ff7vr::xr {
 
@@ -156,6 +159,9 @@ Result BackendBase::InitCommon(const InitDesc& desc) {
     }
     recenter_ = Pose{};
     recenterRequest_ = 0;
+    track_ = PoseTrack{};
+    track_.state = -1;
+    spaceChange_ = SpaceChange{};
     {
         std::lock_guard lk(statsMutex_);
         stats_ = FrameStats{};
@@ -214,6 +220,149 @@ Pose BackendBase::UpdateRecenter(const Pose& rawHead, bool headValid) {
         }
     }
     return recenter_;
+}
+
+// ---- pose validity ----
+
+namespace {
+
+bool Finite(const Quat& q) {
+    if (!std::isfinite(q.x) || !std::isfinite(q.y) || !std::isfinite(q.z) || !std::isfinite(q.w)) return false;
+    const float n = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w;
+    return n > 0.81f && n < 1.21f;  // a unit quaternion (runtimes may report zeros when invalid)
+}
+bool Finite(const Vec3& v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z) && std::fabs(v.x) < 1e4f && std::fabs(v.y) < 1e4f && std::fabs(v.z) < 1e4f; }
+bool Finite(const Fov& f) {
+    return std::isfinite(f.angleLeft) && std::isfinite(f.angleRight) && std::isfinite(f.angleUp) && std::isfinite(f.angleDown) &&
+           f.angleRight > f.angleLeft && f.angleUp > f.angleDown;
+}
+std::string PoseText(const Pose& p) {
+    return std::format("yaw {:.1f} deg, position ({:.3f}, {:.3f}, {:.3f}) m", QuatYaw(p.orientation) * kRadToDeg, p.position.x, p.position.y,
+                       p.position.z);
+}
+const char* TrackStateName(int s) {
+    switch (s) {
+        case 0: return "tracked";
+        case 1: return "orientation only (3DoF): position held";
+        case 2: return "not tracked: last views held";
+        default: return "not seen yet";
+    }
+}
+
+}  // namespace
+
+void BackendBase::SanitizePoses(FrameRecord& r, bool viewO, bool viewP, bool headO, bool headP) {
+    PoseTrack& t = track_;
+    // The orientation counts only if the views and the head agree it is valid and every
+    // value is a number; the position only on top of a valid orientation.
+    bool o = viewO && headO && Finite(r.rawHead.orientation);
+    for (int e = 0; e < 2 && o; ++e) o = Finite(r.raw[e].pose.orientation);
+    bool p = o && viewP && headP && Finite(r.rawHead.position);
+    for (int e = 0; e < 2 && p; ++e) p = Finite(r.raw[e].pose.position);
+
+    // Field of view: from the runtime when it is sane, else the last one, else 45 degrees each way.
+    for (int e = 0; e < 2; ++e) {
+        if (Finite(r.raw[e].fov)) continue;
+        r.raw[e].fov = t.haveUsed ? t.lastRaw[e].fov : Fov{-0.785f, 0.785f, 0.785f, -0.785f};
+    }
+
+    if (o && p) {
+        t.haveFull = true;
+        t.fullHeadPosition = r.rawHead.position;
+        const Pose inv = PoseInverse(r.rawHead);
+        for (int e = 0; e < 2; ++e) t.eyeInHead[e] = PoseMultiply(inv, r.raw[e].pose);
+    } else if (o) {
+        // 3DoF: the runtime's orientation at the last fully tracked head position.
+        r.rawHead.position = t.haveFull ? t.fullHeadPosition : Vec3{};
+        for (int e = 0; e < 2; ++e) {
+            Vec3 offset = t.haveFull ? t.eyeInHead[e].position : Vec3{e == 0 ? -0.032f : 0.032f, 0.0f, 0.0f};
+            const Vec3 d = QuatRotate(r.rawHead.orientation, offset);
+            r.raw[e].pose.position = Vec3{r.rawHead.position.x + d.x, r.rawHead.position.y + d.y, r.rawHead.position.z + d.z};
+        }
+    } else if (t.haveUsed) {
+        r.raw[0] = t.lastRaw[0];
+        r.raw[1] = t.lastRaw[1];
+        r.rawHead = t.lastHead;
+    } else {
+        // Nothing seen yet: a neutral head at the origin looking ahead.
+        r.rawHead = Pose{};
+        for (int e = 0; e < 2; ++e) {
+            r.raw[e].pose = Pose{};
+            r.raw[e].pose.position.x = e == 0 ? -0.032f : 0.032f;
+        }
+    }
+    if (o) {
+        t.haveUsed = true;
+        t.lastRaw[0] = r.raw[0];
+        t.lastRaw[1] = r.raw[1];
+        t.lastHead = r.rawHead;
+    }
+    r.orientationValid = o;
+    r.positionValid = p;
+    r.posesUsable = o || t.haveUsed;
+
+    const int state = o && p ? 0 : o ? 1 : 2;
+    if (state != t.state) {
+        if (t.state != -1) ++t.transitions;
+        const uint64_t frames = r.id - t.stateSince;
+        if (t.state != -1 && (t.transitions <= 32 || (t.transitions & (t.transitions - 1)) == 0)) {
+            const std::string detail = state == 1 ? std::format(" at ({:.3f}, {:.3f}, {:.3f}) m", r.rawHead.position.x, r.rawHead.position.y,
+                                                                r.rawHead.position.z)
+                                       : state == 2 ? (t.haveUsed ? std::string(" (") + PoseText(r.rawHead) + ")" : std::string(" (none yet: neutral pose)"))
+                                                    : std::string();
+            const auto level = state == 0 ? LogLevel::Info : LogLevel::Warn;
+            log_.Write(level, std::format("tracking: {}{} from frame {} (after {} frames {}; runtime flags views o{} p{} head o{} p{}; change {})",
+                                          TrackStateName(state), detail, r.id, frames, TrackStateName(t.state), viewO ? 1 : 0, viewP ? 1 : 0,
+                                          headO ? 1 : 0, headP ? 1 : 0, t.transitions));
+        } else if (t.state == -1 && state != 0) {
+            log_.Warn("tracking: first frame {}: {}", r.id, TrackStateName(state));
+        }
+        t.state = state;
+        t.stateSince = r.id;
+    }
+}
+
+// ---- runtime recenter (LOCAL space change) ----
+
+void BackendBase::NoteLocalSpaceChange(int64_t changeTime, bool poseValid, const Pose& pose, int64_t now) {
+    const bool replaced = spaceChange_.pending;
+    spaceChange_.pending = true;
+    spaceChange_.changeTime = changeTime;
+    spaceChange_.poseValid = poseValid;
+    spaceChange_.pose = pose;
+    spaceChange_.receivedNs = now;
+    ++spaceChange_.count;
+    log_.Debug("LOCAL space change pending (change time {}, pose {}{})", changeTime, poseValid ? PoseText(pose) : std::string("unknown"),
+               replaced ? ", replaces one not applied yet" : "");
+}
+
+bool BackendBase::ApplySpaceChange(int64_t displayTime, uint64_t frameId, const Pose& rawHead, bool headValid) {
+    if (!spaceChange_.pending || displayTime < spaceChange_.changeTime) return false;
+    spaceChange_.pending = false;
+    const Pose old = recenter_;
+    // The runtime moved the LOCAL origin to the user's leveled head (OpenXR: "the
+    // current leveled head space becomes the new LOCAL space"), so the user now faces
+    // the origin's forward. This library's recenter was taken against the old origin:
+    // applied on top of the new one it would turn and shift the view away again.
+    // Recomposing it with poseInPreviousSpace would keep the old forward direction,
+    // which undoes the user's recenter; it is cleared instead. World-locked quads
+    // (screen, UI) are placed relative to it, so they come back in front of the user.
+    recenter_ = Pose{};
+    if (spaceChange_.poseValid) {
+        // Poses the filter may still repeat (held or 3DoF frames) move into the new space.
+        const Pose inv = PoseInverse(spaceChange_.pose);
+        for (int e = 0; e < 2; ++e) track_.lastRaw[e].pose = PoseMultiply(inv, track_.lastRaw[e].pose);
+        track_.lastHead = PoseMultiply(inv, track_.lastHead);
+        Pose full;
+        full.position = track_.fullHeadPosition;
+        track_.fullHeadPosition = PoseMultiply(inv, full).position;
+    }
+    const double ms = double(QpcNowNs() - spaceChange_.receivedNs) / 1e6;
+    log_.Info("runtime recentred its LOCAL space (event {} of this session, applied at frame {}, {:.0f} ms after the event; pose of the new origin in the "
+              "old space {}): recenter offset was {} -> cleared; head in the new space {}{}",
+              spaceChange_.count, frameId, ms, spaceChange_.poseValid ? PoseText(spaceChange_.pose) : std::string("not given by the runtime"),
+              PoseText(old), PoseText(rawHead), headValid ? "" : " (not tracked: held pose)");
+    return true;
 }
 
 Pose BackendBase::ApplyRecenter(const Pose& recenter, const Pose& raw) { return PoseMultiply(PoseInverse(recenter), raw); }

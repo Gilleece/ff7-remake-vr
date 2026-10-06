@@ -2,11 +2,13 @@
 
 #include "foveation.h"
 
+#include "ff7vr/core/dev_commands.h"
 #include "ff7vr/core/log.h"
 
 #include <algorithm>
 #include <charconv>
 #include <chrono>
+#include <cmath>
 #include <format>
 
 namespace ff7vr::render {
@@ -57,6 +59,10 @@ void XrController::Start(const RenderConfig& cfg) {
     uiMirror_ = cfg_.uiMirror;
     if (cfg_.stereoTest) mode_ = Mode::Stereo;
     lastStatsQpc_ = QpcNow();
+    dev_commands::add("xr-sim",
+                      "xr-sim status | head <yaw deg> [pitch deg] [x y z m] | recenter-event [nopose] [delay <frames>] | lose orientation|position "
+                      "<frames>: Null backend only, emulate the headset's head pose, its own recenter, or lost tracking",
+                      [this](std::string_view a) { return SimulateCommand(std::string(a)); });
     thread_ = std::thread([this] { ThreadMain(); });
     if (cfg_.stereoTest) stereoTest_ = std::thread([this] { StereoTestThread(); });
 }
@@ -269,6 +275,12 @@ bool XrController::WaitOne(bool fromGameThread, xr::FrameInfo* out) {
         log::info("xr: frame loop running (state {}, frame wait on the {} thread)", xr::ToString(out->state),
                   fromGameThread ? "game" : (waitOnPresent_.load() ? "present" : "xr"));
     }
+    lastOrientationValid_ = out->orientationValid;
+    lastPositionValid_ = out->positionValid;
+    if (!out->orientationValid)
+        ++untrackedFrames_;
+    else if (!out->positionValid)
+        ++threeDofFrames_;
     {
         std::lock_guard lk(eyeMutex_);
         eye_.fov[0] = out->views[0].fov;
@@ -784,6 +796,35 @@ StereoFrame XrController::BeginGameFrame() {
         }
     }
     if (!adopted && !WaitOne(true, &fi)) return f;
+    // The backend's pose filter already holds the views when the orientation is invalid
+    // and holds the position when only the position is (fi.orientationValid /
+    // positionValid say which), so the values are usable either way. This is the last
+    // guard before the engine: a value that is still not a finite unit pose (which the
+    // filter should make impossible) is replaced by the last views given to the game.
+    auto finitePose = [](const xr::Pose& p) {
+        const float v[7] = {p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w, p.position.x, p.position.y, p.position.z};
+        for (float x : v)
+            if (!std::isfinite(x)) return false;
+        const float n = p.orientation.x * p.orientation.x + p.orientation.y * p.orientation.y + p.orientation.z * p.orientation.z +
+                        p.orientation.w * p.orientation.w;
+        return n > 0.81f && n < 1.21f;
+    };
+    if (!(finitePose(fi.views[0].pose) && finitePose(fi.views[1].pose) && finitePose(fi.head))) {
+        if (PowerOfTwo(++rejectedGameFrames_))
+            log::warn("xr: frame {} has views that are not usable; the last views are given to the game ({} times)", fi.frameId, rejectedGameFrames_);
+        if (haveGameViews_) {
+            fi.views[0] = lastGameViews_[0];
+            fi.views[1] = lastGameViews_[1];
+            fi.head = lastGameHead_;
+        } else {
+            fi.head = xr::Pose{};
+            for (int e = 0; e < 2; ++e) fi.views[e].pose = xr::Pose{xr::Quat{}, xr::Vec3{e == 0 ? -0.032f : 0.032f, 0.0f, 0.0f}};
+        }
+    }
+    lastGameViews_[0] = fi.views[0];
+    lastGameViews_[1] = fi.views[1];
+    lastGameHead_ = fi.head;
+    haveGameViews_ = true;
     f.stereo = true;
     f.frameId = fi.frameId;
     f.shouldRender = fi.shouldRender;
@@ -906,6 +947,9 @@ std::string XrController::Status() {
                              ri.eyeSwapchain[0].width, ri.eyeSwapchain[0].height, xr::DxgiFormatName(ri.eyeSwapchain[0].format),
                              ri.refreshHz, ri.adapterLuid, st.framesWaited, st.framesSubmitted, st.framesSkipped, st.framesNotRendered,
                              st.framesDiscarded, st.copyPath, st.blitPath, st.quadUpdates, st.imageWaitTimeouts);
+        xrLine += std::format("; tracking {} (frames held {}, 3DoF {})",
+                              !lastOrientationValid_.load() ? "held" : (lastPositionValid_.load() ? "full" : "3dof"), untrackedFrames_.load(),
+                              threeDofFrames_.load());
     } else if (cfg_.xrEnabled) {
         xrLine = std::format("xr not running (last result {}, {} failed attempts{})", xr::ToString(lastInitResult_), failedAttempts_,
                              holdAfterExit_ ? ", waiting for xr-restart" : "");
@@ -956,6 +1000,12 @@ std::string XrController::Recenter() {
     return "ok recenter requested (applied with the next frame that has valid tracking)";
 }
 
+std::string XrController::SimulateCommand(const std::string& args) {
+    std::lock_guard cl(cmdMutex_);
+    if (!ready_.load() || !backend_) return "err xr session not running";
+    return backend_->Simulate(args);
+}
+
 std::string XrController::Restart() {
     restartRequested_ = true;
     return "ok";
@@ -987,7 +1037,7 @@ std::string XrController::Stop() {
 }
 
 std::string XrController::SetRuntime(const std::string& runtime) {
-    if (runtime.empty()) return "err usage: xr-runtime virtualdesktop|steamvr|system|inherit|<path to runtime json>";
+    if (runtime.empty()) return "err usage: xr-runtime auto|virtualdesktop|steamvr|system|inherit|<path to runtime json>";
     {
         std::lock_guard lk(pendingMutex_);
         pendingRuntime_ = runtime;

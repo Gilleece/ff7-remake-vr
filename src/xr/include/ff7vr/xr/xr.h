@@ -75,6 +75,21 @@
 // over each eye's field of view, then each quad drawn with perspective using
 // the frame's eye views), so its PNG captures show what the user would see.
 // The OpenXR backend does the same for captures only.
+//
+// ============================ POSE VALIDITY ================================
+// xrLocateViews (viewStateFlags) and xrLocateSpace (locationFlags) say per
+// frame whether orientation and position are valid; the values of an invalid
+// part are undefined. Both backends pass every frame's poses through one
+// filter (BackendBase::SanitizePoses) so the host never sees NaN or zeros:
+//   * orientation invalid (views or head), or any value not finite: the last
+//     views and head that had a valid orientation are repeated; the recenter
+//     basis is not updated;
+//   * orientation valid, position invalid (3DoF): the runtime's orientation,
+//     the head at the last fully tracked position, each eye at its last known
+//     offset from the head (half the IPD if none was seen yet);
+//   * the filter's state changes are logged once each, not per frame.
+// The projection layer is submitted only once usable poses exist (a held pose
+// counts: the image is shown where it was rendered).
 // ===========================================================================
 #pragma once
 
@@ -243,6 +258,12 @@ struct FrameInfo {
     bool shouldRender = false;      // runtime wants pixels; if false still Begin + Submit (or SkipFrame)
     int64_t predictedDisplayTime = 0;   // runtime clock, nanoseconds (XrTime)
     int64_t predictedDisplayPeriod = 0; // nanoseconds
+    // Tracking this frame (see POSE VALIDITY below). The views and head are always
+    // finite and usable, whatever these say:
+    //   orientationValid && positionValid: as the runtime located them;
+    //   orientationValid only (3DoF): the runtime's orientation, the position held at
+    //       the last fully tracked head position (or the origin if there was none);
+    //   neither: the last views and head that had a valid orientation, held.
     bool orientationValid = false;
     bool positionValid = false;
     View views[2]{};                // [0] left, [1] right; tracking space after recenter
@@ -419,9 +440,25 @@ public:
                              const Rect& targetRect) = 0;
 
     // Any thread. Recenter: make the current head yaw and position the new
-    // origin (pitch/roll untouched). Applied from the next WaitFrame.
+    // origin (pitch/roll untouched). Applied from the next WaitFrame with a
+    // valid head orientation.
+    //
+    // A recenter by the runtime itself (the headset's own recenter: the LOCAL
+    // space's origin moves to the user's leveled head, announced with
+    // XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) clears this library's
+    // recenter from the first frame whose display time reaches the event's
+    // changeTime: the new LOCAL origin already is where the user faces, so the
+    // offset taken against the old origin would no longer fit.
     virtual void Recenter() = 0;
     virtual void ResetRecenter() = 0;
+
+    // Any thread. Development aid: drives the Null backend's emulated headset
+    // (head pose, runtime recenter events, tracking loss); see the Null backend for
+    // the commands. Returns "ok ..." or "err ...". Other backends do not support it.
+    virtual std::string Simulate(std::string_view command) {
+        (void)command;
+        return "err only the Null backend simulates headset events";
+    }
 
     // Any thread. Captures what each eye would see in the next submitted frame
     // (projection layer and quad layers composited with that frame's views),

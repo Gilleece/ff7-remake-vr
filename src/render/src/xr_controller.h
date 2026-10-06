@@ -44,7 +44,7 @@ struct RenderConfig {
     // [xr]
     bool xrEnabled = true;
     xr::BackendType backend = xr::BackendType::OpenXR;
-    std::string runtime = "virtualdesktop";
+    std::string runtime = "auto";
     float resolutionScale = 1.0f;
     uint32_t eyeWidth = 0, eyeHeight = 0;
     bool disableImplicitLayers = false;              // all of them
@@ -98,6 +98,8 @@ public:
     std::string Stop();
     std::string SetRuntime(const std::string& runtime);
     std::string SetFrameWait(const std::string& where);
+    // xr-sim: the Null backend's headset simulation (head pose, runtime recenter, tracking loss).
+    std::string SimulateCommand(const std::string& args);
 
     // Engine interface (see render.h).
     void SetMode(Mode m) { mode_.store(m); }
@@ -232,6 +234,15 @@ private:
     bool uiShownLast_ = false;  // RT: the last stereo frame showed the UI quad
     std::atomic<uint64_t> uiSubmitted_{0}, uiHeld_{0}, uiDropped_{0};
     std::string uiLastSource_;  // RT, for status
+
+    // Tracking of the last waited frame (the backend's pose filter, see xr.h POSE VALIDITY).
+    std::atomic<bool> lastOrientationValid_{true}, lastPositionValid_{true};
+    std::atomic<uint64_t> untrackedFrames_{0}, threeDofFrames_{0};
+    // Game thread: the last views handed to the engine (a last guard against unusable values).
+    xr::View lastGameViews_[2]{};
+    xr::Pose lastGameHead_{};
+    bool haveGameViews_ = false;
+    uint64_t rejectedGameFrames_ = 0;
 
     // Eye setup snapshot for the engine.
     std::mutex eyeMutex_;
