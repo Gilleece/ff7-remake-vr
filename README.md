@@ -27,17 +27,17 @@ gamepad, other headsets and other PCs. Expect rough edges.
 - FINAL FANTASY VII REMAKE INTERGRADE on Steam, file version 1.0.0.7 (the current
   Steam build). Another build is refused by the mod: the game then runs without VR.
 - Steam running.
-- A headset reachable through OpenXR. The settings are prepared for Virtual Desktop
-  (Streamer app on the PC, headset connected); its runtime is chosen for this game
-  only, and the PC's default OpenXR runtime is not changed.
+- A PC VR headset with an OpenXR runtime (Virtual Desktop, SteamVR, Meta Quest Link,
+  ...). The mod picks the runtime that has a headset connected by itself; to pin one,
+  set `[xr] runtime` in `ff7vr.ini`. The PC's default OpenXR runtime is not changed.
 - An NVIDIA graphics card for foveated rendering; on other cards the mod works
   without it.
 - Windows 10 or 11.
 
 ## Playing
 
-Start the Virtual Desktop Streamer and connect the headset (this can also be done
-later), then double-click `start-vr.cmd` in the package folder. The launcher sets
+Start your headset's PC app (for example the Virtual Desktop Streamer or SteamVR) and
+connect the headset (this can also be done later), then double-click `start-vr.cmd` in the package folder. The launcher sets
 ReShade/Luma aside, copies the mod into the game folder, starts the game and waits;
 when the game exits it puts everything back and keeps the session's log in `logs\`.
 Leave its window open while you play.
@@ -76,7 +76,8 @@ package folder.
 | Setting | Default | What it does |
 |---|---|---|
 | `[stereo] enabled` | `1` | `0` = no 3D: the whole game is shown on the virtual screen. The fallback if 3D misbehaves |
-| `[xr] resolution_scale` | `1.0` | per-eye render size relative to what Virtual Desktop asks for. `0.8` renders 64 % of the pixels: faster, softer |
+| `[xr] runtime` | `auto` | which OpenXR runtime drives the headset. `auto` takes the first one with a headset connected (runtimes whose PC app runs first, then the PC's default); pin one with `virtualdesktop`, `steamvr`, `system` or the path of a runtime's `.json` |
+| `[xr] resolution_scale` | `1.0` | per-eye render size relative to what the headset's runtime asks for. `0.8` renders 64 % of the pixels: faster, softer |
 | `[foveation] preset` | `quality` | lower detail at the outer edges of each eye to save GPU time: `quality` (barely visible), `balanced`, `performance` (visibly blocky edges), `off` |
 | `[ui] distance`, `[ui] size` | `3.0`, `2.0` | distance and height in metres of the HUD/menu panel (Page Down/Up change the distance during play, until the game is restarted). `size = 1.57` lines the markers over enemies up with the enemies; `2.0` is easier to read |
 | `[ui] follow_head` | `0` | `1` = the panel follows your head |

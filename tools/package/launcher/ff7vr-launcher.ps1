@@ -12,8 +12,8 @@
        never run at the same time.
     3. Puts things back first if an earlier session did not finish (launcher
        window closed, crash, restart).
-    4. Checks that Steam runs (starts it if not) and warns if Virtual Desktop's
-       Streamer does not seem to run (the game then simply runs flat).
+    4. Checks that Steam runs (starts it if not) and warns if no VR runtime's
+       server or streamer seems to run (the game then simply runs flat).
     5. Sets ReShade/Luma's dxgi.dll aside as dxgi.dll.vr-disabled, copies the
        mod (xinput1_3.dll) and ff7vr.ini into End\Binaries\Win64, and records
        every change in End\Binaries\Win64\ff7vr.session.json.
@@ -268,8 +268,27 @@ function Test-SteamRunning {
     return (@(Get-Process -Name steam -ErrorAction SilentlyContinue).Count -gt 0)
 }
 
-function Test-VirtualDesktopRunning {
-    return (@(Get-Process -Name 'VirtualDesktop.Streamer' -ErrorAction SilentlyContinue).Count -gt 0)
+# Processes that show a VR runtime is up: the same list the mod uses to order the
+# runtimes it tries ([xr] runtime = auto). Process names without .exe.
+$VrRuntimeProcesses = [ordered]@{
+    'VirtualDesktop.Streamer' = 'Virtual Desktop Streamer'
+    'vrserver'                = 'SteamVR'
+    'OVRServer_x64'           = 'Meta Quest Link (Oculus)'
+    'PICO Connect'            = 'PICO Connect'
+    'PICO Connect TMP'        = 'PICO Connect'
+    'MixedRealityPortal'      = 'Windows Mixed Reality'
+}
+
+# Names of the VR runtimes whose process runs (empty: none).
+function Get-RunningVrRuntimes {
+    $found = @()
+    foreach ($p in $VrRuntimeProcesses.Keys) {
+        if (@(Get-Process -Name $p -ErrorAction SilentlyContinue).Count -gt 0) {
+            $n = $VrRuntimeProcesses[$p]
+            if ($found -notcontains $n) { $found += $n }
+        }
+    }
+    return , $found
 }
 
 function Get-Sha256([string]$path) { return (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash }
@@ -385,7 +404,8 @@ function Get-StatusLines([string]$root, [string]$bin) {
     if (Test-Path -LiteralPath (Join-Path $bin $LumaOff)) { $luma = 'set aside (dxgi.dll.vr-disabled)' }
     $out += "ReShade/Luma:  $luma"
     $out += ("Steam:         {0}" -f $(if (Test-SteamRunning) { 'running' } else { 'not running' }))
-    $out += ("Virtual Desktop Streamer: {0}" -f $(if (Test-VirtualDesktopRunning) { 'running' } else { 'not running' }))
+    $vr = Get-RunningVrRuntimes
+    $out += ("VR runtimes:   {0}" -f $(if ($vr.Count) { ($vr -join ', ') + ' running' } else { 'none seen running' }))
     return $out
 }
 
@@ -408,7 +428,7 @@ function Get-SystemLines([string]$root, [string]$bin, [string]$logFile) {
     } catch { $out += "GPU:       (not readable: $_)" }
     $out += "PowerShell: $($PSVersionTable.PSVersion)"
     $out += ''
-    $out += 'OpenXR runtimes (the mod picks one through [xr] runtime; the PC default is not used unless runtime = system):'
+    $out += 'OpenXR runtimes (with [xr] runtime = auto the mod tries the running ones, then the PC default, then the rest; its log names the one it chose):'
     try {
         $k = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Khronos\OpenXR\1' -ErrorAction Stop
         $out += "  PC default:  $($k.ActiveRuntime)"
@@ -574,11 +594,13 @@ if (-not (Test-SteamRunning)) {
     Start-Sleep -Seconds 15
 }
 
-if (-not (Test-VirtualDesktopRunning)) {
-    Warn 'Virtual Desktop Streamer does not seem to be running.'
+if ((Get-RunningVrRuntimes).Count -eq 0) {
+    Warn 'No VR runtime seems to be running.'
+    Say  ('         Looked for: ' + ((@($VrRuntimeProcesses.Values) | Select-Object -Unique) -join ', ') + '.')
     Say  '         The game will start anyway and run flat on the monitor. The mod keeps trying to'
-    Say  '         reach the headset every few seconds: start the Streamer and connect the headset'
-    Say  '         in Virtual Desktop, and the game appears in the headset without a restart.'
+    Say  '         reach a headset every few seconds: start your headset''s PC app (Virtual Desktop'
+    Say  '         Streamer, SteamVR, Meta Quest Link, ...) and connect the headset, and the game'
+    Say  '         appears in it without a restart.'
 }
 
 # Record first, then change. Every step below is undone by restore.

@@ -34,10 +34,11 @@ After you double-click `start-vr.cmd`, the launcher:
    Desktop serves one game at a time, so two copies at once leave the headset
    without a picture;
 2. puts things back first if an earlier session was interrupted;
-3. checks that Steam runs (it starts Steam if not) and warns if the Virtual Desktop
-   Streamer does not seem to run. That is only a warning: the game then runs flat on
-   the monitor, and the mod keeps trying to reach the headset every 5 seconds, so
-   connecting it later is enough;
+3. checks that Steam runs (it starts Steam if not) and warns if no VR runtime's PC
+   app seems to run (it looks for the Virtual Desktop Streamer, SteamVR, Meta Quest
+   Link, PICO Connect and Windows Mixed Reality, and names them in the warning). That
+   is only a warning: the game then runs flat on the monitor, and the mod keeps trying
+   to reach a headset every 5 seconds, so connecting it later is enough;
 4. sets ReShade/Luma aside for the session (it renames `dxgi.dll` in the game's
    `End\Binaries\Win64` folder to `dxgi.dll.vr-disabled`; with ReShade/Luma loaded
    the mod does not reach the headset);
@@ -89,6 +90,31 @@ modified, nothing is installed, the PC's OpenXR settings are not changed, and th
 Steam launch options are not touched. The mod's name `xinput1_3.dll` is how the game
 loads it: the game loads a file of that name from its own folder before the one in
 Windows.
+
+## Which headset runtime the mod uses
+
+The mod talks to the headset through OpenXR. With `[xr] runtime = auto` (the
+default) it finds the OpenXR runtimes on the PC by itself: the PC's default runtime,
+every runtime registered with Windows, and the usual install folders of Virtual
+Desktop, SteamVR, Meta Quest Link, PICO, Windows Mixed Reality and Pimax. It tries
+first the runtimes whose PC app is running (Virtual Desktop Streamer, SteamVR,
+Meta Quest Link, PICO Connect, Mixed Reality Portal), then the PC's default, then
+the rest, and uses the first one that reports a connected headset. SteamVR, Meta
+Quest Link and Windows Mixed Reality are only tried while they run (or when one of
+them is the PC's default), because trying them would start them; PICO's runtime only
+while PICO Connect runs, because it reports a headset even when none is connected.
+If no runtime has a headset, the game runs flat and the mod tries again every 5
+seconds, so starting the headset's app or connecting the headset later is enough.
+
+The log says what happened: `OpenXR runtime (auto): chose <name> ...` with the
+runtime's `.json` file, one `skipped` line per runtime it passed over with the
+reason, and while nothing is found, `OpenXR runtime (auto), round N: no headset
+found: ...` listing every runtime and why it was not used.
+
+To pin one runtime instead, set `[xr] runtime` in `ff7vr.ini` to `virtualdesktop`,
+`steamvr`, `system` (the PC's default OpenXR runtime) or the full path of a runtime's
+`.json` file. Either way the choice applies to this game only; the PC's default
+OpenXR runtime is never changed.
 
 ## Installing without the launcher
 
@@ -189,16 +215,17 @@ session it is `ff7vr.log` in the game's `End\Binaries\Win64` folder).
 2. **The mod loaded.** The log starts with `ff7vr 0.1.0 loaded` and contains
    `engine: stereo device installed`. If it says `engine: stereo will NOT be enabled`,
    the reason follows on the same line.
-3. **The headset was reached.** `xr: session created ... runtime 'VirtualDesktopXR'`
-   and `xr: frame loop running`. If you see `xr: no session (SystemUnavailable ...)`,
-   the headset was not connected in Virtual Desktop at that moment; connecting it is
-   enough, the mod retries every 5 seconds.
+3. **The headset was reached.** `OpenXR runtime (auto): chose ...` names the runtime,
+   then `xr: session created ... runtime '...'` (for Virtual Desktop
+   `'VirtualDesktopXR'`) and `xr: frame loop running`. If you see
+   `xr: no session (SystemUnavailable ...)` and `no headset found`, the headset was not
+   connected at that moment; connecting it is enough, the mod retries every 5 seconds.
 4. **Title screen on the virtual screen** in front of you at eye height, sharp, not
    too dark or washed out compared with the monitor.
 5. **Load a save. The world in 3D.** Correct depth, both eyes aligned (no double
    vision when looking at a near object), the horizon level, the scene stable when
    you turn your head. The log shows `stereo: rendering STEREO ... (eye WxH ...)` with
-   the per-eye size Virtual Desktop chose.
+   the per-eye size the headset's runtime asked for.
 6. **Smoothness.** Turning your head must feel smooth. The log's `timing:` lines
    every 10 seconds show the frame rate and `errors 0`.
 7. **HUD panel.** Complete to its corners, sharp, comfortable to read; open the
@@ -222,15 +249,17 @@ session it is `ff7vr.log` in the game's `End\Binaries\Win64` folder).
     pre-rendered movie, the pause menu:** none of these has been tried yet. The log
     shows `player: camera mode ... -> game camera` when a scripted shot takes over.
     See the list below for what to look for.
-13. **Quit the game** normally: the headset returns to Virtual Desktop's own view,
+13. **Quit the game** normally: the headset returns to its runtime's own view,
     the launcher tidies up. Afterwards ReShade/Luma works again in the flat game.
 
 ## What has not been tested
 
 - **Other headsets and PCs.** The mod has been played only on a Meta Quest 3 through
   Virtual Desktop, on one PC, in the first areas of one save game (Sector 7 slums,
-  indoors and the street). Other headsets, Virtual Desktop settings, graphics cards
-  and OpenXR runtimes have not been tried.
+  indoors and the street). Other headsets, Virtual Desktop settings and graphics
+  cards have not been tried. The automatic runtime choice was tested with SteamVR's
+  virtual headset and with Virtual Desktop without a headset; other runtimes are
+  recognised by their file names and install folders but have not been tried.
 - **Combat, conversations, real-time cutscenes, loading screens between areas,
   pre-rendered movies, the pause menu.** None of these has been tried yet. What to
   look for: a battle should switch to third person and back (the battle detection is
@@ -334,7 +363,7 @@ To narrow a problem down, change one setting at a time and start a new session:
 | first person at the wrong height or inside the head | `[first_person] eye = offset` (a fixed height above the character's position instead of its eyes) |
 | anything else in first person | `[first_person] enabled = 0` |
 | stutter or low frame rate | `[xr] resolution_scale = 0.8`, then `[foveation] preset = balanced` |
-| the headset stays on the Virtual Desktop view although the game runs | quit the game, wait for the launcher window to finish (it closes by itself), start again. If that does not help, restart the Virtual Desktop Streamer |
+| the headset stays on its runtime's own view although the game runs | look in the log for `OpenXR runtime (auto)`: if it chose another runtime than the headset's, pin the right one with `[xr] runtime`. Otherwise quit the game, wait for the launcher window to finish (it closes by itself), start again; if that does not help, restart the headset's PC app (for example the Virtual Desktop Streamer) |
 | the game does not start or crashes at once | `restore.cmd`, then start the game from Steam without the mod to rule out the game itself |
 
 ## Performance
