@@ -562,7 +562,7 @@ chain, `status`) on game version 1.0.0.7 launched with `-d3d11 -windowed
 | Back buffer | `R10G10B10A2_UNORM` holding sRGB-encoded values (SDR output), sized to the window or fullscreen resolution (1280x720 in the test runs), bind flags render target + shader resource |
 | Present | sync interval 0 with `DXGI_PRESENT_ALLOW_TEARING`; the frame limit is the game's own, not vsync |
 | Presenting thread | the main thread for the first frames, then the engine's `RHIThread` for the rest of the session (logged as `the main swap chain is now presented from thread ... 'RHIThread'`); the render thread is `RenderThread 1` |
-| With ReShade/Luma as `dxgi.dll` | the game presents ReShade's swap chain proxy (recorded with the earlier vtable hooks; see "ReShade and Luma" for the current state) |
+| With ReShade/Luma as `dxgi.dll` | the game presents ReShade's swap chain proxy (see "ReShade and Luma") |
 
 The screen layer's swapchain is created in the sRGB variant of the back
 buffer's format family the runtime offers (`R8G8B8A8_UNORM_SRGB` on the Null
@@ -632,6 +632,56 @@ Null backend (37 and 40 s, eye captures in both runs, no crash, no warning);
 the launcher path reached gameplay in 3D with the same build
 (`captures/render2/launcher`). A hook that replaces the vtable slot (as UEVR or
 ReShade's proxy do) calls DXGI's body and so still reaches the mod's hook.
+
+The benchmark's frame timer (`src/dev/frame_timer.cpp`, `[bench] frame_timer`)
+hooks the same body through the same hook library, which hooks a function only
+once; with the render module on it logs `MH_ERROR_ALREADY_CREATED` and then
+uses the vtable slot instead (`frame_timer: Present's body is already hooked
+...`), checked with `bench status` / `bench start` / `bench stop` in a direct
+start (`captures/render2/024050-final`). Started through Steam, that slot hook
+would meet the overlay as described above.
+
+### ReShade and Luma
+
+With ReShade 6.7.1 and the Luma add-on for this game installed as the game's
+`dxgi.dll`, the module's start-up used to stop for good at the throwaway swap
+chain: ReShade redirects `D3D11CreateDeviceAndSwapChain` and
+`IDXGIFactory::CreateSwapChain` and sets up its runtime (with Luma's add-on) on
+every swap chain created through it, also the 64x64 one on the NULL driver,
+and that set-up never returned. A minidump of the blocked thread
+(`captures/render2/reshade1/game.dmp`, made from outside while it hung) shows
+the start-up thread inside user32, called from
+`Luma-Final Fantasy VII Remake.addon+0x1dd2d`, called from ReShade's
+`CreateSwapChain`, called from the module's probe; ReShade's own log
+(`ReShade.log` in the game folder) ends at `Running on  Driver 92.78.` for
+that swap chain. The game itself was not blocked (it reached the title screen
+flat).
+
+Now, when the loaded `dxgi.dll` is not the one in the system directory, there
+is no throwaway swap chain: the module creates a factory with that
+`dxgi.dll`'s `CreateDXGIFactory1` (no device), hooks the functions its
+`CreateSwapChain` and `CreateSwapChainForHwnd` slots point to, and hooks
+`Present` when the game creates its swap chain (`render: dxgi.dll is ... (not
+the system's): no throwaway swap chain`). The swap chain the game gets from
+ReShade is ReShade's proxy, so the hooked `Present` is the proxy's
+(`swap chain class (vtable dxgi.dll+0x422070)`, inside ReShade's `dxgi.dll`);
+the module runs before ReShade's own Present work.
+
+What was seen with ReShade and Luma loaded (Null backend, eyes 2064x2208, runs
+`captures/render2/reshade2`, `reshade3`, `steam-reshade`):
+
+| | Result |
+|---|---|
+| Start-up, direct start and start through Steam (overlay too) | the module initialises, the XR session runs, gameplay reached in stereo, no warning or error in the module's log; ReShade's log shows Luma loaded on the game's device |
+| Eye images | BOTH EYES SHOW THE LEFT EYE'S IMAGE (left and right eye captures differ by 0.7 to 0.8 of 255 on average, no parallax; without ReShade 22.6 and a 368-pixel shift). Not fixed |
+| Where | one-frame GPU trace with read-backs (`reshade3/tr`): the two views' anti-aliasing outputs differ as they should (events 2702 and 2735, mean difference 25.8 between the left half and the right half), but the right view's tonemapping pass (2766, viewport at x 2064, reading the right view's anti-aliasing output as `t0`) writes the left view's image (mean difference 0.14 from the left view's tonemapping output, 2733). Without ReShade this pass is correct, so the pass Luma puts in place of the game's tonemapping (Luma replaces shaders when the game creates them) reads its input relative to the origin of the target and ignores the view's offset: the same kind of fault as the game's bloom, occlusion and reflections. Several bloom passes also run Luma's shaders (`ps` objects created later than the game's) |
+| Not tested | ReShade's effects on the virtual screen; ReShade's OpenXR layer (the Null backend does not use the OpenXR loader; the module keeps that layer disabled for the process with a real runtime); Luma's DLSS in VR; performance |
+
+A fix in the module would be a per-draw input shift like the bloom fix (copy
+the right view's part of the input to the origin of a scratch texture for that
+one draw), but it depends on which of the replaced shader's inputs are read
+relative to the origin, and on Luma's version; a fix in Luma (taking the view
+rectangle into account) would be the clean one.
 
 ## Stereo interface
 
