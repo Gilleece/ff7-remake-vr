@@ -393,6 +393,7 @@ hidden buttons, is inferred from the filter's output.
 | `bloom_fix` | `1` | right-eye bloom fix (below) |
 | `ao_fix` | `1` | right-eye ambient occlusion fix (below) |
 | `ssr_per_eye` | `1` | each eye's screen-space reflection run limited to its half of the target, and the per-view colour copy for it halved (see "Reflections per eye"); same image, about 0.45 ms less per frame at 2 x 3072x3264 |
+| `ssr_fix` | `1` | right-eye screen-space reflections: without it the right eye has none (see "Right-eye reflections fix") |
 | `render_scale` | `1.0` | share of each eye's target the views render, per axis (0.3 to 1); the runtime scales the smaller image to the display. Also the upper bound of the dynamic resolution (see "Render scale and dynamic resolution") |
 | `dynamic_resolution` | `0` | adjust the render scale every few frames to hold the GPU frame time below `dynamic_resolution_target` of the display's frame period |
 | `dynamic_resolution_min` | `0.75` | lowest scale the dynamic resolution may use (per axis; 0.75 is 56 % of the pixels) |
@@ -458,6 +459,7 @@ Through the dev pipe (`[dev] pipe = 1`, `tools\dev\send-input.ps1 -Pipe "<comman
 | `stereo aofix [0\|1]` | right-eye ambient occlusion fix on/off, with its counters (draws fixed, failures); one per stereo frame |
 | `ssr [on\|off]` | reflections per eye on/off, with its counters (runs limited, colour copies halved; two each per stereo frame) |
 | `ssr poison <0\|1\|2\|3>` | test of reflections per eye: `1` fills every half the fix skips with a loud colour (nothing of it may reach the eye images), `2` fills the half each reflection run writes, `3` the half each colour copy writes (controls: the colour must show) |
+| `ssr fix <0\|1>` | right-eye reflections fix off/on; `ssr` shows `applied` (one per stereo frame), `failed`, the x where the right view's result was placed, how often that x changed (`moved`) and results no draw read (`not read`) |
 | `dynres [on\|off]`, `dynres scale\|min\|target <value>` | render scale and dynamic resolution: state, current scale and rect, last GPU frame time and budget, number of changes |
 | `stereo movie [on\|off]`, `stereo movie menu <0\|1>` | movie detection on/off and its state; `menu 1` counts the menu background players too (test) |
 | `stereo window [<w>x<h>\|0]` | window size while VR renders in a fullscreen mode, and the state |
@@ -896,10 +898,70 @@ viewport at x 3072) reads the right half, so it adds nothing. The same in the st
 3473: right half 0.0 after the right run). So the right view's reflection pass works at the
 origin of the target instead of at its view rect, the fourth pass of Square Enix's with this
 flaw after bloom, ambient occlusion and the UI composite. Visible as reflections (wet floors,
-metal, glass) present in the left eye and missing in the right. Not fixed here. A fix would
-make the right run write its own half (as the occlusion fix shifts its input); the scissor of
-`ssr_per_eye` keeps the right run to the right half and would then still be correct, but has
-to be re-checked with `ssr poison` together with any such fix.
+metal, glass) present in the left eye and missing in the right. Fixed by `ssr_fix` (next
+section). The left half after the right run holds the right view's reflections at the right
+view's own image positions (not a shifted copy: compared with the right eye's capture, Tifa
+sits at 0.42 of the half's width in the read-back and 0.40 in the eye image; at 0.58/0.59 in
+the left view), so the pass reads its inputs at the view's rectangle and only the output is
+placed relative to the origin. The draw's vertex constants (`DrawRectangle`: position size
+6144x3264 at 0,0, UV size 3072x3264 at 3072,0) are those of a stock full-target draw.
+
+### Right-eye reflections fix
+
+`src/engine/src/fixes.cpp` (`ssr_draw_shifted`, `ssr_before_draw`; `[stereo] ssr_fix = 1`,
+default; `ssr fix 0|1`): the reflection run of the view in the right half (the second run of
+a frame; with `stereo swap` the first) is drawn into a scratch render target of the same
+format, half the target's width plus 16 columns; the scratch target clips the full-target
+triangle, so only the part at the origin is computed. The result is then copied into the
+target at the x where the right view's rectangle starts. That x is half the width at full
+resolution; with `r.ScreenPercentage` below 100 the engine rounds the scaled rectangles (a
+4116-wide target at 67 % has the right view 2059 wide at x 2060; at 58 % 3564 wide, x 1784),
+so the x is taken from the viewport of the next draw that reads the reflections (the right
+view's composite) and remembered: a frame copies at the remembered x right after the run and,
+if the composite starts elsewhere, again at the composite's x before it draws (`moved` in
+`ssr`; once per change of the percentage). Viewport, scissor (an engine scissor is shifted with
+the output), shaders and inputs are the engine's. It works with `ssr_per_eye` on or off; the
+per-eye scissor and colour copy reach 16 columns past the middle so that a rounded left view
+that ends a pixel or two past it is still covered.
+
+Evidence (Null backend, 2 x 3072x3264, `r.BloomQuality 0` unless noted, start of the latest
+save and the street; runs `captures/render2/013535-ssrfix`, `captures/render2/014336-scales`):
+
+| Check | Result |
+|---|---|
+| read-back after the right run, fix on / off (`tr_start_fix1` event 2612 / `tr_start_fix0` 2660; street 3288 / 3315) | right half mean colour 1.87, alpha 9.4 / exactly 0 (street 2.21, 6.7 / 0); the left half (left view, 1.64 / 8.5) is the same before and after the right run. Sheet `013535-ssrfix/sheet_rb_start_fix1.png`: left view's and right view's reflections side by side, the right one matching the right eye's image |
+| `ssr poison 1` (the parts no run or copy writes filled with magenta) | 0 to 26 magenta pixels per eye at 100 %, 67 %, 58 %, render scale 0.9 and 0.8, the same as with no poison (0 to 123) |
+| `ssr poison 2` (each run's own part, right view: after the fix's copy) | 72 to 75 % magenta in both eyes at every scale: the right eye's composite reads what the fix placed |
+| `ssr poison 3` (the half of the previous frame's colour each copy writes) | 1.4 to 2.0 % magenta in BOTH eyes (before the fix: left eye only); so the right view's reflections now come through and read the right half of their colour copy |
+| counters, 5 s windows with `r.BloomQuality 5` | `ssr`: `applied` = stereo frames, `failed 0`, `not read 0`; x 3072 at 100 % and render scale 0.9 / 0.8, 2060 at 67 %, 1784 at 58 % |
+| read-backs at reduced rectangles (`014336-scales/tr_sp67`, `tr_sp58`, `tr_scale0.9`, `tr_scale0.8`) | after the right run, the right view's rectangle holds reflections (mean colour 1.6 to 2.2, alpha 8.8 to 9.5) |
+
+In the final eye images the difference is small in these two scenes (the reflections are
+weak and the camera sways between captures); `013535-ssrfix/crop_start_R_fix0_left_fix1_right.png`
+shows the metal wall above the door in the right eye with the fix off (left column) and on
+(right column).
+
+Cost: the right view's reflections are now really computed (before, that run produced zeros
+almost for free) plus one copy of a half (3072x3264 RGBA16F, about 80 MB each way) and a
+scratch target of 3088x3264 RGBA16F (81 MB of video memory, released after about 900 stereo
+frames without a reflection run). Street, frame cap lifted, 5 s windows alternating: fix off
+9.20, 9.22, 9.33 ms; on 9.46, 9.46, 9.65 ms (scene GPU p50 8.01, 7.97, 8.05 against 8.24,
+8.22, 8.31): about +0.25 ms, roughly the cost of the left view's own run.
+
+### Bloom and occlusion fixes at reduced view rectangles
+
+With `r.ScreenPercentage` below 100 the right view's rectangle can overhang the scene buffer
+by 1 to 3 pixels (67 %: 2059 wide at x 2060 in a 4116-wide buffer); the bloom and occlusion
+fixes rejected such a rectangle and the right eye got the left eye's bloom and occlusion
+again on most frames. `draw_with_shifted_input` (`bloom_fix.cpp`) now copies the part of the
+rectangle that lies inside the buffer. Counters over 5 s with `r.BloomQuality 5`
+(`014336-scales/counters.txt`): at 100 %, 67 %, 58 % and render scale 0.9 and 0.8, bloom fix
+`applied` and occlusion fix `applied` grow by the number of stereo frames to within one (the
+counters are read one after the other: +526 at 100 %, +602 at 67 %, +601 at 58 %, +600/+601 at
+0.9 and 0.8), `missed 0`, `failed 0`. Not compared with the old build at 67 % in this run; the
+failure counts before (`applied 3354 missed 4759`) come from a run with the DLSS prototype. Right eye at 67 % with all three fixes off and on:
+`014336-scales/sheet_sp67_R_allfix0_allfix1_L.png` (off: the orange streak and the doorway's
+copy from the left eye's bloom; on: gone).
 
 ## Render scale and dynamic resolution
 
