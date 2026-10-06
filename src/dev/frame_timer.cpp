@@ -6,7 +6,9 @@
 // other tool runs its code and calls the original function, which lands in
 // this detour. The frame interval measured here is therefore the same whether
 // or not something else hooks Present, and nothing here depends on hook
-// order.
+// order. The render module hooks the same body through the same hook library,
+// which hooks a function only once; with the render module on, this timer
+// replaces the vtable slot instead (and so runs before the render module's hook).
 //
 // Cost per frame: two QueryPerformanceCounter calls and one store into a
 // preallocated array. No allocation, no locks, no I/O on the render thread.
@@ -45,6 +47,10 @@ constexpr std::size_t kCapacity = std::size_t{1} << 20;  // 2.4 h at 120 fps, 24
 
 Options g_opts;
 hook::InlineHook g_present;
+// Used when the body is already hooked through the same hook library (the render module
+// hooks it too, and the library hooks a function once): the vtable slot instead.
+hook::VTableHook g_present_slot;
+std::atomic<PresentFn> g_original{nullptr};
 std::atomic<bool> g_hooked{false};
 std::int64_t g_freq = 1;
 
@@ -81,7 +87,7 @@ void read_desc(IDXGISwapChain* sc, bool log_it) {
 }
 
 HRESULT STDMETHODCALLTYPE present_detour(IDXGISwapChain* sc, UINT sync, UINT flags) {
-    const auto original = g_present.original<PresentFn>();
+    const auto original = g_original.load(std::memory_order_acquire);
     // Test presents and nested calls (a hook further out presenting again) are not frames.
     if ((flags & DXGI_PRESENT_TEST) != 0 || t_depth > 0) return original(sc, sync, flags);
 
@@ -130,7 +136,7 @@ HRESULT STDMETHODCALLTYPE present_detour(IDXGISwapChain* sc, UINT sync, UINT fla
 
 // Finds CDXGISwapChain::Present through a throwaway swap chain on a NULL
 // driver device (no GPU work, no visible window).
-void* find_present() {
+void* find_present(void*** vtable_out) {
     HINSTANCE inst = GetModuleHandleW(nullptr);
     HWND wnd = CreateWindowExW(0, L"STATIC", L"ff7vr frame timer", WS_OVERLAPPED, 0, 0, 64, 64, nullptr, nullptr, inst, nullptr);
     if (!wnd) {
@@ -158,7 +164,8 @@ void* find_present() {
         const HRESULT hr = D3D11CreateDeviceAndSwapChain(nullptr, type, nullptr, 0, &fl, 1, D3D11_SDK_VERSION, &sd, &sc,
                                                          &dev, nullptr, &ctx);
         if (SUCCEEDED(hr) && sc) {
-            target = (*reinterpret_cast<void***>(sc))[8];
+            *vtable_out = *reinterpret_cast<void***>(sc);
+            target = (*vtable_out)[8];
         } else {
             log::warn("frame_timer: dummy swap chain (driver type {}) failed: 0x{:08x}", static_cast<int>(type),
                       static_cast<unsigned>(hr));
@@ -196,7 +203,8 @@ DWORD WINAPI install_thread(void*) {
     // Wait for the game's window: by then the engine has its D3D device, and
     // nothing here interferes with the start-up.
     for (int i = 0; i < 1200 && !process_has_visible_window(); ++i) Sleep(250);
-    void* target = find_present();
+    void** vtable = nullptr;
+    void* target = find_present(&vtable);
     if (!target) {
         log::error("frame_timer: could not find IDXGISwapChain::Present; no frame timing");
         return 1;
@@ -206,7 +214,20 @@ DWORD WINAPI install_thread(void*) {
                        static_cast<LPCWSTR>(target), &owner);
     wchar_t name[MAX_PATH] = L"?";
     if (owner) GetModuleFileNameW(owner, name, MAX_PATH);
-    if (!g_present.create(target, &present_detour)) {
+    // The detour may run as soon as a hook is in place: the original is stored first.
+    g_original = reinterpret_cast<PresentFn>(target);
+    bool hooked = g_present.create(target, &present_detour, false);
+    if (hooked) {
+        g_original = g_present.original<PresentFn>();
+        hooked = g_present.enable();
+        if (!hooked) g_present.remove();
+    }
+    if (!hooked && vtable && g_present_slot.create(vtable, 8, &present_detour)) {
+        g_original = g_present_slot.original<PresentFn>();
+        hooked = true;
+        log::info("frame_timer: Present's body is already hooked through the same hook library; using the vtable slot");
+    }
+    if (!hooked) {
         log::error("frame_timer: hooking Present at {} failed", target);
         return 1;
     }
