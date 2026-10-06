@@ -233,9 +233,9 @@ std::string state_summary(bool compute) {
             s += std::format(" | t{} {}", i, describe_view(srv[i]));
             srv[i]->Release();
         }
-        ID3D11Buffer* cb[4]{};
-        c->PSGetConstantBuffers(0, 4, cb);
-        for (int i = 0; i < 4; ++i) {
+        ID3D11Buffer* cb[D3D11_COMMONSHADER_CONSTANT_BUFFER_HW_SLOT_COUNT]{};
+        c->PSGetConstantBuffers(0, D3D11_COMMONSHADER_CONSTANT_BUFFER_HW_SLOT_COUNT, cb);
+        for (int i = 0; i < D3D11_COMMONSHADER_CONSTANT_BUFFER_HW_SLOT_COUNT; ++i) {
             if (!cb[i]) continue;
             D3D11_BUFFER_DESC d{};
             cb[i]->GetDesc(&d);
@@ -528,6 +528,14 @@ void end_event(std::uint32_t seq, bool compute, UINT vertices = 0) {
         for (int i = 0; i < 3; ++i) {
             const std::string v = cb_contents(cbs[i], 128);
             if (!v.empty()) line += std::format("\n    vs cb{}: {}", i, v);
+        }
+        // Slots 12 and 13: where add-ons that replace the game's shaders (Luma) bind their own
+        // constants; empty for the game's own passes.
+        ID3D11Buffer* extra[2]{};
+        g_ctx->PSGetConstantBuffers(12, 2, extra);
+        for (int i = 0; i < 2; ++i) {
+            const std::string v = cb_contents(extra[i], 256);
+            if (!v.empty()) line += std::format("\n    ps cb{}: {}", 12 + i, v);
         }
     }
     if (!compute) {

@@ -829,6 +829,13 @@ void configure_render_scale(const Config& cfg) {
                           else if (!args.empty()) return std::string("err usage: tonemapshift [0|1|2]");
                           return "ok " + bloom_fix::tonemap_shift_status();
                       });
+    bloom_fix::set_luma_dlss_allowed(cfg.get_bool("stereo", "luma_dlss", false));
+    dev_commands::add("lumadlss", "lumadlss [0|1]: Luma's own DLSS while stereo renders (0 = its NGX calls refused, the default; 1 = allowed)",
+                      [](std::string_view args) {
+                          if (args == "0" || args == "1") bloom_fix::set_luma_dlss_allowed(args == "1");
+                          else if (!args.empty()) return std::string("err usage: lumadlss [0|1]");
+                          return "ok " + bloom_fix::luma_dlss_status();
+                      });
 }
 
 Settings& settings() { return g_settings; }

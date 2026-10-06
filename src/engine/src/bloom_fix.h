@@ -54,4 +54,12 @@ std::string ao_status();
 void set_tonemap_shift(int mode);
 std::string tonemap_shift_status();
 
+// Luma's own DLSS takes each view's half of the double-wide target for a 50 % render
+// resolution and makes its shaders scale the views to the whole target. While stereo renders,
+// Luma's calls into NVIDIA's NGX (create and evaluate a DLSS feature) are refused, so Luma
+// uses the game's anti-aliasing pass (bloom_fix.cpp, hook_ngx_for_luma). Allowed = Luma's
+// calls pass (comparison only). [stereo] luma_dlss, dev command "lumadlss [0|1]".
+void set_luma_dlss_allowed(bool allowed);
+std::string luma_dlss_status();
+
 }  // namespace ff7vr::engine::bloom_fix

@@ -12,6 +12,7 @@
 #include "ff7vr/core/log.h"
 
 #include <d3d11.h>
+#include <intrin.h>
 #include <windows.h>
 
 #include <algorithm>
@@ -279,12 +280,89 @@ unsigned g_luma_check = 0;  // RHI thread: frames until the next module check
 std::atomic<bool> g_tonemap_shift{false};
 std::atomic<std::uint64_t> g_tonemap_shifted{0};
 
+// Luma's own upscaling (DLSS) in stereo. Luma takes the game's anti-aliasing draw for its DLSS
+// and reads the draw's viewport as the render resolution and the target's size as the output
+// resolution. Each view's viewport is half of the double-wide target, so Luma concludes the
+// game renders at 50 % with dynamic resolution, and its replacement shaders then scale every
+// view's coordinates to the whole target (Luma's constant "DrewUpscaling" with the output
+// resolution 2 x eye width): the right eye showed a squeezed quarter of the image. While the
+// mod renders in stereo, Luma's calls into NVIDIA's NGX library (the driver's _nvngx.dll) to
+// create or evaluate a DLSS feature are refused, so Luma falls back to the game's own
+// anti-aliasing pass as it does on hardware without DLSS. Calls from anywhere else (the
+// mod's own DLSS) pass. [stereo] luma_dlss = 1 lets Luma's calls through (comparison).
+using NgxCreateFn = int(__cdecl*)(void* ctx, int feature, void* params, void** handle);
+using NgxEvaluateFn = int(__cdecl*)(void* ctx, const void* handle, const void* params, void* callback);
+constexpr int kNgxResultFail = static_cast<int>(0xBAD00000u);
+hook::InlineHook g_ngx_create, g_ngx_evaluate;
+std::atomic<HMODULE> g_luma_module{nullptr};
+std::atomic<bool> g_luma_dlss_allowed{false};
+struct NgxCounters {
+    std::atomic<std::uint64_t> create_luma{0}, create_refused{0}, evaluate_luma{0}, evaluate_refused{0}, other{0};
+};
+NgxCounters g_ngx;
+
+bool from_luma(void* return_address) {
+    HMODULE m = nullptr;
+    const HMODULE luma = g_luma_module.load(std::memory_order_relaxed);
+    return luma &&
+           GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                              static_cast<LPCWSTR>(return_address), &m) &&
+           m == luma;
+}
+bool refuse_luma_call() { return !g_luma_dlss_allowed.load(std::memory_order_relaxed) && device::active(); }
+
+int __cdecl ngx_create_detour(void* ctx, int feature, void* params, void** handle) {
+    if (from_luma(_ReturnAddress())) {
+        ++g_ngx.create_luma;
+        if (refuse_luma_call()) {
+            ++g_ngx.create_refused;
+            if (handle) *handle = nullptr;
+            return kNgxResultFail;
+        }
+    } else {
+        ++g_ngx.other;
+    }
+    return g_ngx_create.original<NgxCreateFn>()(ctx, feature, params, handle);
+}
+int __cdecl ngx_evaluate_detour(void* ctx, const void* handle, const void* params, void* callback) {
+    if (from_luma(_ReturnAddress())) {
+        ++g_ngx.evaluate_luma;
+        if (refuse_luma_call()) {
+            ++g_ngx.evaluate_refused;
+            return kNgxResultFail;
+        }
+    } else {
+        ++g_ngx.other;
+    }
+    return g_ngx_evaluate.original<NgxEvaluateFn>()(ctx, handle, params, callback);
+}
+
+// RHI thread: hooks NGX's D3D11 create and evaluate entry points once Luma and NGX are loaded.
+void hook_ngx_for_luma(HMODULE luma) {
+    g_luma_module = luma;
+    if (!luma || g_ngx_evaluate.installed()) return;
+    HMODULE ngx = GetModuleHandleW(L"_nvngx.dll");
+    if (!ngx) return;
+    void* create = reinterpret_cast<void*>(GetProcAddress(ngx, "NVSDK_NGX_D3D11_CreateFeature"));
+    void* evaluate = reinterpret_cast<void*>(GetProcAddress(ngx, "NVSDK_NGX_D3D11_EvaluateFeature"));
+    if (!create || !evaluate) {
+        log::warn("Luma DLSS in stereo: NGX entry points not found; Luma's DLSS may break the right eye");
+        return;
+    }
+    const bool ok = g_ngx_create.create(create, &ngx_create_detour) && g_ngx_evaluate.create(evaluate, &ngx_evaluate_detour);
+    log::info("Luma DLSS in stereo: {}", ok ? (g_luma_dlss_allowed.load() ? "hooks on NGX in place, Luma's calls allowed ([stereo] luma_dlss = 1)"
+                                                                          : "hooks on NGX in place, Luma's calls refused while stereo renders")
+                                             : "hooking NGX failed");
+}
+
 void update_tonemap_shift() {  // RHI thread, once per stereo frame
     if (g_luma_check-- == 0) {
         g_luma_check = 600;
-        const bool luma = GetModuleHandleW(L"Luma-Final Fantasy VII Remake.addon") != nullptr;
+        const HMODULE module = GetModuleHandleW(L"Luma-Final Fantasy VII Remake.addon");
+        const bool luma = module != nullptr;
         if (luma != g_luma_loaded.exchange(luma))
             log::info("tonemap input shift: Luma add-on {}", luma ? "loaded (the shift applies in mode auto)" : "not loaded");
+        hook_ngx_for_luma(module);
     }
     const int m = g_tonemap_mode.load(std::memory_order_relaxed);
     g_tonemap_shift = m == kShiftOn || (m == kShiftAuto && g_luma_loaded.load(std::memory_order_relaxed));
@@ -417,6 +495,14 @@ std::string tonemap_shift_status() {
     static const char* names[] = {"off", "on", "auto"};
     return std::format("tonemap input shift {} ({}; Luma add-on {}): applied {}", names[g_tonemap_mode.load()],
                        g_tonemap_shift.load() ? "active" : "inactive", g_luma_loaded.load() ? "loaded" : "not loaded", g_tonemap_shifted.load());
+}
+
+void set_luma_dlss_allowed(bool allowed) { g_luma_dlss_allowed = allowed; }
+std::string luma_dlss_status() {
+    return std::format("Luma DLSS in stereo {} (hooks {}): Luma create calls {} refused {}, evaluate calls {} refused {}, other callers {}",
+                       g_luma_dlss_allowed.load() ? "allowed" : "refused", g_ngx_evaluate.installed() ? "on" : "off",
+                       g_ngx.create_luma.load(), g_ngx.create_refused.load(), g_ngx.evaluate_luma.load(), g_ngx.evaluate_refused.load(),
+                       g_ngx.other.load());
 }
 
 std::string ao_status() {
