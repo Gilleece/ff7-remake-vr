@@ -43,11 +43,14 @@ constexpr const char* kEngineVersion = "4.18";
 
 // The view's uniform buffer (FViewUniformShaderParameters), as float4 rows: bound as the
 // temporal anti-aliasing pixel shader's constant buffer 1. docs/re/engine.md section 12.
-constexpr int kRowFirst = 110;  // rows kept from each capture
-constexpr int kRowCount = 36;   // 110..145
+constexpr int kRowFirst = 50;   // rows kept from each capture
+constexpr int kRowCount = 96;   // 50..145
+constexpr int kRowViewForward = 52;             // xyz: the view's forward direction
+constexpr int kRowWorldCameraOrigin = 59;       // xyz: the view's position (world units, cm)
+constexpr int kRowPrevWorldCameraOrigin = 103;  // xyz: the position the engine's motion is relative to
 constexpr int kRowClipToPrevClip = 114;  // 114..117
 constexpr int kRowJitter = 118;          // xy this frame, zw previous frame (NDC units)
-constexpr int kRowCameraCut = 140;       // .y: camera cut (not verified)
+constexpr int kRowCameraCut = 140;       // .y: camera cut (candidate; logged, used only with `dlss cutflag 1`)
 
 // ------------------------------------------------------------------ settings (any thread)
 enum class Preset : unsigned { Default = 0, J = 10, K = 11, L = 12, M = 13 };
@@ -59,7 +62,16 @@ struct Settings {
     std::atomic<unsigned> preset{static_cast<unsigned>(Preset::Default)};
     std::atomic<bool> auto_exposure{true};
     std::atomic<int> mv_jitter{2};  // 0: remove the jitter difference, 1: MVs flagged jittered, 2: as is, not flagged
-    std::atomic<bool> cut_reset{false};
+    std::atomic<bool> cut_reset{true};     // reset the history on a camera cut (see detect_cut)
+    std::atomic<bool> cut_flag{false};     // also on row 140.y of the view constants (candidate flag)
+    std::atomic<float> cut_distance{100.0f};  // camera moved farther than this in one frame (world units, cm)
+    std::atomic<float> cut_angle{30.0f};      // camera turned more than this in one frame (degrees)
+    // Upscale mode tests (picture quality at low input sizes)
+    std::atomic<bool> up_hdr{false};       // flag the display-referred input as HDR
+    std::atomic<float> sharpness{0.0f};    // InSharpness (ignored by current models)
+    std::atomic<float> pre_exposure{0.0f}; // InPreExposure (0: not set)
+    std::atomic<bool> no_grain{false};     // last pass at the reduced size without its noise texture (t0)
+    std::atomic<bool> max_full{false};     // test: create the features for the input at render scale 1, whatever [stereo] render_scale is
     std::atomic<float> jitter_scale_x{0.5f};
     std::atomic<float> jitter_scale_y{-0.5f};
     std::atomic<int> reset_requests{0};
@@ -221,6 +233,88 @@ bool lookup_rows(ID3D11Buffer* b, ViewRows& out) {
     return true;
 }
 
+const float* row(const ViewRows& r, int i) { return r.v[i - kRowFirst]; }
+
+// ------------------------------------------------------------------ camera cuts (RHI thread)
+// The history of an eye is reset when its camera jumps: what DLSS accumulated no longer
+// belongs to the view, and the motion vectors may not describe the change. Per eye and per
+// frame, from the view constants of the anti-aliasing pass:
+//  - engine: the camera the engine's motion is relative to (PrevWorldCameraOrigin) is not
+//    the camera of the eye's previous frame. The engine resets its previous-frame matrices
+//    on its own camera cuts (cuts in cutscenes, teleports, a new view state), and then the
+//    motion vectors claim no motion although the picture changed.
+//  - distance / angle: the camera moved farther than cut_distance or turned more than
+//    cut_angle since the eye's previous frame (a switch between the game's camera and the
+//    mod's first or third person camera, recentering). The blend between first and third
+//    person stays below these.
+//  - flag: row 140.y of the view constants (a candidate camera-cut flag, only with cutflag).
+enum CutReason : unsigned { kCutEngine = 1, kCutFlag = 2, kCutDistance = 4, kCutAngle = 8 };
+
+struct EyeTrack {
+    bool valid = false;
+    std::uint64_t frame = 0;
+    float origin[3]{}, fwd[3]{};
+};
+EyeTrack g_track[2];
+std::atomic<std::uint64_t> g_cut_count[4]{};  // per reason bit
+std::atomic<std::uint64_t> g_cut_resets{0}, g_flag_frames{0};
+std::atomic<int> g_cut_logs{0};
+
+float dist3(const float* a, const float* b) {
+    const float dx = a[0] - b[0], dy = a[1] - b[1], dz = a[2] - b[2];
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+std::string cut_text(unsigned why) {
+    std::string s;
+    if (why & kCutEngine) s += "engine ";
+    if (why & kCutFlag) s += "flag ";
+    if (why & kCutDistance) s += "distance ";
+    if (why & kCutAngle) s += "angle ";
+    if (!s.empty()) s.pop_back();
+    return s;
+}
+
+unsigned detect_cut(int eye, const ViewRows& rows, std::uint64_t frame, std::string* text) {
+    const float* o = row(rows, kRowWorldCameraOrigin);
+    const float* po = row(rows, kRowPrevWorldCameraOrigin);
+    const float* f = row(rows, kRowViewForward);
+    EyeTrack& t = g_track[eye];
+    unsigned why = 0;
+    float moved = 0, gap = 0, angle = 0;
+    if (t.valid && t.frame + 1 == frame) {
+        moved = dist3(o, t.origin);
+        gap = dist3(po, t.origin);
+        const float lf = std::sqrt(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
+        const float lt = std::sqrt(t.fwd[0] * t.fwd[0] + t.fwd[1] * t.fwd[1] + t.fwd[2] * t.fwd[2]);
+        if (lf > 0.5f && lt > 0.5f) {
+            const float c = std::clamp((f[0] * t.fwd[0] + f[1] * t.fwd[1] + f[2] * t.fwd[2]) / (lf * lt), -1.0f, 1.0f);
+            angle = std::acos(c) * 57.29578f;
+        }
+        if (gap > 1.0f) why |= kCutEngine;
+        if (moved > g_set.cut_distance.load()) why |= kCutDistance;
+        if (angle > g_set.cut_angle.load()) why |= kCutAngle;
+    }
+    if (row(rows, kRowCameraCut)[1] != 0.0f) {
+        ++g_flag_frames;
+        if (g_set.cut_flag.load()) why |= kCutFlag;
+    }
+    t.valid = true;
+    t.frame = frame;
+    std::memcpy(t.origin, o, sizeof(t.origin));
+    std::memcpy(t.fwd, f, sizeof(t.fwd));
+    if (why) {
+        for (int b = 0; b < 4; ++b)
+            if (why & (1u << b)) ++g_cut_count[b];
+        const std::string s = std::format("eye {} frame {}: {} (moved {:.1f} cm, turned {:.1f} deg, engine's previous camera {:.1f} cm from the eye's last, "
+                                          "row 140 {:.3g})",
+                                          eye, frame, cut_text(why), moved, angle, gap, row(rows, kRowCameraCut)[1]);
+        if (g_cut_logs.fetch_add(1) < 40) log::info("dlss: camera cut {}", s);
+        if (text) *text = s;
+    }
+    return why;
+}
+
 // ------------------------------------------------------------------ NGX (RHI thread)
 struct Feature {
     NVSDK_NGX_Handle* handle = nullptr;
@@ -228,6 +322,12 @@ struct Feature {
     unsigned preset = 0;
     int flags = 0;
     std::uint64_t last_eval_frame = 0;
+    // Input rectangles an evaluation may use: min..creation size when NGX allows dynamic
+    // scaling for this feature, otherwise exactly the creation size. An evaluation outside
+    // it fails in NGX ("Dynamic scaling disabled ... RenderSubrect must match Creation time
+    // res") and was followed by a GPU fault and a driver reset on the test machine.
+    bool dynamic = false;
+    UINT min_w = 0, min_h = 0;
 };
 
 struct Timing {
@@ -286,6 +386,9 @@ struct Info {
     std::string bench;
     float jitter_px[2][2]{};
     std::string dump;
+    std::string last_cut;
+    std::string cut_test;
+    std::string up_sizes;  // upscale mode: feature size, input and output rectangles
 };
 std::mutex g_info_mutex;
 Info g_info;
@@ -441,8 +544,34 @@ NVSDK_NGX_PerfQuality_Value quality_for(UINT in_w, UINT out_w) {
                              : NVSDK_NGX_PerfQuality_Value_UltraPerformance;
 }
 
+// The input sizes NGX accepts for an output size and mode (NGX_DLSS_GET_OPTIMAL_SETTINGS),
+// remembered per output size and mode.
+struct DynRange {
+    bool ok = false;
+    UINT min_w = 0, min_h = 0, max_w = 0, max_h = 0;
+};
+DynRange dynamic_range(UINT ow, UINT oh, NVSDK_NGX_PerfQuality_Value q) {
+    static UINT key_w = 0, key_h = 0;
+    static int key_q = -1;
+    static DynRange cached;
+    if (key_w == ow && key_h == oh && key_q == static_cast<int>(q)) return cached;
+    DynRange d;
+    unsigned optw = 0, opth = 0, maxw = 0, maxh = 0, minw = 0, minh = 0;
+    float sharp = 0;
+    const NVSDK_NGX_Result r = NGX_DLSS_GET_OPTIMAL_SETTINGS(g_rhi->params, ow, oh, q, &optw, &opth, &maxw, &maxh, &minw, &minh, &sharp);
+    if (NVSDK_NGX_SUCCEED(r)) d = DynRange{true, minw, minh, maxw, maxh};
+    log::info("dlss: input range for output {}x{} mode {}: {} (optimal {}x{}, min {}x{}, max {}x{})", ow, oh, static_cast<int>(q), result_text(r), optw,
+              opth, minw, minh, maxw, maxh);
+    key_w = ow;
+    key_h = oh;
+    key_q = static_cast<int>(q);
+    cached = d;
+    return d;
+}
+
 // One feature per eye: input w x h, output ow x oh (equal for DLAA), HDR or display-referred input.
-bool ensure_feature(ID3D11DeviceContext* ctx, int eye, UINT w, UINT h, bool& created, UINT ow = 0, UINT oh = 0, bool hdr = true) {
+bool ensure_feature(ID3D11DeviceContext* ctx, int eye, UINT w, UINT h, bool& created, UINT ow = 0, UINT oh = 0, bool hdr = true,
+                    bool dynamic = false, UINT min_w = 0, UINT min_h = 0) {
     Rhi& R = *g_rhi;
     Feature& f = R.feat[eye];
     if (!ow) ow = w;
@@ -450,7 +579,7 @@ bool ensure_feature(ID3D11DeviceContext* ctx, int eye, UINT w, UINT h, bool& cre
     const unsigned preset = g_set.preset.load();
     const int flags = wanted_flags(hdr);
     created = false;
-    if (f.handle && f.w == w && f.h == h && f.ow == ow && f.oh == oh && f.preset == preset && f.flags == flags) return true;
+    if (f.handle && f.w == w && f.h == h && f.ow == ow && f.oh == oh && f.preset == preset && f.flags == flags && f.dynamic == dynamic) return true;
     release_feature(f);
     NVSDK_NGX_Parameter_SetUI(R.params, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA, preset);
     NVSDK_NGX_Parameter_SetUI(R.params, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality, preset);
@@ -468,8 +597,10 @@ bool ensure_feature(ID3D11DeviceContext* ctx, int eye, UINT w, UINT h, bool& cre
     const auto t0 = std::chrono::steady_clock::now();
     const NVSDK_NGX_Result r = NGX_D3D11_CREATE_DLSS_EXT(ctx, &f.handle, R.params, &cp);
     const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-    std::string text = std::format("eye {} {}x{} -> {}x{} quality value {} preset {} flags 0x{:x}: create {} in {:.1f} ms", eye, w, h, ow, oh,
-                                   static_cast<int>(cp.Feature.InPerfQualityValue), preset_name(preset), flags, result_text(r), ms);
+    std::string text = std::format("eye {} {}x{} -> {}x{} quality value {} preset {} flags 0x{:x} input {}: create {} in {:.1f} ms", eye, w, h, ow,
+                                   oh, static_cast<int>(cp.Feature.InPerfQualityValue), preset_name(preset), flags,
+                                   dynamic ? std::format("{}x{} to {}x{} (dynamic)", min_w, min_h, w, h) : std::string("this size only"),
+                                   result_text(r), ms);
     log::info("dlss: feature {}", text);
     with_info([&](Info& i) {
         i.features[eye] = text;
@@ -486,6 +617,9 @@ bool ensure_feature(ID3D11DeviceContext* ctx, int eye, UINT w, UINT h, bool& cre
     f.oh = oh;
     f.preset = preset;
     f.flags = flags;
+    f.dynamic = dynamic;
+    f.min_w = dynamic ? min_w : w;
+    f.min_h = dynamic ? min_h : h;
     created = true;
     static bool dll_logged = false;
     if (!dll_logged) {
@@ -497,7 +631,7 @@ bool ensure_feature(ID3D11DeviceContext* ctx, int eye, UINT w, UINT h, bool& cre
 
 // ------------------------------------------------------------------ motion vector pass
 constexpr char kShader[] = R"(
-cbuffer EyePass : register(b0) { float4 Rect; float4 Opt; };   // eye rect x y w h; 1/w 1/h, remove-jitter, 0
+cbuffer EyePass : register(b0) { float4 Rect; float4 Opt; };   // eye rect x y w h; 1/w 1/h, remove-jitter, zero (test)
 cbuffer View : register(b1) { float4 V[146]; };
 Texture2D<float> Depth : register(t0);
 Texture2D<float2> Velocity : register(t1);
@@ -506,6 +640,7 @@ float4 vs(uint id : SV_VertexID) : SV_Position {
     return float4(t * float2(2, -2) + float2(-1, 1), 0, 1);
 }
 float2 ps(float4 pos : SV_Position) : SV_Target {
+    if (Opt.w > 0.5) return float2(0, 0);
     int3 p = int3(pos.xy, 0);
     float2 uv = (pos.xy - Rect.xy) * Opt.xy;
     float2 ndc = float2(uv.x * 2 - 1, 1 - uv.y * 2);
@@ -604,6 +739,117 @@ bool ensure_textures(ID3D11Device* dev, const D3D11_TEXTURE2D_DESC& color, DXGI_
         log::info("dlss: output texture {}x{} format {}", d.Width, d.Height, static_cast<int>(d.Format));
     }
     return true;
+}
+
+// ------------------------------------------------------------------ camera cut test (dev command)
+// `dlss cuttest <path prefix> <reset 0|1> <zero_mv 0|1>`: at the next camera cut, with or
+// without the history reset and with the motion vectors of that frame set to zero or not
+// (zero is what the engine's own cuts give), the left eye's upscaled image (a centred crop of
+// at most 2048x2048) of the frames 0, 1, 2, 3, 5, 10 and 60 after the cut is written to
+// <prefix>_f<n>_<w>x<h>.r10g10b10a2 (raw R10G10B10A2 rows, read back without a stall).
+constexpr int kCutTestOffsets[7] = {0, 1, 2, 3, 5, 10, 60};
+struct CutTest {
+    std::mutex m;
+    std::string prefix;            // under m
+    std::atomic<bool> armed{false};
+    std::atomic<bool> want_reset{true}, want_zero{false};
+    // RHI thread
+    std::uint64_t cut_frame = 0;
+    bool reset = true, zero_mv = false;
+    struct Slot {
+        ComPtr<ID3D11Texture2D> staging;
+        std::uint64_t frame = 0;
+        UINT w = 0, h = 0;
+        bool used = false, pending = false;
+    } slots[7];
+    int written = 0;
+};
+CutTest g_cuttest;
+
+void cuttest_on_pass(unsigned why, std::uint64_t frame, bool& zero_mv, bool& allow_reset) {
+    CutTest& t = g_cuttest;
+    zero_mv = false;
+    allow_reset = true;
+    if (!t.armed.load()) return;
+    if (t.cut_frame == 0 && why) {
+        t.cut_frame = frame;
+        t.reset = t.want_reset.load();
+        t.zero_mv = t.want_zero.load();
+        for (auto& s : t.slots) s = CutTest::Slot{};
+        t.written = 0;
+        log::info("dlss: cut test: cut at frame {} ({}), reset {}, motion vectors {}", frame, cut_text(why), t.reset ? "on" : "off",
+                  t.zero_mv ? "zero" : "as computed");
+    }
+    if (t.cut_frame == frame) {
+        zero_mv = t.zero_mv;
+        allow_reset = t.reset;
+    }
+}
+
+void cuttest_on_output(ID3D11DeviceContext* ctx, ID3D11Texture2D* out, UINT ox, UINT oy, UINT ow, UINT oh, std::uint64_t frame) {
+    CutTest& t = g_cuttest;
+    if (!t.armed.load() || t.cut_frame == 0 || frame < t.cut_frame) return;
+    const std::uint64_t off = frame - t.cut_frame;
+    for (int i = 0; i < 7; ++i) {
+        if (static_cast<std::uint64_t>(kCutTestOffsets[i]) != off || t.slots[i].used) continue;
+        CutTest::Slot& s = t.slots[i];
+        const UINT cw = std::min(ow, 2048u), ch = std::min(oh, 2048u);
+        if (!s.staging || s.w != cw || s.h != ch) {
+            D3D11_TEXTURE2D_DESC d{};
+            d.Width = cw;
+            d.Height = ch;
+            d.MipLevels = 1;
+            d.ArraySize = 1;
+            d.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
+            d.SampleDesc.Count = 1;
+            d.Usage = D3D11_USAGE_STAGING;
+            d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            s.staging.Reset();
+            if (FAILED(g_rhi->dev->CreateTexture2D(&d, nullptr, &s.staging))) return;
+            s.w = cw;
+            s.h = ch;
+        }
+        const UINT cx = ox + (ow - cw) / 2, cy = oy + (oh - ch) / 2;
+        const D3D11_BOX box{cx, cy, 0, cx + cw, cy + ch, 1};
+        ctx->CopySubresourceRegion(s.staging.Get(), 0, 0, 0, 0, out, 0, &box);
+        s.used = true;
+        s.pending = true;
+        s.frame = frame;
+    }
+}
+
+// RHI thread, at the frame end: write the copies that the GPU has finished.
+void cuttest_collect(ID3D11DeviceContext* ctx, std::uint64_t frame) {
+    CutTest& t = g_cuttest;
+    if (!t.armed.load() || t.cut_frame == 0) return;
+    std::string prefix;
+    {
+        std::lock_guard lock(t.m);
+        prefix = t.prefix;
+    }
+    for (int i = 0; i < 7; ++i) {
+        CutTest::Slot& s = t.slots[i];
+        if (!s.pending || s.frame + 2 > frame) continue;
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if (ctx->Map(s.staging.Get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m) != S_OK) continue;
+        const std::string path = std::format("{}_f{}_{}x{}.r10g10b10a2", prefix, kCutTestOffsets[i], s.w, s.h);
+        FILE* f = nullptr;
+        if (fopen_s(&f, path.c_str(), "wb") == 0 && f) {
+            for (UINT y = 0; y < s.h; ++y) fwrite(static_cast<const std::uint8_t*>(m.pData) + static_cast<std::size_t>(y) * m.RowPitch, 4, s.w, f);
+            fclose(f);
+        }
+        ctx->Unmap(s.staging.Get(), 0);
+        s.pending = false;
+        ++t.written;
+        log::info("dlss: cut test: frame {} after the cut -> {}", kCutTestOffsets[i], path);
+    }
+    if (t.written >= 7 || frame > t.cut_frame + 400) {
+        log::info("dlss: cut test finished ({} of 7 images)", t.written);
+        with_info([&](Info& i) { i.cut_test = std::format("finished: cut at frame {}, {} of 7 images, {}", t.cut_frame, t.written, prefix); });
+        t.armed = false;
+        t.cut_frame = 0;
+        for (auto& s : t.slots) s = CutTest::Slot{};
+    }
 }
 
 // ------------------------------------------------------------------ the pass
@@ -791,6 +1037,14 @@ bool run_dlss(ID3D11DeviceContext* ctx, PassInputs& in, int eye, std::string& wh
         why = "no ID3D11DeviceContext1";
         return false;
     }
+    std::string cut;
+    const unsigned cut_why = detect_cut(eye, rows, R.frame, &cut);
+    bool zero_mv = false, allow_reset = true;
+    cuttest_on_pass(cut_why, R.frame, zero_mv, allow_reset);
+    const bool cut_reset = cut_why && g_set.cut_reset.load() && allow_reset;
+    if (cut_why)
+        with_info([&](Info& i) { i.last_cut = cut + (cut_reset ? ", history reset" : ", no reset"); });
+    if (cut_reset) ++g_cut_resets;
     // Everything below runs in our own pipeline state; the engine's state comes back as it was.
     ID3DDeviceContextState* game_state = nullptr;
     ctx1->SwapDeviceContextState(R.state.Get(), &game_state);
@@ -808,6 +1062,7 @@ bool run_dlss(ID3D11DeviceContext* ctx, PassInputs& in, int eye, std::string& wh
         pc.opt[0] = 1.0f / static_cast<float>(w);
         pc.opt[1] = 1.0f / static_cast<float>(h);
         pc.opt[2] = g_set.mv_jitter.load() == 0 ? 1.0f : 0.0f;
+        pc.opt[3] = zero_mv ? 1.0f : 0.0f;
         D3D11_MAPPED_SUBRESOURCE m{};
         if (SUCCEEDED(ctx->Map(R.cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
             std::memcpy(m.pData, &pc, sizeof(pc));
@@ -829,9 +1084,8 @@ bool run_dlss(ID3D11DeviceContext* ctx, PassInputs& in, int eye, std::string& wh
         // DLSS for the eye's rectangle.
         const float jx = rows.v[kRowJitter - kRowFirst][0] * static_cast<float>(w) * g_set.jitter_scale_x.load();
         const float jy = rows.v[kRowJitter - kRowFirst][1] * static_cast<float>(h) * g_set.jitter_scale_y.load();
-        bool reset = created || f.last_eval_frame + 1 < R.frame;
+        bool reset = created || f.last_eval_frame + 1 < R.frame || cut_reset;
         if (g_set.reset_requests.load() > 0) reset = true;
-        if (g_set.cut_reset.load() && rows.v[kRowCameraCut - kRowFirst][1] != 0.0f) reset = true;
         NVSDK_NGX_D3D11_DLSS_Eval_Params ep{};
         ep.Feature.pInColor = in.color.Get();
         ep.Feature.pInOutput = R.out.Get();
@@ -892,9 +1146,18 @@ struct Stash {
     std::uint64_t frame = 0;
     UINT x = 0, y = 0, w = 0, h = 0;
     float jx = 0, jy = 0;
+    bool reset = false;  // camera cut: reset the eye's history
     ComPtr<ID3D11Resource> depth;
 };
 Stash g_stash[2];  // RHI thread
+// The eye rectangle DLSS wrote in the eye texture (the whole half), per eye and frame: the
+// image handed to the runtime is then the whole half, also when the views rendered less of
+// it ([stereo] render_scale, dynamic resolution).
+struct FullRect {
+    std::uint64_t frame = 0;
+    EyeRect rect;
+};
+FullRect g_full[2];  // RHI thread
 ComPtr<ID3D11Texture2D> g_graded;  // the last pass at the reduced size
 ComPtr<ID3D11RenderTargetView> g_graded_rtv;
 D3D11_TEXTURE2D_DESC g_graded_desc{};
@@ -932,7 +1195,7 @@ bool check_final_rows(ID3D11DeviceContext* ctx, ID3D11Buffer* cb, const D3D11_VI
     return ok;
 }
 
-void draw_motion_vectors(ID3D11DeviceContext* ctx, const PassInputs& in, UINT x, UINT y, UINT w, UINT h) {
+void draw_motion_vectors(ID3D11DeviceContext* ctx, const PassInputs& in, UINT x, UINT y, UINT w, UINT h, bool zero = false) {
     Rhi& R = *g_rhi;
     PassConsts pc{};
     pc.rect[0] = static_cast<float>(x);
@@ -942,6 +1205,7 @@ void draw_motion_vectors(ID3D11DeviceContext* ctx, const PassInputs& in, UINT x,
     pc.opt[0] = 1.0f / static_cast<float>(w);
     pc.opt[1] = 1.0f / static_cast<float>(h);
     pc.opt[2] = g_set.mv_jitter.load() == 0 ? 1.0f : 0.0f;
+    pc.opt[3] = zero ? 1.0f : 0.0f;
     D3D11_MAPPED_SUBRESOURCE m{};
     if (SUCCEEDED(ctx->Map(R.cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
         std::memcpy(m.pData, &pc, sizeof(pc));
@@ -985,9 +1249,17 @@ bool run_passthrough(ID3D11DeviceContext* ctx, PassInputs& in, int eye, std::str
     }
     ComPtr<ID3D11DeviceContext1> ctx1;
     if (FAILED(ctx->QueryInterface(IID_PPV_ARGS(&ctx1)))) return false;
+    std::string cut;
+    const unsigned cut_why = detect_cut(eye, rows, R.frame, &cut);
+    bool zero_mv = false, allow_reset = true;
+    cuttest_on_pass(cut_why, R.frame, zero_mv, allow_reset);
+    const bool cut_reset = cut_why && g_set.cut_reset.load() && allow_reset;
+    if (cut_why)
+        with_info([&](Info& i) { i.last_cut = cut + (cut_reset ? ", history reset" : ", no reset"); });
+    if (cut_reset) ++g_cut_resets;
     ID3DDeviceContextState* game_state = nullptr;
     ctx1->SwapDeviceContextState(R.state.Get(), &game_state);
-    draw_motion_vectors(ctx, in, x, y, static_cast<UINT>(in.vp.Width), static_cast<UINT>(in.vp.Height));
+    draw_motion_vectors(ctx, in, x, y, static_cast<UINT>(in.vp.Width), static_cast<UINT>(in.vp.Height), zero_mv);
     const D3D11_BOX box{x, y, 0, x + w, y + h, 1};
     ctx->CopySubresourceRegion(in.target.Get(), in.target_view.Texture2D.MipSlice, x, y, 0, in.color.Get(), 0, &box);
     ctx1->SwapDeviceContextState(game_state, nullptr);
@@ -998,6 +1270,7 @@ bool run_passthrough(ID3D11DeviceContext* ctx, PassInputs& in, int eye, std::str
     s.y = y;
     s.w = w;
     s.h = h;
+    s.reset = cut_reset;
     s.jx = rows.v[kRowJitter - kRowFirst][0] * in.vp.Width * g_set.jitter_scale_x.load();
     s.jy = rows.v[kRowJitter - kRowFirst][1] * in.vp.Height * g_set.jitter_scale_y.load();
     s.depth = in.depth;
@@ -1031,8 +1304,12 @@ bool try_final(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_t
     saved_rtv[0]->GetResource(&target);
     D3D11_TEXTURE2D_DESC td{};
     if (!tex_desc(target.Get(), td)) return false;
-    if ((td.Format != DXGI_FORMAT_R10G10B10A2_UNORM && td.Format != DXGI_FORMAT_R10G10B10A2_TYPELESS) ||
-        td.Width != static_cast<UINT>(vp.Width * 2.0f) || vp.Width < static_cast<float>(s.w) || vp.Height < static_cast<float>(s.h))
+    // The eye texture: two halves side by side. The pass writes the view's rectangle at the
+    // corner of the eye's half: the whole half, or less of it with [stereo] render_scale.
+    const UINT half = td.Width / 2;
+    if ((td.Format != DXGI_FORMAT_R10G10B10A2_UNORM && td.Format != DXGI_FORMAT_R10G10B10A2_TYPELESS) || half < 64 || vp.Width < 64.0f ||
+        vp.TopLeftX != static_cast<float>(eye * half) || vp.TopLeftY != 0.0f || vp.Width > static_cast<float>(half) ||
+        vp.Height > static_cast<float>(td.Height) || vp.Width < static_cast<float>(s.w) || vp.Height < static_cast<float>(s.h))
         return false;
     ID3D11ShaderResourceView* srv1 = nullptr;
     ctx->PSGetShaderResources(1, 1, &srv1);
@@ -1124,7 +1401,21 @@ bool try_final(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_t
     ctx->RSSetViewports(1, &reduced_vp);
     ctx->RSSetScissorRects(1, &reduced_sc);
     ctx->PSSetConstantBuffers(0, 1, &patched);
+    // Test (`dlss nograin 1`): the pass's noise texture array (t0, 64 slices of 64x64) unbound.
+    ComPtr<ID3D11ShaderResourceView> saved_t0;
+    const bool no_grain = g_set.no_grain.load();
+    if (no_grain) {
+        ID3D11ShaderResourceView* t0 = nullptr;
+        ctx->PSGetShaderResources(0, 1, &t0);
+        saved_t0.Attach(t0);
+        ID3D11ShaderResourceView* none = nullptr;
+        ctx->PSSetShaderResources(0, 1, &none);
+    }
     original(ctx, count, start, base);
+    if (no_grain) {
+        ID3D11ShaderResourceView* t0 = saved_t0.Get();
+        ctx->PSSetShaderResources(0, 1, &t0);
+    }
     ID3D11Buffer* game_cb0_raw = game_cb0.Get();
     ctx->PSSetConstantBuffers(0, 1, &game_cb0_raw);
     ID3D11RenderTargetView* restore[8];
@@ -1138,14 +1429,38 @@ bool try_final(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_t
     ID3DDeviceContextState* game_state = nullptr;
     ctx1->SwapDeviceContextState(R.state.Get(), &game_state);
     bool ok = false, created = false;
-    const UINT ox = static_cast<UINT>(vp.TopLeftX), oy = static_cast<UINT>(vp.TopLeftY);
-    const UINT ow = static_cast<UINT>(vp.Width), oh = static_cast<UINT>(vp.Height);
+    // DLSS writes the eye's whole half, whatever part of it the view rendered.
+    const UINT ox = static_cast<UINT>(eye) * half, oy = 0;
+    const UINT ow = half, oh = td.Height;
+    // The feature is created once for the largest input the settings allow, so that dynamic
+    // resolution only changes the input rectangle per evaluation (no recreation): the eye's
+    // rectangle at [stereo] render_scale (the upper bound of dynamic resolution, rounded like
+    // the device rounds it), times the screen percentage (the input buffer's share of the eye
+    // texture), rounded up, plus 2 pixels for the engine's rounding.
+    const float rs = g_set.max_full.load() ? 1.0f : std::clamp(device::settings().render_scale.load(), 0.3f, 1.0f);
+    auto scaled = [rs](UINT full) {
+        return rs >= 0.999f ? full : std::clamp<UINT>(static_cast<UINT>(std::lround(full * rs / 8.0) * 8), 64u, full);
+    };
+    const UINT max_w = std::min(ow, std::max(s.w, static_cast<UINT>(std::ceil(static_cast<double>(scaled(half)) * id.Width / td.Width)) + 2));
+    const UINT max_h = std::min(oh, std::max(s.h, static_cast<UINT>(std::ceil(static_cast<double>(scaled(td.Height)) * id.Height / td.Height)) + 2));
+    // NGX allows a smaller input than the creation size only within the range its optimal
+    // settings give for the mode (dynamic resolution, guide 3.2.2). With the NVIDIA App's
+    // override forcing DLAA the range is about 99-100 % of the output, a reduced creation
+    // size is outside it, and every evaluation must use exactly the creation size: then
+    // the feature is created at the current input size (a change recreates it).
+    const DynRange dr = dynamic_range(ow, oh, quality_for(max_w, ow));
+    const bool dyn = dr.ok && dr.min_w < dr.max_w && dr.min_h < dr.max_h && max_w >= dr.min_w && max_w <= dr.max_w && max_h >= dr.min_h &&
+                     max_h <= dr.max_h && s.w >= dr.min_w && s.h >= dr.min_h;
+    const UINT cw = dyn ? max_w : s.w, ch = dyn ? max_h : s.h;
     Feature& f = R.feat[eye];
-    if (ensure_feature(ctx, eye, s.w, s.h, created, ow, oh, false)) {
+    if (ensure_feature(ctx, eye, cw, ch, created, ow, oh, g_set.up_hdr.load(), dyn, dr.min_w, dr.min_h) &&
+        s.w <= f.w && s.h <= f.h && s.w >= f.min_w && s.h >= f.min_h) {
         Timing* t = begin_timing(ctx, eye);
         if (t) ctx->End(t->t1);
-        bool reset = created || f.last_eval_frame + 1 < R.frame || g_set.reset_requests.load() > 0;
+        bool reset = created || f.last_eval_frame + 1 < R.frame || g_set.reset_requests.load() > 0 || s.reset;
         NVSDK_NGX_D3D11_DLSS_Eval_Params ep{};
+        ep.Feature.InSharpness = g_set.sharpness.load();
+        ep.InPreExposure = g_set.pre_exposure.load();
         ep.Feature.pInColor = g_graded.Get();
         ep.Feature.pInOutput = g_up_out.Get();
         ep.pInDepth = s.depth.Get();
@@ -1166,12 +1481,18 @@ bool try_final(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_t
         if (NVSDK_NGX_SUCCEED(r)) {
             const D3D11_BOX box{ox, oy, 0, ox + ow, oy + oh, 1};
             ctx->CopySubresourceRegion(target.Get(), 0, ox, oy, 0, g_up_out.Get(), 0, &box);
+            if (eye == 0) cuttest_on_output(ctx, g_up_out.Get(), ox, oy, ow, oh, R.frame);
             f.last_eval_frame = R.frame;
+            g_full[eye].frame = R.frame;
+            g_full[eye].rect = EyeRect{static_cast<std::int32_t>(ox), static_cast<std::int32_t>(oy), ow, oh};
             ok = true;
             ++g_up_count;
             with_info([&](Info& i) {
                 i.jitter_px[eye][0] = s.jx;
                 i.jitter_px[eye][1] = s.jy;
+                if (eye == 0)
+                    i.up_sizes = std::format("feature {}x{} (largest input) | input {}x{} at {},{} | output {}x{} at {},{} (view rect {}x{})", f.w, f.h, s.w,
+                                             s.h, s.x, s.y, ow, oh, ox, oy, vp.Width, vp.Height);
             });
         } else {
             ++g_up_fail;
@@ -1307,19 +1628,36 @@ void start(const Config& cfg, const std::filesystem::path& dll_dir) {
     if (parse_preset(cfg.get_string("dlss", "preset", "default"), p)) g_set.preset = p;
     g_set.auto_exposure = cfg.get_bool("dlss", "auto_exposure", true);
     g_set.mv_jitter = static_cast<int>(cfg.get_int("dlss", "mv_jitter", 2));
-    g_set.cut_reset = cfg.get_bool("dlss", "camera_cut_reset", false);
+    g_set.cut_reset = cfg.get_bool("dlss", "camera_cut_reset", true);
+    g_set.cut_distance = static_cast<float>(cfg.get_float("dlss", "cut_distance", 100.0));
+    g_set.cut_angle = static_cast<float>(cfg.get_float("dlss", "cut_angle", 30.0));
     g_set.log_ngx = cfg.get_bool("dlss", "log_ngx", true);
     const std::string extra = cfg.get_string("dlss", "dll_dir", "");
     if (!extra.empty()) g_extra_dll_dir = log::widen(extra);
-    const std::string mode = cfg.get_string("dlss", "mode", "dlaa");
-    g_set.mode = mode == "upscale" ? 1 : 0;
-    if (mode != "dlaa" && mode != "upscale") log::warn("dlss: mode '{}' unknown; dlaa used", mode);
+    const std::string mode = cfg.get_string("dlss", "mode", "upscale");
+    g_set.mode = mode == "dlaa" ? 0 : 1;
+    if (mode != "dlaa" && mode != "upscale") log::warn("dlss: mode '{}' unknown; upscale used", mode);
+    // [dlss] input_scale: the share of each eye's width and height rendered before DLSS scales
+    // it up. It sets [stereo] render_scale (the view rects; with dynamic resolution its upper
+    // bound) while DLSS upscales; r.ScreenPercentage, if also set, multiplies with it.
+    const double input = cfg.get_float("dlss", "input_scale", 0.5);
+    if (g_set.enabled.load() && g_set.mode.load() == 1 && input > 0.0) {
+        const float s = static_cast<float>(std::clamp(input, 0.3, 1.0));
+        device::settings().render_scale = s;
+        log::info("dlss: input_scale {:.2f}: [stereo] render_scale set to it", s);
+    }
     log::info("dlss: built in; {} (mode {}, preset {}, auto exposure {}, motion vector jitter mode {}{})",
               g_set.enabled.load() ? "ON" : "off ([dlss] enabled = 0)", g_set.mode.load() ? "upscale" : "dlaa", preset_name(g_set.preset.load()),
               g_set.auto_exposure.load() ? "on" : "off", g_set.mv_jitter.load(), extra.empty() ? "" : ", extra library folder " + extra);
 }
 
 bool wants_hooks() { return g_set.enabled.load(std::memory_order_relaxed) || g_set.init_requested.load(std::memory_order_relaxed); }
+
+void output_rects(EyeRect rects[2]) {
+    const std::uint64_t ended = g_rhi->frame - 1;  // frame() has already counted the frame that just ended
+    for (int e = 0; e < 2; ++e)
+        if (g_full[e].frame != 0 && g_full[e].frame == ended) rects[e] = g_full[e].rect;
+}
 
 void frame(ID3D11Texture2D* any_texture) {
     Rhi& R = *g_rhi;
@@ -1358,6 +1696,7 @@ void frame(ID3D11Texture2D* any_texture) {
             with_info([](Info& i) { i.features[0] = i.features[1] = "released"; });
         }
         collect_timing(ctx);
+        cuttest_collect(ctx, R.frame);
         if (g_set.bench.load() && R.ngx_state == 1) run_bench(ctx);
         else if (R.bench.handle) release_feature(R.bench);
         ctx->Release();
@@ -1450,6 +1789,47 @@ std::string command(const std::string& args) {
         g_set.cut_reset = a[1] == "1";
         return std::format("ok camera cut reset {}", g_set.cut_reset.load() ? "on" : "off");
     }
+    if (sub == "cutflag" && a.size() == 2) {
+        g_set.cut_flag = a[1] == "1";
+        return std::format("ok row 140 camera cut flag {}", g_set.cut_flag.load() ? "used" : "only counted");
+    }
+    if (sub == "cutlimits" && a.size() == 3) {
+        g_set.cut_distance = static_cast<float>(std::atof(a[1].c_str()));
+        g_set.cut_angle = static_cast<float>(std::atof(a[2].c_str()));
+        return std::format("ok camera cut at more than {} cm or {} degrees in one frame", g_set.cut_distance.load(), g_set.cut_angle.load());
+    }
+    if (sub == "cuttest" && a.size() == 4) {
+        {
+            std::lock_guard lock(g_cuttest.m);
+            g_cuttest.prefix = a[1];
+        }
+        g_cuttest.want_reset = a[2] == "1";
+        g_cuttest.want_zero = a[3] == "1";
+        g_cuttest.armed = true;
+        with_info([&](Info& i) { i.cut_test = "armed: " + args; });
+        return std::format("ok cut test armed (reset {}, motion vectors {}): the next camera cut writes {}_f<n>_<w>x<h>.r10g10b10a2",
+                           a[2] == "1" ? "on" : "off", a[3] == "1" ? "zero" : "as computed", a[1]);
+    }
+    if (sub == "hdr" && a.size() == 2) {
+        g_set.up_hdr = a[1] == "1";
+        return std::format("ok upscale input flagged {} (features are recreated)", g_set.up_hdr.load() ? "HDR" : "display-referred (LDR)");
+    }
+    if (sub == "sharpness" && a.size() == 2) {
+        g_set.sharpness = static_cast<float>(std::atof(a[1].c_str()));
+        return std::format("ok sharpness {}", g_set.sharpness.load());
+    }
+    if (sub == "preexp" && a.size() == 2) {
+        g_set.pre_exposure = static_cast<float>(std::atof(a[1].c_str()));
+        return std::format("ok pre-exposure {}", g_set.pre_exposure.load());
+    }
+    if (sub == "maxinput" && a.size() == 2 && (a[1] == "full" || a[1] == "setting")) {
+        g_set.max_full = a[1] == "full";
+        return std::format("ok features sized for the input at {}", g_set.max_full.load() ? "render scale 1" : "[stereo] render_scale");
+    }
+    if (sub == "nograin" && a.size() == 2) {
+        g_set.no_grain = a[1] == "1";
+        return std::format("ok last pass noise texture {}", g_set.no_grain.load() ? "unbound at the reduced size" : "as the game binds it");
+    }
     if (sub == "reset") {
         g_set.reset_requests = 2;
         return "ok history reset at the next frame";
@@ -1483,7 +1863,10 @@ std::string command(const std::string& args) {
         });
         return "ok GPU timing restarted";
     }
-    if (sub != "status") return "err dlss status|on|off|init|preset <default|j|k|l|m>|autoexp <0|1>|mvjitter <0|1|2>|jitter <sx> <sy>|cutreset <0|1>|reset|recreate|dump|timing";
+    if (sub != "status")
+        return "err dlss status|on|off|init|mode <dlaa|upscale>|preset <default|j|k|l|m>|autoexp <0|1>|mvjitter <0|1|2>|jitter <sx> <sy>|cutreset <0|1>|"
+               "cutflag <0|1>|cutlimits <cm> <deg>|cuttest <prefix> <reset 0|1> <zero_mv 0|1>|hdr <0|1>|sharpness <v>|preexp <v>|nograin <0|1>|reset|"
+               "recreate|dump|timing|bench ...";
     std::string s;
     with_info([&](Info& i) {
         auto avg = [&](int e, const double* sum) { return i.ms_n[e] ? sum[e] / static_cast<double>(i.ms_n[e]) : 0.0; };
@@ -1498,7 +1881,14 @@ std::string command(const std::string& args) {
             i.features[1].empty() ? "-" : i.features[1], avg(0, i.ms_sum), avg(1, i.ms_sum), avg(0, i.mv_ms_sum), avg(1, i.mv_ms_sum), i.ms_n[0], i.ms_n[1],
             i.jitter_px[0][0], i.jitter_px[0][1], i.jitter_px[1][0], i.jitter_px[1][1], g_ub_size.load(), g_ub_captures_map.load(),
             g_ub_captures_update.load(), g_ub_captures_create.load(), i.optimal.empty() ? "" : " | optimal:" + i.optimal);
-        s += std::format(" | mode {} | upscaled {} upscale failures {}", g_set.mode.load() ? "upscale" : "dlaa", g_up_count.load(), g_up_fail.load());
+        s += std::format(" | mode {} | upscaled {} upscale failures {} | {}", g_set.mode.load() ? "upscale" : "dlaa", g_up_count.load(), g_up_fail.load(),
+                         i.up_sizes.empty() ? "-" : i.up_sizes);
+        s += std::format(" | camera cuts: reset {} ({} resets) engine {} distance {} angle {} flag {} (row 140 set in {} views; limits {} cm {} deg) last: {} | "
+                         "cut test: {} | tests: hdr input {} sharpness {} pre-exposure {} no grain {}",
+                         g_set.cut_reset.load() ? "on" : "off", g_cut_resets.load(), g_cut_count[0].load(), g_cut_count[2].load(), g_cut_count[3].load(),
+                         g_cut_count[1].load(), g_flag_frames.load(), g_set.cut_distance.load(), g_set.cut_angle.load(),
+                         i.last_cut.empty() ? "-" : i.last_cut, i.cut_test.empty() ? "-" : i.cut_test, g_set.up_hdr.load() ? 1 : 0,
+                         g_set.sharpness.load(), g_set.pre_exposure.load(), g_set.no_grain.load() ? 1 : 0);
         if (!i.bench.empty())
             s += std::format(" | {}{}: GPU {:.3f} ms (samples {})", i.bench, g_set.bench.load() ? "" : " (off)", avg(2, i.ms_sum), i.ms_n[2]);
     });

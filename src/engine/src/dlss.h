@@ -20,6 +20,8 @@
 
 #include "gpu_trace.h"
 
+#include "ff7vr/engine/stereo_host.h"
+
 #include <d3d11.h>
 
 #include <filesystem>
@@ -42,6 +44,12 @@ void frame(ID3D11Texture2D* any_texture);
 
 // RHI thread, for every DrawIndexed on the immediate context: true if it replaced the draw.
 bool on_draw_indexed(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_trace::DrawIndexedFn original);
+
+// RHI thread, at the end of a stereo frame (after frame()), before the eye texture goes to
+// the runtime: in upscale mode an eye whose image DLSS wrote this frame gets the rectangle
+// DLSS wrote (the whole half of the eye texture), also when the view rendered only part of
+// it ([stereo] render_scale, dynamic resolution). Other eyes keep the rectangle given.
+void output_rects(EyeRect rects[2]);
 
 // Dev pipe: "dlss ..." (see docs/dlss.md).
 std::string command(const std::string& args);

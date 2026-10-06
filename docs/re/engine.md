@@ -919,20 +919,41 @@ buffer; `dlss dump`, `captures/dlss/r1`, static camera):
 
 | Row | Content | Left / right view |
 |---|---|---|
+| 52, 53, 54 | `ViewForward`, `ViewUp`, `ViewRight` (unit vectors, world space) | e.g. `-0.807 0.590 0`, `0 0 1`, `-0.590 -0.807 0` |
+| 57 | `InvDeviceZToWorldZTransform` | `0 0 0.1 -1e-8` (near plane 10 cm) |
+| 58 | `ScreenPositionScaleBias` | `0.25 -0.5 0.5 0.25` (double-wide target) |
+| 59 | `WorldCameraOrigin` (cm) | e.g. `-1830.26 16094.8 156.575` |
+| 60, 61, 62 | `TranslatedWorldCameraOrigin` (0), `WorldViewOrigin`, `PreViewTranslation` (minus the origin) | |
+| 103, 104, 105 | `PrevWorldCameraOrigin`, `PrevWorldViewOrigin`, `PrevPreViewTranslation`: the camera the frame's motion is relative to | equal to the previous frame's row 59, see below |
 | 114-117 | `ClipToPrevClip` (row-major, `mul(float4(ndc, depth, 1), M)`) | near identity when nothing moves |
 | 118 | `TemporalAAJitter`: xy this frame, zw the previous frame, in clip units (pixels = `x * width / 2`, `-y * height / 2`) | e.g. `4.2e-5 -2.3e-4 3.2e-5 1.7e-4` / `-1.1e-4 -1.7e-4 2.4e-4 1.9e-4`: each view has its own jitter sequence |
 | 121 | view rectangle min | `0 0` / `3072 0` |
 | 122 | view size and inverse | `3072 3264 1/3072 1/3264` |
 | 125 | view size again | same |
 | 126 | buffer size and inverse | `6144 3264 ...` |
-| 140 | `.y` 0 in these frames (a camera-cut flag in a flat-screen mod's reading, not verified) | 0 |
+| 120 | `FieldOfViewWideAngles`, `PrevFieldOfViewWideAngles` (radians) | `1.837 1.741 1.837 1.741` (105 x 99.8 degrees) |
+| 140 | `.y` 0 in these frames (a camera-cut flag in a flat-screen mod's reading, not verified; it stayed 0 also on the engine's own resets below) | 0 |
 
-These match the order of `FViewUniformShaderParameters` in UE 4.18 for rows 114-122. How the
+These match the order of `FViewUniformShaderParameters` in UE 4.18 for rows 52-122 (rows
+50-145 dumped with `dlss dump`, `captures/dlss/r21`, first room, still camera; the rows
+52-62 and 103-105 checked against their meaning: unit vectors, the origin and its negation,
+the previous origin equal to the origin while nothing moves). How the
 engine writes the buffer: both through `Map(WRITE_DISCARD)`/`Unmap` and through
 `UpdateSubresource` on 4096-byte constant buffers (about 12 and 21 per stereo frame of that
 size, 8652 and 15120 over 721 frames; not all of them view buffers); none created with
 initial data. The capture is keyed by the buffer object, so the rows found for the bound
 `cb1` are those of that view.
+
+**The engine resets a view's previous-frame camera by itself** (LIVE, `captures/dlss/r21`,
+log lines `dlss: camera cut`): on the frame the Null backend's emulated head turned by 150
+degrees at once (`xr-sim head 150`), both views had `PrevWorldCameraOrigin` (row 103) equal
+to their new `WorldCameraOrigin` (row 59) instead of the previous frame's origin 6.2 cm away,
+so `ClipToPrevClip` was the identity and the motion vectors of static geometry zero, as on a
+camera cut. A 2.5 m jump of the head position (`xr-sim head 0 0 0 0 2.5`) did not reset it
+(row 103 = the previous frame's row 59). This is what UE 4.18's large-camera-movement check
+in `InitViews` does (a reset at more than 45 degrees or 100 m in one frame, as on
+`bCameraCut`; inferred from the engine source, the thresholds were not bisected here). In
+every other frame of the runs row 103 was exactly the previous frame's row 59, per view.
 
 ### Below 100 % screen percentage: where the upscale happens (LIVE, GPU trace)
 

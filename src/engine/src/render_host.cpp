@@ -4,6 +4,10 @@
 
 #include "render_host.h"
 
+#if FF7VR_ENGINE_WITH_DLSS
+#include "dlss.h"
+#endif
+
 #include "ff7vr/core/log.h"
 #include "ff7vr/render/render.h"
 
@@ -71,11 +75,15 @@ public:
         s.texture = eyes.texture;
         s.viewFormat = eyes.view_format;
         s.encoding = eyes.srgb_encoded ? xr::ColorEncoding::Srgb : xr::ColorEncoding::Linear;
+        EyeRect rects[2] = {eyes.eyes[0], eyes.eyes[1]};
+#if FF7VR_ENGINE_WITH_DLSS
+        dlss::output_rects(rects);  // DLSS upscaling writes the whole half of each eye
+#endif
         for (int e = 0; e < 2; ++e) {
-            s.eyeRects[e].x = eyes.eyes[e].x;
-            s.eyeRects[e].y = eyes.eyes[e].y;
-            s.eyeRects[e].width = eyes.eyes[e].width;
-            s.eyeRects[e].height = eyes.eyes[e].height;
+            s.eyeRects[e].x = rects[e].x;
+            s.eyeRects[e].y = rects[e].y;
+            s.eyeRects[e].width = rects[e].width;
+            s.eyeRects[e].height = rects[e].height;
         }
         if (eyes.views_valid) {
             s.haveRenderedViews = true;
