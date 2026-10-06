@@ -9,6 +9,9 @@
 #include "ff7vr/core/hook.h"
 #include "ff7vr/core/log.h"
 #include "ff7vr/core/module.h"
+#if FF7VR_ENGINE_WITH_RENDER
+#include "ff7vr/render/render.h"
+#endif
 
 #include <d3d11_1.h>
 #include <d3dcompiler.h>
@@ -3535,8 +3538,14 @@ void frame(ID3D11Texture2D* any_texture) {
     }
     if (R.ngx_state == 1) event(std::format("frame end (anti-aliasing passes 0x{:x})", g_taa_frame == R.frame ? g_taa_mask : 0u));
     // The texture mip bias of the next frame: while this frame was upscaled.
-    update_tex_bias(g_set.enabled.load(std::memory_order_relaxed) && g_set.mode.load(std::memory_order_relaxed) == 1 && R.ngx_state == 1 &&
-                    (R.feat[0].last_eval_frame == R.frame || R.feat[1].last_eval_frame == R.frame));
+    const bool upscaled = g_set.enabled.load(std::memory_order_relaxed) && g_set.mode.load(std::memory_order_relaxed) == 1 && R.ngx_state == 1 &&
+                          (R.feat[0].last_eval_frame == R.frame || R.feat[1].last_eval_frame == R.frame);
+    update_tex_bias(upscaled);
+#if FF7VR_ENGINE_WITH_RENDER
+    // Foveation one step finer while the frames are upscaled (docs/dlss.md, "The dots").
+    const float share = g_tex.share.load(std::memory_order_relaxed);
+    render::FoveationSetUpscaling(upscaled && share > 0.05f && share < 0.999f, share);
+#endif
     ++R.frame;
     g_rhi_tid.store(GetCurrentThreadId(), std::memory_order_relaxed);
     const auto now = std::chrono::steady_clock::now();

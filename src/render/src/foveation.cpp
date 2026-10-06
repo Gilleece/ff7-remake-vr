@@ -62,6 +62,10 @@ struct Settings {
     EyeTracking eyeTracking = EyeTracking::Off;
     float gazeMarginDeg = 5.0f;   // added to the full-rate zone's radius while the gaze drives the centre
     float gazeSmoothing = 0.5f;   // 0 = none; weight of the previous centre for small gaze movements
+    // While DLSS upscales, one step finer than the preset (docs/dlss.md, "The dots"): DLSS
+    // keeps the coarse blocks sharp at the larger output size.
+    bool dlssFiner = true;
+    std::string finerFrom;  // set on the settings in use: the preset they were made finer from
 };
 
 struct Preset {
@@ -149,9 +153,32 @@ bool ApplyPreset(Settings& s, const std::string& name) {
     return false;
 }
 
+// The settings one step finer, for while DLSS upscales: `performance` takes the radii and
+// rates of `balanced`, `balanced` those of `quality`; `quality` stays. Custom radii or
+// rates keep their radii, and rates coarser than 2x2 become 2x2.
+Settings Finer(const Settings& s) {
+    Settings f = s;
+    const std::string from = s.preset;
+    if (s.preset == "performance" || s.preset == "balanced") {
+        ApplyPreset(f, s.preset == "performance" ? "balanced" : "quality");
+        f.enabled = s.enabled;
+    } else if (s.preset != "quality") {
+        for (auto& r : f.rate)
+            if (RatePixels(r) > 4) r = NV_PIXEL_X1_PER_2X2_RASTER_PIXELS;
+    }
+    f.finerFrom = from;
+    return f;
+}
+
+std::string RatesText(const Settings& s) {
+    return std::format("{} / {} / {} from {:.2f} / {:.2f} / {:.2f}", RateText(s.rate[0]), RateText(s.rate[1]), RateText(s.rate[2]), s.radius[0],
+                       s.radius[1], s.radius[2]);
+}
+
 std::string Describe(const Settings& s) {
     if (!s.enabled) return "off";
-    return std::format("preset {}: 1x1 inside {:.2f}, {} to {:.2f}, {} to {:.2f}, {} beyond; hidden area {}; passes {}{}", s.preset, s.radius[0],
+    return std::format("preset {}{}: 1x1 inside {:.2f}, {} to {:.2f}, {} to {:.2f}, {} beyond; hidden area {}; passes {}{}", s.preset,
+                       s.finerFrom.empty() ? std::string() : std::format(" (one step finer than {} while DLSS upscales)", s.finerFrom), s.radius[0],
                        RateText(s.rate[0]), s.radius[1], RateText(s.rate[1]), s.radius[2], RateText(s.rate[2]), CornersText(s.corners),
                        s.passes == Passes::All ? "all (size rule only)" : s.passes == Passes::NoGBuffer ? "scene without the G-buffer pass" : "scene",
                        s.skipFormats.empty() ? std::string() : std::format(", skipping {} render target format(s)", s.skipFormats.size())) +
@@ -161,7 +188,8 @@ std::string Describe(const Settings& s) {
            (s.eyeTracking == EyeTracking::Off
                 ? std::string()
                 : std::format("; eye tracking {} (gaze margin {:.1f} deg, smoothing {:.2f})", EyeTrackingText(s.eyeTracking), s.gazeMarginDeg,
-                              s.gazeSmoothing));
+                              s.gazeSmoothing)) +
+           (s.finerFrom.empty() ? std::format("; dlss_finer {}", s.dlssFiner ? 1 : 0) : std::string());
 }
 
 // ---------------------------------------------------------------- state
@@ -181,6 +209,12 @@ std::atomic<bool> g_traceRequested{false};
 // session that had it on, so on and off can be compared in one run.
 std::atomic<bool> g_measure{false};
 std::atomic<bool> g_simulateUnsupported{false};  // [debug] foveation_unsupported: test of the fallback
+// DLSS upscales the stereo frames (FoveationSetUpscaling): on at the first upscaled frame,
+// off after kNotUpscaledFrames frames in a row without (one fallback frame changes nothing).
+std::atomic<bool> g_upscaling{false};
+std::atomic<float> g_upscaleShare{0.0f};  // the input's share of the output width
+int g_notUpscaledRun = 0;                 // context thread
+constexpr int kNotUpscaledFrames = 90;
 
 // Indices in the shading-rate surface.
 constexpr uint8_t kIndexFull = 0, kIndexHidden = 4;
@@ -189,8 +223,11 @@ constexpr uint8_t kIndexFull = 0, kIndexHidden = 4;
 struct State {
     enum class Init { NotYet, Ok, Failed } init = Init::NotYet;
     ID3D11Device* device = nullptr;  // not referenced: the game's device outlives the session
-    Settings settings;
+    Settings base;      // as configured
+    Settings settings;  // in use: base, or one step finer while DLSS upscales
     uint32_t settingsVersion = 0;
+    bool upscaling = false;    // g_upscaling when the settings in use were made
+    bool finerActive = false;  // settings = Finer(base)
     // Layout of the last stereo scene and the surface built for it.
     FoveationEye eyes[2]{};
     bool haveLayout = false;
@@ -275,6 +312,7 @@ struct State {
 State g;
 std::mutex g_statusMutex;  // guards the copies below, for Status() from the pipe thread
 std::string g_statusLine = "not initialised";
+std::string g_inUseLine;  // the settings in use when they differ from the configured ones (DLSS)
 std::string g_gazeLine = "no stereo frame yet";  // `fov gaze status`, refreshed by the context thread
 std::atomic<bool> g_eyeTrackingRequested{false};  // [foveation] eye_tracking != 0 when the settings were read
 // `fov gaze dump`: the context thread reads the surface back and writes it as a PNG.
@@ -796,13 +834,31 @@ bool EnsureInit(ID3D11Device* device, ID3D11DeviceContext* ctx) {
 
 void TakeSettings() {
     const uint32_t v = g_settingsVersion.load();
-    if (v == g.settingsVersion) return;
-    {
+    const bool up = g_upscaling.load(std::memory_order_relaxed);
+    if (v == g.settingsVersion && up == g.upscaling) return;
+    if (v != g.settingsVersion) {
         std::lock_guard lk(g_settingsMutex);
-        g.settings = g_settings;
+        g.base = g_settings;
     }
+    const bool upChanged = up != g.upscaling;
     g.settingsVersion = v;
+    g.upscaling = up;
+    const bool finer = up && g.base.enabled && g.base.dlssFiner;
+    g.settings = finer ? Finer(g.base) : g.base;
     g.haveLayout = false;  // the next scene builds a new surface (the old one is retired then)
+    const double pct = 100.0 * g_upscaleShare.load(std::memory_order_relaxed);
+    if (finer)
+        log::info("foveation: DLSS upscales from {:.0f} % of the output width and [foveation] dlss_finer = 1: rates {} in use, one step finer than "
+                  "preset {} as set ({}), so that DLSS does not keep the coarse blocks sharp",
+                  pct, RatesText(g.settings), g.base.preset, RatesText(g.base));
+    else if (up && g.base.enabled && (upChanged || g.finerActive))
+        log::info("foveation: DLSS upscales from {:.0f} % of the output width; [foveation] dlss_finer = 0: preset {} as set, rates {}", pct,
+                  g.base.preset, RatesText(g.base));
+    else if (upChanged && !up && g.finerActive)
+        log::info("foveation: DLSS no longer upscales: preset {} as set, rates {}", g.base.preset, RatesText(g.base));
+    g.finerActive = finer;
+    std::lock_guard lk(g_statusMutex);
+    g_inUseLine = finer ? Describe(g.settings) : std::string();
 }
 
 void StartTrace(ID3D11DeviceContext* ctx) {
@@ -1130,6 +1186,7 @@ void Configure(const Config& c) {
     }
     s.gazeMarginDeg = std::clamp(static_cast<float>(c.get_float("foveation", "gaze_margin_deg", 5.0)), 0.0f, 30.0f);
     s.gazeSmoothing = std::clamp(static_cast<float>(c.get_float("foveation", "gaze_smoothing", 0.5)), 0.0f, 0.95f);
+    s.dlssFiner = c.get_bool("foveation", "dlss_finer", true);
     g_eyeTrackingRequested = s.enabled && s.eyeTracking != EyeTracking::Off;
     {
         std::lock_guard lk(g_settingsMutex);
@@ -1284,17 +1341,18 @@ void SceneEnd() {
 }
 
 std::string Status() {
-    std::string line;
+    std::string line, inUse;
     {
         std::lock_guard lk(g_statusMutex);
         line = g_statusLine;
+        inUse = g_inUseLine;
     }
     Settings s;
     {
         std::lock_guard lk(g_settingsMutex);
         s = g_settings;
     }
-    return std::format("foveation {}; {}", Describe(s), line);
+    return std::format("foveation {}; {}{}", Describe(s), inUse.empty() ? std::string() : "IN USE while DLSS upscales: " + inUse + "; ", line);
 }
 
 std::string Command(const std::string& argsIn) {
@@ -1365,6 +1423,12 @@ std::string Command(const std::string& argsIn) {
         return update([&](Settings& s) {
             if (a[1] != "0" && a[1] != "1") return std::string("lighting 0|1");
             s.lightingFullRate = a[1] == "1";
+            return std::string();
+        });
+    if (a[0] == "dlss_finer" && a.size() == 2)
+        return update([&](Settings& s) {
+            if (a[1] != "0" && a[1] != "1") return std::string("dlss_finer 0|1");
+            s.dlssFiner = a[1] == "1";
             return std::string();
         });
     if (a[0] == "exclude" && (a.size() == 2 || a.size() == 3))
@@ -1468,7 +1532,7 @@ std::string Command(const std::string& argsIn) {
         return out;
     }
     return "err usage: fov status | on | off | preset quality|balanced|performance|off | radii <r1> <r2> <r3> | rates <a> <b> <c> | "
-           "hidden off|coarse|cull | passes scene|no-gbuffer|all | skip [dxgi formats] | subsurface 0|1 | lighting 0|1 | exclude <first> [<last>]|off | trace | timing | gaze status|mode|margin|smoothing|dump";
+           "hidden off|coarse|cull | passes scene|no-gbuffer|all | skip [dxgi formats] | subsurface 0|1 | lighting 0|1 | dlss_finer 0|1 | exclude <first> [<last>]|off | trace | timing | gaze status|mode|margin|smoothing|dump";
 }
 
 bool EyeTrackingRequested() { return g_eyeTrackingRequested.load(); }
@@ -1491,6 +1555,17 @@ bool GetGpuFrameTime(float* ms, uint64_t* samples) {
     if (samples) *samples = n;
     if (ms) *ms = foveation::g_gpuFrameMs.load(std::memory_order_relaxed);
     return n > 0;
+}
+
+void FoveationSetUpscaling(bool upscaled, float inputShare) {
+    using namespace foveation;
+    if (upscaled) {
+        g_notUpscaledRun = 0;
+        g_upscaleShare.store(inputShare, std::memory_order_relaxed);
+        g_upscaling.store(true, std::memory_order_relaxed);
+    } else if (g_upscaling.load(std::memory_order_relaxed) && ++g_notUpscaledRun >= kNotUpscaledFrames) {
+        g_upscaling.store(false, std::memory_order_relaxed);
+    }
 }
 
 }  // namespace ff7vr::render

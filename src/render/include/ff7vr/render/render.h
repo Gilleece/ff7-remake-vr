@@ -164,5 +164,9 @@ bool FoveationWanted();
 // Presenting thread (inside the frame's command stream).
 void FoveationSceneBegin(const FoveationEye eyes[2]);
 void FoveationSceneEnd();
+// Presenting thread, at the end of each stereo frame, from an upscaler (DLSS): whether it
+// upscaled this frame and the input's share of the output width. While it does, foveation
+// shades one step finer than its preset ([foveation] dlss_finer).
+void FoveationSetUpscaling(bool upscaled, float inputShare);
 
 }  // namespace ff7vr::render
