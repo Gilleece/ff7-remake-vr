@@ -374,6 +374,21 @@ gives the same gradient and outliers (14.0 to 17.1 against 13.8 to 16.4; 2.8 to 
 | `quality` | 10.12 (11.88) | +0.53 ms | no blocks seen; fine specks in dithered hair |
 | off | 10.95 (12.55) | +1.36 ms | clean |
 
+**Handled by default: `[foveation] dlss_finer = 1`.** While DLSS upscales, foveated rendering
+shades one step finer than its preset (`performance` with the radii and rates of `balanced`,
+`balanced` as `quality`, `quality` unchanged; docs/render.md, foveation settings). The engine
+module tells the render module at each stereo frame end whether DLSS upscaled it
+(`FoveationSetUpscaling`, only in a build with DLSS); the log names the rates in use
+(`foveation: DLSS upscales from 75 % of the output width and [foveation] dlss_finer = 1: rates
+2x2 / 2x2 / 4x4 from 0.55 / 0.80 / 1.05 in use, one step finer than preset performance as set
+...`) and `fov status` shows them. Measured at 3264x3072 / 0.75, Null backend, third person
+with a still camera, preset K, `performance` as set, switched live with `fov dlss_finer`, two
+rounds of 6 s windows: 9.71 and 9.74 ms with it, 9.56 and 9.58 ms without (+0.15 ms; pixels
+shaded at 4x4 from 30.3 % of the layout to 13.2 %, shading work 24.0 % to 38.4 % of full rate);
+DLSS 1.53 / 1.62 ms per eye either way. A man's head at the left edge of the left eye loses its
+mosaic and the bright specks in his hair (`captures/release-check/night/p1/sheet_head.png`,
+left `dlss_finer 0`, right `1`). The few blocks left at the very edge go with `quality`.
+
 Other remedies measured in the same run (third person, still camera, foveated rendering
 `performance`):
 

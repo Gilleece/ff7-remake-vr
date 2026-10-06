@@ -1239,6 +1239,7 @@ ring, which shows no mottling (neither change was measured for cost), before rea
 | `[foveation] eye_tracking` | `0` | `1` or `auto`: the rings follow the eye gaze when the headset has an eye tracker ([Eye-tracked foveation](#eye-tracked-foveation)); `0`: fixed at the optical centres. Read when the XR session starts |
 | `[foveation] gaze_margin_deg` | `5` | degrees added to the full-rate zone's radius while the gaze drives it (covers the gaze sample's age and tracker error) |
 | `[foveation] gaze_smoothing` | `0.5` | 0 to 0.95: weight of the previous centre for gaze movements under 2 degrees (fixational jitter); larger movements jump |
+| `[foveation] dlss_finer` | `1` | while DLSS upscales (a build with DLSS, `[dlss] mode = upscale`), one step finer than the preset: `performance` uses the radii and rates of `balanced`, `balanced` those of `quality`, `quality` stays; custom radii or rates keep their radii and rates coarser than 2x2 become 2x2. DLSS keeps the coarse blocks sharp at the larger output size (docs/dlss.md, "The dots"). Switches on at the first upscaled frame and back after 90 stereo frames in a row without, with a `foveation: DLSS upscales ...` log line naming the rates in use; `fov status` shows them after `IN USE while DLSS upscales`. `0`: the preset as set. Dev command `fov dlss_finer 0\|1` |
 
 Presets (radius 1.0 is half the eye width; with the Null backend's Quest 3
 class FOV that is a tangent of 1.09, so 0.70 is about 37 degrees from the view
@@ -1318,7 +1319,7 @@ BENCH_TABLE_PLACEHOLDER
 |---|---|
 | `fov status` | settings, state, stereo frames and bindings so far, the surface's ring shares and the optical centres |
 | `fov on` / `fov off` | switch the mask; after `fov off` the scene's GPU time keeps being measured, so on and off compare in one session |
-| `fov preset <name>`, `fov radii <a> <b> <c>`, `fov rates <a> <b> <c>`, `fov hidden off\|coarse\|cull`, `fov passes scene\|no-gbuffer\|all`, `fov skip [formats]` | change the settings at run time (the surface is rebuilt at the next stereo frame) |
+| `fov preset <name>`, `fov radii <a> <b> <c>`, `fov rates <a> <b> <c>`, `fov hidden off\|coarse\|cull`, `fov passes scene\|no-gbuffer\|all`, `fov skip [formats]`, `fov dlss_finer 0\|1` | change the settings at run time (the surface is rebuilt at the next stereo frame) |
 | `fov subsurface 0\|1` | the subsurface recombine at full rate (1) or with the mask (0) |
 | `fov lighting 0\|1` | every pass after the G-buffer at full rate (1) or with the mask (0); see [Hair at 2x2](#skin-edges-the-subsurface-recombine) |
 | `fov exclude <first> [<last>]`, `fov exclude off` | keep the scene window's render target bindings `first` to `last` (counted from the scene's start, `b<n>` in `fov trace`) at full rate; for finding which pass causes an artefact |
