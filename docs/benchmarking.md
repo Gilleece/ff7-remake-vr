@@ -323,9 +323,9 @@ how long it takes).
 
 ## Video memory and slow phases
 
-Three different states make stereo frames slow for seconds or minutes while the GPU reports
+Four different states make stereo frames slow for seconds or minutes while the GPU reports
 100 % "utilization" but draws a third of its power (80-130 W against 250-340 W when it
-renders). All were measured with the Null backend at 90 Hz, the player's ini (DLSS on at
+renders). The first three were measured with the Null backend at 90 Hz, the player's ini (DLSS on at
 `input_scale` 0.58 unless noted, foveation `performance`, LOD lines, bloom off), walking
 in the first room and the alley, on an RTX 5080 (16 GB, `DedicatedVideoMemory` 15977 MB)
 whose PCIe link runs at gen 4 x8 (`nvidia-smi --query-gpu=pcie.link.gen.current,pcie.link.width.current`;
@@ -416,6 +416,35 @@ What helps, measured:
   does not follow it (its surface is still laid out for the full eye, so the rings most likely
   sit in the wrong place; not looked at in an image).
 - Fewer other programs on the card (each holds some of the 2-3 GB the game cannot have).
+
+**4. Mesh passes slowing down after a few minutes (cause not found yet).** At 2064x2208 per eye
+without DLSS (the Null backend's default size; the player's ini, foveation `performance`, LOD
+lines, bloom off), every run so far ran at about 5.5 ms of scene GPU time for 2 to 5 minutes and
+then stepped up: 10-20 ms within 20 s, 30-60 ms a minute later, still rising. It happened with
+the head turning (`[xr] null_motion = yaw`) and with it still from the start (`static`), with
+temporal AA off from the start (`r.PostProcessAAQuality 0`), with and without Luma. It did not
+happen at 3072x3264 in one 10-minute run, nor with Luma's DLSS replacing the AA draw at 2064x2208
+(two runs). Once in it, nothing brought it back within 20-40 s: stopping the head motion
+(`xr-sim motion static`), the engine's LOD values, AA off, `fov off`, the per-eye fixes off,
+`r.Streaming.PoolSize 2500`, a `r.ScreenPercentage` change (the scene buffers are created
+again), even `stereo off` (the flat 1280x720 game then took 29 ms a frame). The next game process
+started fast. What the traces show (`fov trace` in the fast and the slow phase of the same run,
+the same bindings in the same order): the time goes into the passes that draw meshes, the depth
+prepass (0.8 to 7.1 ms), the G-buffer base pass (0.5 to 5.9 ms), the shadow depths (0.4 to 3.0 ms)
+and the velocity pass, while full-screen passes grow little; the GPU particle simulation's 28 tiny
+draws went from 0.01 to 0.7 ms. `gpu trace` of the same frames shows fewer draws and triangles in
+the slow frame (6.9 to 5.3 million), so each draw costs 5 to 25 microseconds more on the GPU, not
+more work. Meanwhile the GPU is 97-99 % busy at 95-115 W instead of 50 % at 150 W, clocks
+unchanged, PCIe traffic about 22 MB per frame instead of 15, copy engines idle, the card 60 %
+full: the GPU waits inside mesh draws. A memory event comes before the step in every run but is
+not enough on its own: the game's `Local Usage` (its allocations resident in the card) falls by
+1.0-1.5 GB about 1.5 minutes into stereo, and sometimes again at the step, while its `Dedicated
+Usage` and `Total Committed` and the card's total stay the same (allocations evicted, not freed);
+the 3072x3264 run had the same eviction and no slowdown. `tools\bench\gpu-counters.ps1` logs
+these per-process counters. What is still to try: `r.AllowOcclusionQueries 0`,
+`r.UniformBufferPooling 0` and `r.EarlyZPass 0` inside the state, the game without the mod for
+the same time, the mod in flat only, and more runs at 3072x3264. Evidence:
+`captures\perf\slow\` (local, not in the repository).
 
 The third state is not explained by memory and none of these settings removed it at 4032x3648.
 How to watch it: the timing block's `video memory:` line (`docs/render.md`, "Timing") and its
