@@ -647,9 +647,14 @@ foveation off only adds GPU time: **the late frames are the engine's, not the mo
 `r.HZBOcclusion 1` (the engine's occlusion culling by the hierarchical depth instead of
 hardware occlusion queries) halves the late part (p95 above the GPU time 2.8 -> 1.4-1.6 ms,
 40 % fewer frames over 12.5 ms) and lowers the turning p95 by 0.6 to 0.9 ms, but costs about
-0.5 ms of GPU time on every frame (average frame +0.5 ms while turning). It changes which
-objects are culled; whether that shows (late appearing objects at the edges while turning,
-different in the two eyes) was not checked. Not applied: a trade, and not fidelity-neutral
+0.5 ms of GPU time on every frame (average frame +0.5 ms while turning). It culls less:
+one-frame traces standing in the street (run `captures/perf/20261006-044530-occ-3072x3264`,
+`tr_occ0`, `tr_occ1`, `tr_occ0b`) have 358 / 338 and 316 / 334 base-pass draws (left / right
+view) with 0 and 586 / 543 with 1 (depth prepass 513 / 483, 461 / 480 and 510 / 474), which is
+where its GPU time goes. Whether its culling shows anywhere (objects appearing late at the edges
+while turning, a difference between the eyes) was not checked. `r.NumBufferedOcclusionQueries 2`
+(the game runs with 1) changes nothing while turning: p95 13.28-13.74 ms against 13.30-13.44 ms,
+interval above the GPU time p95 2.61-2.63 against 2.58-2.66 ms (same run). Not applied: a trade, and not fidelity-neutral
 until checked. Note that with it on, `hzb_skip` builds the chain again (its guard).
 
 Options measured but not on by default (they change the picture):
