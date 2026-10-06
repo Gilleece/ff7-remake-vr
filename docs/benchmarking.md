@@ -347,10 +347,14 @@ game's copy engine and the System process's copy engine are busy at 50-100 % and
 20-70 ms; the card is far from full (62-76 %). It ends by itself. Starting right after the
 previous game exited (14 s) or after a 2-minute pause made no difference.
 
-**3. A copy-bound state that does not end (cause not found).** At 4032x3648 with DLSS at 0.58
-three runs out of three (two with the committed code, one with a work-in-progress DLSS output
-mode) stayed at a median of about 71 ms per frame for the whole run (4 minutes), and two of
-four earlier 3072x3264 runs without DLSS did the same for 5 minutes. The card was only 62-90 %
+**3. A copy-bound state that may not end (cause not found).** At 4032x3648 with DLSS at 0.58,
+three runs (two with the committed code, one with a work-in-progress DLSS output mode) stayed
+at a median of about 71 ms per frame for the whole run (4 minutes), and two of four earlier
+3072x3264 runs without DLSS did the same for 5 minutes. It is intermittent: the same 4032
+setting started 100 s after the previous game's exit ran at 11.1 ms after 20 s, and started
+0.6 s after an exit it was slow (median 17-24 ms) for 105 s and then fine. The three
+4-minute cases had all started 5-10 s after an exit, but other quick starts were fine, so a
+quick restart is a suspect, not a proven cause. The card was only 62-90 %
 full. During it the game's two copy engines are busy at 40-130 % (summed), the System
 process's copy engine at 30-100 % and dwm's 3D engine at 10-90 %; the frame log shows the RHI
 thread waiting (9 ms of CPU in a 72 ms frame) rather than working. In one such session, with
