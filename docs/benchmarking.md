@@ -303,7 +303,12 @@ the steps file, dot-sourced with the helpers of `vr-perf-lib.ps1`:
 Steps files in `tools/bench/vr-perf-steps/`: `scenes.ps1` (three views of the latest save and
 turning, each with the per-eye reflections off and on: the before/after table in
 `docs/engine-module.md`, "At headset resolution"), `render-scale.ps1` (fixed render scales and
-the dynamic resolution). Output: `captures\perf\<time>-<tag>-<w>x<h>\` with `results.json`,
+the dynamic resolution), `turning.ps1` (frame logs while turning, `stereo framelog`: which
+thread a slow frame comes from; `docs/engine-module.md`, "Turning: where the slow frames come
+from").
+
+A session only stops the game it started: when `launch.ps1` exits with 3 (no lock, or a game
+someone else started is running), it leaves that game alone. Output: `captures\perf\<time>-<tag>-<w>x<h>\` with `results.json`,
 `results.txt`, `status.txt`, captures and the mod's log. The game is stopped and everything
 put back at the end (`-NoStop` keeps it running).
 

@@ -394,6 +394,7 @@ hidden buttons, is inferred from the filter's output.
 | `ao_fix` | `1` | right-eye ambient occlusion fix (below) |
 | `ssr_per_eye` | `1` | each eye's screen-space reflection run limited to its half of the target, and the per-view colour copy for it halved (see "Reflections per eye"); same image, about 0.45 ms less per frame at 2 x 3072x3264 |
 | `ssr_fix` | `1` | right-eye screen-space reflections: without it the right eye has none (see "Right-eye reflections fix") |
+| `hzb_skip` | `0` | `1` leaves out the further mips of the hierarchical depth chain nothing reads, while `r.HZBOcclusion` is 0 (see "Volumes and hierarchical depth per view"); gain within noise |
 | `tonemap_shift` | `auto` | with ReShade's Luma add-on loaded, the right view's tonemapping input shifted to the origin (Luma's shader reads it there; without it both eyes show the left eye's image). `auto`: only while Luma is loaded; `0` off; `1` always (breaks the right eye without Luma). `docs/render.md`, "ReShade and Luma" |
 | `render_scale` | `1.0` | share of each eye's target the views render, per axis (0.3 to 1); the runtime scales the smaller image to the display. Also the upper bound of the dynamic resolution (see "Render scale and dynamic resolution") |
 | `dynamic_resolution` | `0` | adjust the render scale every few frames to hold the GPU frame time below `dynamic_resolution_target` of the display's frame period |
@@ -461,6 +462,8 @@ Through the dev pipe (`[dev] pipe = 1`, `tools\dev\send-input.ps1 -Pipe "<comman
 | `ssr [on\|off]` | reflections per eye on/off, with its counters (runs limited, colour copies halved; two each per stereo frame) |
 | `ssr poison <0\|1\|2\|3>` | test of reflections per eye: `1` fills every half the fix skips with a loud colour (nothing of it may reach the eye images), `2` fills the half each reflection run writes, `3` the half each colour copy writes (controls: the colour must show) |
 | `ssr fix <0\|1>` | right-eye reflections fix off/on; `ssr` shows `applied` (one per stereo frame), `failed`, the x where the right view's result was placed, how often that x changed (`moved`) and results no draw read (`not read`) |
+| `hzb [0-4]` | the unread hierarchical depth chain: `0` built (default), `1` further mips left out, `2` / `3` the whole chain filled with near / far depth, `4` the read chain's further mips filled (control); shows the view chains seen and the mips left out |
+| `stereo framelog start` / `stop <csv>` | frame log: per frame the start, host return and end of `UGameEngine::Tick`, the render thread's end of the scene and the frame-end command on the RHI thread, each with the thread's CPU time (cycle count) and, at the start of Tick, the latest GPU frame time (see "Turning: where the slow frames come from") |
 | `dynres [on\|off]`, `dynres scale\|min\|target <value>` | render scale and dynamic resolution: state, current scale and rect, last GPU frame time and budget, number of changes |
 | `stereo movie [on\|off]`, `stereo movie menu <0\|1>` | movie detection on/off and its state; `menu 1` counts the menu background players too (test) |
 | `stereo window [<w>x<h>\|0]` | window size while VR renders in a fullscreen mode, and the state |
@@ -562,8 +565,8 @@ Headroom of "after" against the display period: at 72 Hz (13.9 ms) 4.7 to 6.5 ms
 3072x3264 and 2.7 to 4.8 ms at 3600x3600 standing; at 90 Hz (11.1 ms) 1.9 to 3.8 ms and
 -0.1 to 2.0 ms. Turning raises the 95th percentile by 3 to 4 ms; about half of that is GPU
 time (2 x 3600x3600: GPU p95 of scene plus post-processing 13.1-13.9 ms while turning against
-11.4 standing) and the rest frames whose CPU side is late (frame p95 14.6-15.8 ms; not traced
-further). These are GPU frame times
+11.4 standing) and the rest frames whose CPU side is late (frame p95 14.6-15.8 ms): the engine's
+render thread, not the mod ("Turning: where the slow frames come from"). These are GPU frame times
 of the game alone: Virtual Desktop's compositor and encoder take GPU time on top, which cannot
 be measured without the headset (the player's session at 3072x3264 / 72 Hz ran at 64 to 72
 fps before these changes).
@@ -574,8 +577,8 @@ target binding, 9.58 ms from the scene's start to Present):
 | Group | GPU ms |
 |---|---|
 | depth prepass and shadow depths | 1.1 |
-| hierarchical depth (four mip chains, built from the whole double-wide depth) | 0.6 |
-| translucency lighting volumes and other compute | 1.1 |
+| hierarchical depth (two mip chains per view, each view's build reading only its own rectangle; "Volumes and hierarchical depth per view") | 0.6 (0.45 in a later trace) |
+| volumetric fog per eye, the shared translucency lighting volume (about 0.07) and other compute | 1.1 |
 | G-buffer (base pass, velocity) | 0.9 |
 | ambient occlusion, subsurface setup and blurs (per eye) | 0.9 |
 | lights, shadow masks, sky and fog into scene colour | 2.6 |
@@ -589,11 +592,72 @@ play) the busiest threads are the RHI thread (about 40 % of a core), an unnamed 
 (37 %), the game thread (31 %) and the render thread (24 %): the frame is GPU-bound at these
 sizes.
 
+### Turning: where the slow frames come from
+
+`stereo framelog start` / `stop <csv>` records, for every engine frame, the start of
+`UGameEngine::Tick` (with the latest GPU frame time of the foveation module's timestamps), the
+return of the host's frame call (XR frame wait and poses), the end of the device's own work at
+the start of Tick, the end of Tick, the render thread's end of the scene
+(`RenderTexture_RenderThread`) and the frame-end command on the RHI thread (start and end: the
+hand-over to the XR layer and the desktop mirror), each with the calling thread's cycle count
+converted to milliseconds. Off by default; when off each point costs one relaxed load.
+
+Street, 2 x 3072x3264, Null backend unpaced, `t.MaxFPS 0`, standing and turning with the
+mouse (6 pixels every 10 ms, 6 s windows), run `captures/perf/20261006-032356-diag1-3072x3264`
+(`fl_*.csv`). The GPU time of a frame shows up two or three ticks later; aligned at the lag with
+the best correlation:
+
+| | frame interval p50 / p95 / p99 | GPU time p50 / p95 | interval above the GPU time, p95 |
+|---|---|---|---|
+| standing (start, street, street again) | 9.06-9.18 / 9.63-9.92 / 10.2-10.4 ms | 8.84-8.98 / 9.06-9.23 ms | 0.56-1.04 ms |
+| turning (left, right) | 8.76-8.82 / 12.64-12.74 / 15.0-16.0 ms | 8.80-8.96 / 10.95-11.16 ms | 2.13-2.21 ms |
+
+So of the 2.8 ms that turning adds to the 95th percentile, about 2 ms is GPU time (the GPU time
+of individual frames rises to 10.5-12 ms while the view sweeps) and about 1.2 ms is frames that
+arrive later than the GPU could have finished them. In the sequence the late ones come in pairs:
+one frame of 13-19 ms, then one of 7.5-9 ms, while the render thread's interval between two
+scenes jumps to 16-19 ms for one frame and the next frame catches up (the GPU had a queued frame
+to work on). The mod's own points take nothing measurable: the host's frame call returns in
+under 0.01 ms (the Null backend unpaced does not wait), the device's per-frame work at the start
+of Tick under 0.01 ms, the frame-end command 0.01 ms; the game thread's Tick takes 2.6 ms
+standing and 2.7 ms turning (p95 3.5 ms) of a 9 ms frame.
+
+With the threads' cycle counts (run `captures/perf/20261006-041050-turn2-3072x3264`, a 5 s
+turn to the left and back to the right per window, the same path every time, two rounds of
+each setting in turns):
+
+| Turning | frame interval avg / p95 | GPU time avg / p95 | interval above the GPU time, p95 | frames over 12.5 ms |
+|---|---|---|---|---|
+| defaults | 9.60-9.81 / 13.52-13.56 ms | 9.34-9.52 / 11.45-11.62 ms | 2.75-2.87 ms | 100-105 of 1119-1143 |
+| per-eye fixes off (`ssr off`, `ssr fix 0`, `aofix 0`, `stereo lightfix 0`) | 10.31-10.33 / 13.94-14.14 ms | 10.05-10.07 / 12.04-12.08 ms | 2.80-2.88 ms | 146 of 1063 |
+| foveation off | 11.17-11.40 / 14.82-15.81 ms | 10.93-11.11 / 13.03-13.50 ms | 2.83-3.34 ms | |
+| `r.HZBOcclusion 1` | 10.11-10.27 / 12.63-12.95 ms | 9.89-10.06 / 12.04-12.29 ms | 1.37-1.58 ms | 60-74 of 1067-1084 |
+
+Standing in the same street before and after: 9.16 and 9.33 ms, p95 9.99 and 10.13 ms, the
+interval above the GPU time p95 0.97 ms.
+
+On the frames whose interval exceeds 12.5 ms, per thread (CPU time in the interval, defaults):
+the game thread 2.9 ms (2.3-2.4 ms on normal frames), the render thread 6.2-6.4 ms (2.9-3.2 ms;
+up to 12.4 ms in a single frame), the RHI thread 6.3 ms (4.5 ms). No thread is busy for the whole
+interval (render thread 45 %, RHI thread 45 %), so a slow frame is the render thread doing about
+twice its usual work for the newly visible part of the view and the pipeline then waiting on
+each other and on the GPU. With the mod's per-eye fixes off the late part is unchanged, and
+foveation off only adds GPU time: **the late frames are the engine's, not the mod's**.
+
+`r.HZBOcclusion 1` (the engine's occlusion culling by the hierarchical depth instead of
+hardware occlusion queries) halves the late part (p95 above the GPU time 2.8 -> 1.4-1.6 ms,
+40 % fewer frames over 12.5 ms) and lowers the turning p95 by 0.6 to 0.9 ms, but costs about
+0.5 ms of GPU time on every frame (average frame +0.5 ms while turning). It changes which
+objects are culled; whether that shows (late appearing objects at the edges while turning,
+different in the two eyes) was not checked. Not applied: a trade, and not fidelity-neutral
+until checked. Note that with it on, `hzb_skip` builds the chain again (its guard).
+
 Options measured but not on by default (they change the picture):
 
 | Setting | Effect | Visible cost |
 |---|---|---|
 | `fov hidden cull` | -0.19 ms (2 x 3072x3264) | pixels the lenses never show are left with stale content, which temporal AA, exposure and bloom can carry into the visible image ("Foveated rendering", `docs/render.md`) |
+| `r.HZBOcclusion 1` | turning p95 -0.6 to -0.9 ms (late frames halved), every frame +0.5 ms GPU | occlusion culling by the hierarchical depth instead of queries; popping or a difference between the eyes not checked ("Turning") |
 | `fov passes all` (mask on post-processing too) | post-processing 0.93 -> 0.66 ms | temporal AA and tonemapper shaded coarsely in the periphery |
 | `render_scale 0.9` / `0.8` / `0.75` | -12 % / -26 % / -31 % at 2 x 3600x3600 | softer image (fewer pixels; the runtime scales up) |
 | `r.ScreenPercentage` below 100 | about as above | same softening, and every change reallocates the scene buffers (hitches of 50-140 ms) |
@@ -966,6 +1030,69 @@ on every frame (+552, +600), at 67 % on none (bloom `missed` +537, occlusion `fa
 middle and fits the buffer). Right eye at 67 % with all three fixes off and on:
 `014336-scales/sheet_sp67_R_allfix0_allfix1_L.png` (off: the orange streak and the doorway's
 copy from the left eye's bloom; on: gone).
+
+## Volumes and hierarchical depth per view
+
+Two passes looked like per-view duplicates worth sharing between the eyes. One-frame GPU
+traces (`gpu trace`, 2 x 3072x3264) and `fov trace` (GPU time per render target binding)
+show otherwise. The trace audit below covers 33 saved traces: first room, street,
+`r.ScreenPercentage` 58 to 100, render scale 0.8 and 0.9, DLSS runs, ReShade loaded
+(`captures/` `stereo/runK`-`runZ`, `skin/`, `perf/`, `render2/`, `dlss/`, `gaze/`).
+
+### Translucency lighting volume: already shared
+
+The translucency lighting volume (two cascades, each an ambient and a directional
+`R16G16B16A16_FLOAT` 64x64x64 volume) is built **once per frame**, not per view: one clear of
+all four volumes (one draw, four targets), one injection draw per light into each cascade (small
+viewports: the light's bounds in the volume), eight full-volume draws that read the shadow
+depth atlas, one filter draw per cascade. All of them use the first view's uniform buffer, so the volume is
+placed around the left eye and the right eye reads the same one (6 cm apart, against a volume
+several metres across). Every one of the 33 traces has exactly one volume clear. GPU time
+(`fov trace`, start of the save): about 0.07 ms in total. Nothing to remove.
+
+What does exist per view is the **volumetric fog**: a 110x117x96 froxel grid per view (about
+3072/28 x 3264/28 cells), built for each eye by one dispatch, three draws, a clear, four draws
+and two more dispatches; in `fov trace` its volume-target draws take 0.34 ms per eye, plus the
+compute work around them. The grid lies in each eye's own frustum, so the
+right eye cannot reuse the left eye's grid without misplacing the fog. Its cost is what
+`r.VolumetricFog 0` removes ("Measured", -1.0 ms at 2 x 2500x2600); a coarser grid
+(`r.VolumetricFog.GridPixelSize`, `GridSizeZ`) would be a quality trade, not measured.
+
+### Hierarchical depth: each view reads only its own half
+
+Per view the engine builds two R16_FLOAT mip chains (the trace's pool names: `HZB`, `IHZB`;
+the names swap between pooled textures, the binding order does not): one draw writes mip 0 of
+both (two targets), then one draw per further mip and chain (11 each). Mip 0's
+`DrawRectangle` constants place the source rectangle at the view's own rectangle (UV size
+3072x3264 at x 0 for the left view, at x 3072 for the right one): **the build does not read
+the whole double-wide depth**, so there is nothing to limit to a half. The target is 4096x2048
+for a 3072x3264 view: its size follows the scene buffer's width (6144 rounded down to a power of
+two), where one sized from the view would be 2048x2048, half the pixels. Changing that would
+change what every reader samples; not attempted.
+
+Readers, from the audit: the second chain (the second target of the mip-0 draw) is read by
+the ambient occlusion (setup, half-size passes, resolve), the screen-space reflections and the
+ray traced shadows of its view. The **first chain is read by nothing** in any of the 33
+traces, other than its own mip builds (`r.HZBOcclusion` is 0 in this game, so occlusion
+culling does not use it either). Its 22 further-mip draws per frame are dead work.
+
+`[stereo] hzb_skip = 1` (`hzb 1`; `fixes.cpp`, `hzb_draw`) leaves those draws out: on the RHI
+thread a full-screen draw into two R16_FLOAT mip chains at mip 0 marks the first target as this
+view's unread chain, and a later single-target draw into mip 1 or above of that texture is
+skipped. Mip 0 is still written (one draw for both chains). It only acts while `r.HZBOcclusion`
+is 0 (read on the game thread every 120 frames; with 1 the chain is built as usual and the
+log says so). Test modes: `hzb 2` / `hzb 3` fill the whole first chain with near / far depth,
+`hzb 4` fills the further mips of the read chain instead (control).
+
+Gain: `fov trace` at the start of the save, the first chain's further mips 0.02 to 0.03 ms per
+view; frame time over 5 s windows, off / on alternating: start 9.32 / 9.17 ms (one clean round;
+the two others were disturbed by a build running on the same machine), street 9.06 / 9.08 and
+9.11 / 8.98 ms (run `captures/perf/20261006-032356-diag1-3072x3264`). That is within the
+noise of about 0.1 ms. Off by default: the gain is too small to measure, and a scene with a
+reader of the first chain (not seen in the traces) would get stale data. Image tests were not
+usable as proof here: two captures of the same view without any change differ by a mean of 10
+levels (camera sway and animation), more than any of the test modes (`start_h*` in that run);
+the evidence is the binding audit.
 
 ## Render scale and dynamic resolution
 
