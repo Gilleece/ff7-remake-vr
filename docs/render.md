@@ -1046,9 +1046,25 @@ Checked with the rings at the gaze (`xr-sim gaze sweep 20 3`, radii 0.30 / 0.45
 / 0.55 so the legs pass through the coarse rings): no line in four captures
 with the rule, the line in the two of three captures without it where the legs
 were in a coarse ring. Hair over skin and hair against the bright background
-looks mottled at 2x2 with or without the rule (alpha-dithered hair under coarse
-shading, a different mechanism); at the `quality` radii faces are inside the
-full-rate zone.
+looks mottled at 2x2 with or without the rule; at the `quality` radii faces are
+inside the full-rate zone.
+
+**Hair at 2x2.** Hair has no pass of its own in the traced frame: it is drawn
+in the G-buffer pass with everything else. With all rings at 2x2 (radii
+0.01 / 0.02 / 0.03), the G-buffer pass alone at full rate (`fov exclude 53`)
+leaves the hair as mottled as all 2x2, while the G-buffer pass alone at 2x2
+(`fov exclude 54 200`) leaves it as clean as full rate. So the coarse coverage
+of the hair geometry is not the cause; one of the passes after the G-buffer
+(shadow projection, occlusion, the light passes) shades hair badly at 2x2.
+2x1 shows no effect. Measured on the face in the first room, left eye, three
+captures each (high-frequency luminance on the dark hair pixels, mean
+absolute difference to a 5x5 median, and share of pixels 40 levels above it):
+full rate 2.7 to 4.1 and 0.2 to 0.4 %; all 2x2 3.6 to 4.3 and 0.6 to 1.0 %;
+G-buffer at full rate, rest 2x2, 4.1 to 5.1 and 0.8 to 1.2 %; only the
+G-buffer at 2x2, 2.8 and 0.1 to 0.5 %; all 2x1 2.5 to 3.0 and 0.3 to 0.6 %.
+Which of the later passes it is, and whether keeping it at full rate would be
+cheap, is not known yet (the next step is `fov exclude` over the bindings 54
+to 107, as for the subsurface recombine).
 
 ### Settings
 
