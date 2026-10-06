@@ -70,8 +70,9 @@ $bd = $BuildDir
 if (-not [System.IO.Path]::IsPathRooted($bd)) { $bd = Join-Path $repo $bd }
 $dll = Join-Path $bd 'src\loader\xinput1_3.dll'
 if (-not (Test-Path -LiteralPath $dll)) { throw "Build output missing: $dll" }
-# Whether DLSS is in the DLL is checked on the DLL itself (NGX names in its strings).
-$hasNgx = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($dll)).Contains('NVSDK_NGX')
+# Whether DLSS is in the DLL is checked on the DLL itself: NGX's initialisation entry point is named only by
+# the DLSS build (every build names NGX's create and evaluate entry points, which it hooks for Luma).
+$hasNgx = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($dll)).Contains('NVSDK_NGX_D3D11_Init')
 if ($Dlss -and -not $hasNgx) { throw 'Built without DLSS although -Dlss was given (is the NVIDIA DLSS SDK there? see the CMake output)' }
 if (-not $Dlss -and $hasNgx) { throw 'The DLL contains DLSS although -Dlss was not given' }
 
