@@ -425,7 +425,7 @@ coarsely drawn edges: DLSS keeps them sharp and, from a smaller rendered image, 
 larger. `[foveation] preset = quality` removes them for about 0.5 ms per frame (measured
 without a headset at 3264x3072 and 0.75: `performance` 9.6 ms, `quality` 10.1 ms, off 11.0 ms);
 at 4032x3648 with 0.76 they are smaller. `[dlss] texture_bias = auto` (or `auto-1`) makes
-textures a little crisper for about 0.1 ms; it is off because DLSS's image is already more
+textures a little crisper for 0.1 to 0.3 ms; it is off because DLSS's image is already more
 detailed than the game's own at that size. Earlier `-dlss` packages could hang
 the graphics card (within seconds at the title screen); that was a fault in the mod, fixed
 in commit `ef2688a` (a package's folder name contains the commit it was built from; any

@@ -393,6 +393,13 @@ with `performance`, the same with `quality`, 0.8 ms less with foveated rendering
 picture choice here, and the cost of `quality` instead of `performance` is the same with or
 without DLSS.
 
+With the head turning (`d6`: the Null backend's emulated yaw sweep, third person, captures
+taken during the motion, `d6/sheet_yaw_left.png`) the order is the same: blocks with
+`performance`, fewer with `balanced`, a few at the outermost edge with `quality`, none with
+foveated rendering off. Frame times in that run: `performance` 9.77 (`k` named 9.65),
+`balanced` 9.94, `quality` 10.35, off 10.95 ms; preset M 13.76, L 15.94; texture bias `auto`
+9.92, `auto-1` 9.88; no driver event.
+
 The game's own dither and shadow settings, each switched in the first-person run (`d1`;
 `r.SSS.Checkerboard 0`, `r.AmbientOcclusionLevels 0`, `r.DisableLODFade 1`,
 `r.TemporalAASamples 16`, `r.Shadow.FilterMethod 1`, `r.Tonemapper.GrainQuantization 0`,
@@ -445,14 +452,14 @@ anti-aliasing at 3264x3072 without DLSS, `d3`; luma gradient and outliers as in 
 |---|---|---|---|---|---|
 | native, no DLSS | - | 9.14 / 11.76 | 12.7 / 17.2 | 1.6 / 3.3 % | `dcmp/sheet_ground.png` |
 | `off` | 0 | 9.59 / 10.95 | 15.6 / 20.2 | 3.2 / 6.3 % | - |
-| `auto` | -0.41 | not measured cleanly (its window was disturbed; the repeat run ended in the hang above) | A with foveation `performance`: 14.1, as `off` (14.1) | - | no visible change |
+| `auto` | -0.41 | with the head turning (`d6`): 9.92 against 9.65 to 9.77 | A with foveation `performance`: 14.1, as `off` (14.1) | - | no visible change |
 | `auto-1` | -1.41 | 9.74 / 11.06 | 16.3 / 20.6 | 3.8 / 6.8 % | `d2/sheet_tb_fovoff_*.png`: hardly visible; the ground a touch crisper |
 
 So at this size DLSS's image from 0.75 already carries more fine detail (and more specks)
 than the game's own image at full size, the bias moves it further that way, and the visible
 gain is small. NVIDIA's warning about flicker and moiré was not tested under motion. The bias
 is therefore off by default and left as an option (`auto` or `auto-1`) for players who find
-textures soft; it costs about 0.1 ms. Textures in the coarsely shaded part of foveated
+textures soft; it costs 0.1 to 0.3 ms. Textures in the coarsely shaded part of foveated
 rendering are limited by the shading rate, not by the mip (`d2/sheet_tb_sign.png`).
 
 ### DLSS before the tonemapper (not built; what it would take)
