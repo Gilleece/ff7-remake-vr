@@ -85,6 +85,8 @@ struct Settings {
     bool log_verbose = false;  // [dlss] log_verbose: NGX's most detailed log level (read at NGX start)
     // Fault isolation tests (dev commands; the test_ keys of [dlss] set them from the start)
     std::atomic<bool> skip_eval{false};  // upscale mode: everything but the evaluation; the game's own pass upscales
+    std::atomic<bool> no_ngx{false};     // test_no_ngx (with test_skip): NGX is not initialised
+    std::atomic<int> skip_level{0};      // test_skip: 1 no evaluation, 2 also no graded re-run, 3 also no motion vectors or state swap, 4 the game's own pass
     std::atomic<int> stall_requests{0};  // one full GPU wait at the next frame end, like a blocking read-back
     std::atomic<int> stall_ms{40};       // then the thread sleeps this long (the GPU stays idle)
     std::atomic<int> test_eyes{0};       // 1: left eye only, 2: right eye only (the other eye runs the game's passes)
@@ -92,17 +94,23 @@ struct Settings {
     std::atomic<bool> mv_sanitize{false};  // motion vectors: non-finite values to zero, clamped to the input size
     std::atomic<int> flush_after{0};     // 1: Flush the immediate context after each evaluation
     std::atomic<bool> own_params{false};  // each feature its own NGX parameter map (else the capability map for everything)
-    std::atomic<bool> game_state{false};  // NGX creates and evaluates in the game's pipeline state (else in our own state object)
+    std::atomic<bool> own_state{false};   // [dlss] context_state = own: draws and NGX inside our own device context state object (else the game's state)
     std::atomic<bool> copy_inputs{false};  // each eye's inputs copied into textures of the input size, output into its own texture
+    std::atomic<bool> eval_at_end{false};  // upscale mode: evaluations at the end of the frame instead of at each eye's last pass
     // Checks and diagnostics
     std::atomic<bool> validate{true};     // every evaluation's inputs checked first; the game's pass runs if one fails
-    std::atomic<bool> input_stats{true};  // GPU statistics of the evaluation inputs (non-finite or huge values), read back late
+    std::atomic<bool> input_stats{false};  // GPU statistics of the evaluation inputs (non-finite or huge values), read back late
     std::atomic<int> events_requests{0};  // `dlss events`: dump the event ring to the log
     int log_lines = 0;                    // [dlss] log_lines: NGX messages kept in the log (0: 400, or 20000 with log_verbose)
     // Synthetic cost measurement: one extra DLSS evaluation per frame on blank textures of a
     // chosen input and output size (the image is discarded).
     std::atomic<bool> bench{false};
     std::atomic<unsigned> bench_in_w{0}, bench_in_h{0}, bench_out_w{0}, bench_out_h{0};
+    std::atomic<int> bench_repeat{1};  // evaluations of the bench feature per frame
+    std::atomic<bool> bench_jitter{false};  // bench: jitter offsets of an 8-phase Halton(2,3) sequence (else 0)
+    std::atomic<bool> bench_write{false};   // bench: its inputs cleared to new values every frame (render targets)
+    std::atomic<bool> bench_copyout{false};  // bench: its output copied to another texture after the evaluations
+    std::atomic<bool> no_copyout{false};     // upscale: the output is not copied into the eye (test; the game's image stays with eval_at = frame_end)
 };
 Settings g_set;
 std::filesystem::path g_dll_dir;
@@ -440,7 +448,7 @@ struct Rhi {
     // Synthetic bench
     Feature bench;
     UINT bench_out_w = 0, bench_out_h = 0;
-    ComPtr<ID3D11Texture2D> bench_color, bench_depth, bench_mv, bench_out;
+    ComPtr<ID3D11Texture2D> bench_color, bench_depth, bench_mv, bench_out, bench_copy;
 };
 Rhi* g_rhi = new Rhi();  // never freed (D3D objects must not be released at process exit)
 
@@ -984,7 +992,17 @@ float2 ps(float4 pos : SV_Position) : SV_Target {
 }
 // The eye's rectangle of the depth (Rect.xy its origin) into a texture of its own at the origin.
 float psdepth(float4 pos : SV_Position) : SV_Target {
+    if (Opt.y > 0) return Opt.y;   // test: constant depth
     return Depth.Load(int3(pos.xy + Rect.xy, 0));
+}
+// The same for the colour, each channel raised to at least Opt2.z, plus per-pixel noise of
+// amplitude Opt2.w that changes every frame (Opt.x) (tests: no black or no constant input).
+Texture2D<float4> Src : register(t2);
+float4 pscolor(float4 pos : SV_Position) : SV_Target {
+    float4 c = max(Src.Load(int3(pos.xy + Rect.xy, 0)), Opt2.zzzz);
+    uint h = (uint(pos.x) * 73856093u) ^ (uint(pos.y) * 19349663u) ^ (uint(Opt.x) * 83492791u);
+    h = (h ^ (h >> 13)) * 1274126177u;
+    return c + Opt2.w * float(h & 1023u) / 1023.0;
 }
 )";
 
@@ -1004,11 +1022,11 @@ Texture2D<float2> Mv : register(t0);
 Texture2D<float> Dp : register(t1);
 Texture2D<float4> Co : register(t2);
 RWByteAddressBuffer Out : register(u0);
-groupshared uint gs[8];
+groupshared uint gs[10];
 bool nf(float v) { return (asuint(v) & 0x7f800000u) == 0x7f800000u; }
 [numthreads(16, 16, 1)]
 void cs(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
-    if (gi < 8) gs[gi] = 0;
+    if (gi < 10) gs[gi] = 0;
     GroupMemoryBarrierWithGroupSync();
     uint k;
     if (id.x < R.z && id.y < R.w) {
@@ -1024,10 +1042,17 @@ void cs(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         if (nf(d)) InterlockedAdd(gs[3], 1u, k);
         else if (d < 0 || d > 1) InterlockedAdd(gs[4], 1u, k);
         else if (d == 0) InterlockedAdd(gs[7], 1u, k);
-        if (O.x != 0) {
+        if (!nf(d) && d >= 0.999) InterlockedAdd(gs[8], 1u, k);
+        if (!nf(d)) InterlockedMax(gs[9], asuint(max(d, 0)) & 0x7fffffffu, k);
+        if (O.x == 1) {
             float4 c = Co.Load(p);
             if (nf(c.r) || nf(c.g) || nf(c.b) || nf(c.a)) InterlockedAdd(gs[5], 1u, k);
             else InterlockedMax(gs[6], asuint(max(max(c.r, c.g), max(c.b, 0))) & 0x7fffffffu, k);
+        } else if (O.x == 2) {   // display-referred colour: count black pixels
+            float4 c = Co.Load(p);
+            float m = max(max(c.r, c.g), max(c.b, 0));
+            if (m < 1.0 / 1023.0) InterlockedAdd(gs[5], 1u, k);
+            InterlockedMax(gs[6], asuint(m) & 0x7fffffffu, k);
         }
     }
     GroupMemoryBarrierWithGroupSync();
@@ -1040,6 +1065,8 @@ void cs(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         Out.InterlockedAdd(20, gs[5], k);
         Out.InterlockedMax(24, gs[6], k);
         Out.InterlockedAdd(28, gs[7], k);
+        Out.InterlockedAdd(32, gs[8], k);
+        Out.InterlockedMax(36, gs[9], k);
     }
 }
 )";
@@ -1166,7 +1193,7 @@ bool ensure_stats(ID3D11Device* dev) {
     cd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
     if (FAILED(dev->CreateBuffer(&cd, nullptr, &S.cb))) return false;
     D3D11_BUFFER_DESC bd{};
-    bd.ByteWidth = 32;
+    bd.ByteWidth = 48;
     bd.Usage = D3D11_USAGE_DEFAULT;
     bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
     bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
@@ -1174,12 +1201,12 @@ bool ensure_stats(ID3D11Device* dev) {
     D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};
     ud.Format = DXGI_FORMAT_R32_TYPELESS;
     ud.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
-    ud.Buffer.NumElements = 8;
+    ud.Buffer.NumElements = 12;
     ud.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
     if (FAILED(dev->CreateUnorderedAccessView(S.buf.Get(), &ud, &S.uav))) return false;
     for (StatsSlot& s : S.slots) {
         D3D11_BUFFER_DESC sd{};
-        sd.ByteWidth = 32;
+        sd.ByteWidth = 48;
         sd.Usage = D3D11_USAGE_STAGING;
         sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
         if (FAILED(dev->CreateBuffer(&sd, nullptr, &s.staging))) return false;
@@ -1191,7 +1218,7 @@ bool ensure_stats(ID3D11Device* dev) {
 
 // Inside our own pipeline state, before the evaluation: statistics of the inputs over the
 // input rectangle. color: an HDR colour view (DLAA mode) or null.
-void run_stats(ID3D11DeviceContext* ctx, int eye, ID3D11ShaderResourceView* mv, ID3D11ShaderResourceView* depth, ID3D11ShaderResourceView* color,
+void run_stats(ID3D11DeviceContext* ctx, int eye, ID3D11ShaderResourceView* mv, ID3D11ShaderResourceView* depth, ID3D11ShaderResourceView* color, bool ldr,
                UINT x, UINT y, UINT w, UINT h) {
     if (!g_set.input_stats.load(std::memory_order_relaxed) || !mv || !depth || !ensure_stats(g_rhi->dev)) return;
     Stats& S = g_stats;
@@ -1199,7 +1226,7 @@ void run_stats(ID3D11DeviceContext* ctx, int eye, ID3D11ShaderResourceView* mv, 
     if (slot.pending) return;  // not read back yet: skip this one
     S.next = (S.next + 1) % S.slots.size();
     const float limit = static_cast<float>(std::max(w, h));
-    std::uint32_t c[8] = {x, y, w, h, color ? 1u : 0u, std::bit_cast<std::uint32_t>(limit), 0, 0};
+    std::uint32_t c[8] = {x, y, w, h, color ? (ldr ? 2u : 1u) : 0u, std::bit_cast<std::uint32_t>(limit), 0, 0};
     D3D11_MAPPED_SUBRESOURCE m{};
     if (FAILED(ctx->Map(S.cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return;
     std::memcpy(m.pData, c, sizeof(c));
@@ -1232,12 +1259,12 @@ void collect_stats(ID3D11DeviceContext* ctx) {
         if (!s.pending || s.frame + 2 > g_rhi->frame) continue;
         D3D11_MAPPED_SUBRESOURCE m{};
         if (ctx->Map(s.staging.Get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m) != S_OK) continue;
-        std::uint32_t v[8];
+        std::uint32_t v[10];
         std::memcpy(v, m.pData, sizeof(v));
         ctx->Unmap(s.staging.Get(), 0);
         s.pending = false;
         const float mv_max = std::bit_cast<float>(v[2]), col_max = std::bit_cast<float>(v[6]);
-        const bool bad = v[0] || v[1] || v[3] || v[4] || v[5];
+        const bool bad = v[0] || v[1] || v[3] || v[4];
         {
             std::lock_guard lock(g_stats_mutex);
             ++S.read;
@@ -1250,8 +1277,8 @@ void collect_stats(ID3D11DeviceContext* ctx) {
             S.color_max = std::max(S.color_max, col_max);
             if (bad) ++S.frames_bad;
         }
-        event(std::format("stats eye {} of frame {}: mv non-finite {} huge {} max {:.1f} px | depth non-finite {} outside 0..1 {} far {} | colour non-finite {} max {:.3g}",
-                          s.eye, s.frame, v[0], v[1], mv_max, v[3], v[4], v[7], v[5], col_max));
+        event(std::format("stats eye {} of frame {}: mv non-finite {} huge {} max {:.1f} px | depth non-finite {} outside 0..1 {} far {} near (>= 0.999) {} max {:.6g} | colour non-finite (HDR) or black (display-referred) {} max {:.3g}",
+                          s.eye, s.frame, v[0], v[1], mv_max, v[3], v[4], v[7], v[8], std::bit_cast<float>(v[9]), v[5], col_max));
         static int logged = 0;
         if (bad && logged++ < 20)
             log::info("dlss: input statistics eye {} frame {}: motion vectors non-finite {} larger than the input {} (largest {:.1f} px), depth non-finite {} "
@@ -1539,6 +1566,7 @@ void dump_rows(const ViewRows& rows, const PassInputs& in, int eye) {
 }
 
 void draw_motion_vectors(ID3D11DeviceContext* ctx, const PassInputs& in, UINT x, UINT y, UINT w, UINT h, bool zero = false);
+void draw_motion_vectors_in_game_state(ID3D11DeviceContext* ctx, const PassInputs& in, UINT x, UINT y, UINT w, UINT h, bool zero);
 
 // Replaces one view's temporal anti-aliasing draw. False: the game's draw runs instead.
 bool run_dlss(ID3D11DeviceContext* ctx, PassInputs& in, int eye, std::string& why) {
@@ -1581,20 +1609,24 @@ bool run_dlss(ID3D11DeviceContext* ctx, PassInputs& in, int eye, std::string& wh
     if (cut_why)
         with_info([&](Info& i) { i.last_cut = cut + (cut_reset ? ", history reset" : ", no reset"); });
     if (cut_reset) ++g_cut_resets;
-    // Everything below runs in our own pipeline state; the engine's state comes back as it was.
-    // With [dlss] test_game_state = 1 the feature is created and evaluated in the game's state.
+    // [dlss] context_state = game (the default): the motion vectors are drawn in the game's own
+    // pipeline state (what the draw changes is saved and put back) and NGX creates and evaluates
+    // in it (NGX keeps the state of the immediate D3D11 context, programming guide 5.2.5). A draw
+    // inside a device context state of our own, swapped in with SwapDeviceContextState in the
+    // middle of the engine's frame, hung the GPU within seconds at the title screen
+    // (docs/dlss.md, "GPU faults"). context_state = own: the earlier way, all of it inside our
+    // own state object (kept to compare).
+    const bool own = g_set.own_state.load(std::memory_order_relaxed);
     bool ok = false;
     bool created = false;
     Feature& f = R.feat[eye];
-    const bool feat_in_game_state = g_set.game_state.load(std::memory_order_relaxed);
-    bool feat_ok = feat_in_game_state && ensure_feature(ctx, eye, w, h, created);
     ID3DDeviceContextState* game_state = nullptr;
-    ctx1->SwapDeviceContextState(R.state.Get(), &game_state);
-    if (!feat_in_game_state) feat_ok = ensure_feature(ctx, eye, w, h, created);
-    if (feat_ok) {
+    if (own) ctx1->SwapDeviceContextState(R.state.Get(), &game_state);
+    if (ensure_feature(ctx, eye, w, h, created)) {
         Timing* t = begin_timing(ctx, eye);
         // Motion vectors for the eye's rectangle.
-        draw_motion_vectors(ctx, in, x, y, w, h, zero_mv);
+        if (own) draw_motion_vectors(ctx, in, x, y, w, h, zero_mv);
+        else draw_motion_vectors_in_game_state(ctx, in, x, y, w, h, zero_mv);
         if (t) ctx->End(t->t1);
         // DLSS for the eye's rectangle.
         const float jx = rows.v[kRowJitter - kRowFirst][0] * static_cast<float>(w) * g_set.jitter_scale_x.load();
@@ -1625,7 +1657,7 @@ bool run_dlss(ID3D11DeviceContext* ctx, PassInputs& in, int eye, std::string& wh
         e.reset = reset;
         NVSDK_NGX_Result r = NVSDK_NGX_Result_Fail;
         if (before_eval(e)) {
-            run_stats(ctx, eye, R.mv_srv.Get(), in.srv[1].Get(), in.srv[2].Get(), x, y, w, h);
+            if (own) run_stats(ctx, eye, R.mv_srv.Get(), in.srv[1].Get(), in.srv[2].Get(), false, x, y, w, h);
             NVSDK_NGX_D3D11_DLSS_Eval_Params ep{};
             ep.Feature.pInColor = in.color.Get();
             ep.Feature.pInOutput = R.out.Get();
@@ -1642,17 +1674,10 @@ bool run_dlss(ID3D11DeviceContext* ctx, PassInputs& in, int eye, std::string& wh
             ep.InMVSubrectBase = {x, y};
             ep.InOutputSubrectBase = {x, y};
             ep.InFrameTimeDeltaInMsec = R.frame_dt_ms;
-            const bool in_game_state = g_set.game_state.load(std::memory_order_relaxed);
-            if (in_game_state) ctx1->SwapDeviceContextState(game_state, nullptr);
             g_in_ngx = true;
             r = NGX_D3D11_EVALUATE_DLSS_EXT(ctx, f.handle, f.params, &ep);
             g_in_ngx = false;
-            if (in_game_state) {
-                ID3DDeviceContextState* back = nullptr;
-                ctx1->SwapDeviceContextState(R.state.Get(), &back);
-                if (back) back->Release();
-            }
-            ctx->ClearState();
+            if (own) ctx->ClearState();
             if (g_set.flush_after.load(std::memory_order_relaxed)) ctx->Flush();
             event(std::format("eval eye {} result {}", eye, result_text(r)));
         } else {
@@ -1681,8 +1706,10 @@ bool run_dlss(ID3D11DeviceContext* ctx, PassInputs& in, int eye, std::string& wh
     } else {
         why = "feature creation failed";
     }
-    ctx1->SwapDeviceContextState(game_state, nullptr);
-    if (game_state) game_state->Release();
+    if (own) {
+        ctx1->SwapDeviceContextState(game_state, nullptr);
+        if (game_state) game_state->Release();
+    }
     return ok;
 }
 
@@ -1787,6 +1814,95 @@ void draw_motion_vectors(ID3D11DeviceContext* ctx, const PassInputs& in, UINT x,
     ctx->ClearState();
 }
 
+// The motion vector draw in the game's own pipeline state: the state it changes is saved
+// first and put back afterwards (no context-state swap).
+void draw_motion_vectors_in_game_state(ID3D11DeviceContext* ctx, const PassInputs& in, UINT x, UINT y, UINT w, UINT h, bool zero) {
+    Rhi& R = *g_rhi;
+    // Save
+    D3D11_PRIMITIVE_TOPOLOGY topo{};
+    ctx->IAGetPrimitiveTopology(&topo);
+    ComPtr<ID3D11InputLayout> layout;
+    ctx->IAGetInputLayout(&layout);
+    ComPtr<ID3D11VertexShader> vs;
+    ctx->VSGetShader(&vs, nullptr, nullptr);
+    ComPtr<ID3D11GeometryShader> gs;
+    ctx->GSGetShader(&gs, nullptr, nullptr);
+    ComPtr<ID3D11PixelShader> ps;
+    ctx->PSGetShader(&ps, nullptr, nullptr);
+    ID3D11Buffer* cbs_raw[2]{};
+    ctx->PSGetConstantBuffers(0, 2, cbs_raw);
+    ID3D11ShaderResourceView* srvs_raw[2]{};
+    ctx->PSGetShaderResources(0, 2, srvs_raw);
+    ID3D11RenderTargetView* rtvs_raw[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
+    ID3D11DepthStencilView* dsv_raw = nullptr;
+    ctx->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtvs_raw, &dsv_raw);
+    D3D11_VIEWPORT vps[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
+    UINT nvp = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    ctx->RSGetViewports(&nvp, vps);
+    ComPtr<ID3D11RasterizerState> rs;
+    ctx->RSGetState(&rs);
+    ComPtr<ID3D11BlendState> blend;
+    float blend_factor[4]{};
+    UINT sample_mask = 0;
+    ctx->OMGetBlendState(&blend, blend_factor, &sample_mask);
+    ComPtr<ID3D11DepthStencilState> dss;
+    UINT stencil_ref = 0;
+    ctx->OMGetDepthStencilState(&dss, &stencil_ref);
+    // Ours
+    PassConsts pc{};
+    pc.rect[0] = static_cast<float>(x);
+    pc.rect[1] = static_cast<float>(y);
+    pc.rect[2] = static_cast<float>(w);
+    pc.rect[3] = static_cast<float>(h);
+    pc.opt[0] = 1.0f / static_cast<float>(w);
+    pc.opt[1] = 1.0f / static_cast<float>(h);
+    pc.opt[2] = g_set.mv_jitter.load() == 0 ? 1.0f : 0.0f;
+    pc.opt[3] = (zero || g_set.zero_mv.load(std::memory_order_relaxed)) ? 1.0f : 0.0f;
+    pc.opt2[0] = g_set.mv_sanitize.load(std::memory_order_relaxed) ? 1.0f : 0.0f;
+    pc.opt2[1] = static_cast<float>(std::max(w, h));
+    D3D11_MAPPED_SUBRESOURCE m{};
+    if (SUCCEEDED(ctx->Map(R.cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
+        std::memcpy(m.pData, &pc, sizeof(pc));
+        ctx->Unmap(R.cb.Get(), 0);
+    }
+    ID3D11RenderTargetView* rt = R.mv_rtv.Get();
+    ctx->OMSetRenderTargets(1, &rt, nullptr);  // first, so the depth texture is no longer bound for writing
+    ID3D11Buffer* cbs[2] = {R.cb.Get(), in.cb1.Get()};
+    ID3D11ShaderResourceView* srvs[2] = {in.srv[1].Get(), in.srv[4].Get()};
+    ctx->IASetInputLayout(nullptr);
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx->VSSetShader(R.vs.Get(), nullptr, 0);
+    ctx->GSSetShader(nullptr, nullptr, 0);
+    ctx->PSSetShader(R.ps.Get(), nullptr, 0);
+    ctx->PSSetConstantBuffers(0, 2, cbs);
+    ctx->PSSetShaderResources(0, 2, srvs);
+    ctx->RSSetState(nullptr);
+    ctx->RSSetViewports(1, &in.vp);
+    ctx->OMSetBlendState(nullptr, nullptr, 0xffffffffu);
+    ctx->OMSetDepthStencilState(nullptr, 0);
+    ctx->Draw(3, 0);
+    // Restore
+    ctx->PSSetShaderResources(0, 2, srvs_raw);
+    ctx->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtvs_raw, dsv_raw);
+    ctx->PSSetConstantBuffers(0, 2, cbs_raw);
+    ctx->IASetInputLayout(layout.Get());
+    ctx->IASetPrimitiveTopology(topo);
+    ctx->VSSetShader(vs.Get(), nullptr, 0);
+    ctx->GSSetShader(gs.Get(), nullptr, 0);
+    ctx->PSSetShader(ps.Get(), nullptr, 0);
+    ctx->RSSetState(rs.Get());
+    ctx->RSSetViewports(nvp, vps);
+    ctx->OMSetBlendState(blend.Get(), blend_factor, sample_mask);
+    ctx->OMSetDepthStencilState(dss.Get(), stencil_ref);
+    for (auto* p : cbs_raw)
+        if (p) p->Release();
+    for (auto* p : srvs_raw)
+        if (p) p->Release();
+    for (auto* p : rtvs_raw)
+        if (p) p->Release();
+    if (dsv_raw) dsv_raw->Release();
+}
+
 // Anti-aliasing pass in upscale mode: motion vectors, jittered colour passed through.
 bool run_passthrough(ID3D11DeviceContext* ctx, PassInputs& in, int eye, std::string& why) {
     Rhi& R = *g_rhi;
@@ -1819,13 +1935,35 @@ bool run_passthrough(ID3D11DeviceContext* ctx, PassInputs& in, int eye, std::str
     if (cut_why)
         with_info([&](Info& i) { i.last_cut = cut + (cut_reset ? ", history reset" : ", no reset"); });
     if (cut_reset) ++g_cut_resets;
-    ID3DDeviceContextState* game_state = nullptr;
-    ctx1->SwapDeviceContextState(R.state.Get(), &game_state);
-    draw_motion_vectors(ctx, in, x, y, static_cast<UINT>(in.vp.Width), static_cast<UINT>(in.vp.Height), zero_mv);
     const D3D11_BOX box{x, y, 0, x + w, y + h, 1};
-    ctx->CopySubresourceRegion(in.target.Get(), in.target_view.Texture2D.MipSlice, x, y, 0, in.color.Get(), 0, &box);
-    ctx1->SwapDeviceContextState(game_state, nullptr);
-    if (game_state) game_state->Release();
+    const int skip_level = g_set.skip_level.load(std::memory_order_relaxed);
+    if (skip_level == 5) {
+        // Test: our state swapped in and out around the copy, no draw.
+        ID3DDeviceContextState* game_state = nullptr;
+        ctx1->SwapDeviceContextState(R.state.Get(), &game_state);
+        ctx->ClearState();
+        ctx->CopySubresourceRegion(in.target.Get(), in.target_view.Texture2D.MipSlice, x, y, 0, in.color.Get(), 0, &box);
+        ctx1->SwapDeviceContextState(game_state, nullptr);
+        if (game_state) game_state->Release();
+    } else if (skip_level == 6) {
+        // Test: the motion vectors drawn in the game's own state (saved and restored here), no swap.
+        draw_motion_vectors_in_game_state(ctx, in, x, y, static_cast<UINT>(in.vp.Width), static_cast<UINT>(in.vp.Height), zero_mv);
+        ctx->CopySubresourceRegion(in.target.Get(), in.target_view.Texture2D.MipSlice, x, y, 0, in.color.Get(), 0, &box);
+    } else if (skip_level >= 3) {
+        // Test: the jittered colour passed through in the game's state, no motion vectors.
+        ctx->CopySubresourceRegion(in.target.Get(), in.target_view.Texture2D.MipSlice, x, y, 0, in.color.Get(), 0, &box);
+    } else if (!g_set.own_state.load(std::memory_order_relaxed)) {
+        // The motion vectors drawn in the game's own state (see run_dlss), then the copy.
+        draw_motion_vectors_in_game_state(ctx, in, x, y, static_cast<UINT>(in.vp.Width), static_cast<UINT>(in.vp.Height), zero_mv);
+        ctx->CopySubresourceRegion(in.target.Get(), in.target_view.Texture2D.MipSlice, x, y, 0, in.color.Get(), 0, &box);
+    } else {
+        ID3DDeviceContextState* game_state = nullptr;
+        ctx1->SwapDeviceContextState(R.state.Get(), &game_state);
+        draw_motion_vectors(ctx, in, x, y, static_cast<UINT>(in.vp.Width), static_cast<UINT>(in.vp.Height), zero_mv);
+        ctx->CopySubresourceRegion(in.target.Get(), in.target_view.Texture2D.MipSlice, x, y, 0, in.color.Get(), 0, &box);
+        ctx1->SwapDeviceContextState(game_state, nullptr);
+        if (game_state) game_state->Release();
+    }
     Stash& s = g_stash[eye];
     s.frame = R.frame;
     s.x = x;
@@ -1854,18 +1992,22 @@ bool run_passthrough(ID3D11DeviceContext* ctx, PassInputs& in, int eye, std::str
 // no two features read or write the same textures and no sub-rectangle bases are used.
 struct EyeCopies {
     ComPtr<ID3D11Texture2D> color, depth, mv, out;
-    ComPtr<ID3D11RenderTargetView> depth_rtv;
+    ComPtr<ID3D11RenderTargetView> depth_rtv, color_rtv;
     ComPtr<ID3D11ShaderResourceView> depth_srv, mv_srv;
     D3D11_TEXTURE2D_DESC cd{}, od{};
 };
 EyeCopies g_copies[2];
-ComPtr<ID3D11PixelShader> g_ps_depth;
+ComPtr<ID3D11PixelShader> g_ps_depth, g_ps_color;
+ComPtr<ID3D11ShaderResourceView> g_graded_srv;  // the graded texture (colour floor test)
+std::atomic<float> g_color_floor{0.0f};          // [dlss] test_color_floor: with test_copy_inputs, colour channels raised to at least this
+std::atomic<float> g_color_noise{0.0f};          // [dlss] test_color_noise: with test_copy_inputs, per-pixel noise of this amplitude added
+std::atomic<float> g_depth_const{0.0f};          // [dlss] test_depth_const: with test_copy_inputs, the depth handed to DLSS is this constant
 
 // Inside our own pipeline state: the eye's rectangle x,y w x h of the colour and the motion
 // vectors copied, and of the depth drawn (the engine's depth is a typeless depth-stencil
 // texture, which cannot be copied in part), to the origin of the eye's own textures.
-bool prepare_copies(ID3D11DeviceContext* ctx, int eye, ID3D11Resource* color, ID3D11ShaderResourceView* depth_srv, UINT x, UINT y, UINT w, UINT h,
-                    UINT fw, UINT fh, UINT ow, UINT oh, DXGI_FORMAT out_fmt) {
+bool prepare_copies(ID3D11DeviceContext* ctx, int eye, ID3D11Resource* color, ID3D11ShaderResourceView* color_srv, ID3D11ShaderResourceView* depth_srv,
+                    UINT x, UINT y, UINT w, UINT h, UINT fw, UINT fh, UINT ow, UINT oh, DXGI_FORMAT out_fmt) {
     Rhi& R = *g_rhi;
     EyeCopies& c = g_copies[eye];
     D3D11_TEXTURE2D_DESC sd{};
@@ -1877,10 +2019,12 @@ bool prepare_copies(ID3D11DeviceContext* ctx, int eye, ID3D11Resource* color, ID
         retire(c.depth_rtv);
         retire(c.depth_srv);
         retire(c.mv_srv);
-        c.color = make_tex(R.dev, fw, fh, sd.Format, D3D11_BIND_SHADER_RESOURCE);
+        retire(c.color_rtv);
+        c.color = make_tex(R.dev, fw, fh, sd.Format, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET);
         c.mv = make_tex(R.dev, fw, fh, DXGI_FORMAT_R16G16_FLOAT, D3D11_BIND_SHADER_RESOURCE);
         c.depth = make_tex(R.dev, fw, fh, DXGI_FORMAT_R32_FLOAT, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET);
         if (!c.color || !c.mv || !c.depth || FAILED(R.dev->CreateRenderTargetView(c.depth.Get(), nullptr, &c.depth_rtv)) ||
+            FAILED(R.dev->CreateRenderTargetView(c.color.Get(), nullptr, &c.color_rtv)) ||
             FAILED(R.dev->CreateShaderResourceView(c.depth.Get(), nullptr, &c.depth_srv)) ||
             FAILED(R.dev->CreateShaderResourceView(c.mv.Get(), nullptr, &c.mv_srv))) {
             c.color.Reset();
@@ -1897,18 +2041,25 @@ bool prepare_copies(ID3D11DeviceContext* ctx, int eye, ID3D11Resource* color, ID
         log::info("dlss: eye {} output texture {}x{} format {}", eye, ow, oh, static_cast<int>(out_fmt));
     }
     if (!g_ps_depth) {
-        ComPtr<ID3DBlob> b;
-        if (!compile("psdepth", "ps_5_0", b) || FAILED(R.dev->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &g_ps_depth)))
+        ComPtr<ID3DBlob> b, bc;
+        if (!compile("psdepth", "ps_5_0", b) || FAILED(R.dev->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &g_ps_depth)) ||
+            !compile("pscolor", "ps_5_0", bc) || FAILED(R.dev->CreatePixelShader(bc->GetBufferPointer(), bc->GetBufferSize(), nullptr, &g_ps_color)))
             return false;
     }
+    const float floor_v = g_color_floor.load(std::memory_order_relaxed);
     const D3D11_BOX box{x, y, 0, x + w, y + h, 1};
-    ctx->CopySubresourceRegion(c.color.Get(), 0, 0, 0, 0, color, 0, &box);
+    const bool draw_color = (floor_v > 0.0f || g_color_noise.load(std::memory_order_relaxed) > 0.0f) && color_srv;
+    if (!draw_color) ctx->CopySubresourceRegion(c.color.Get(), 0, 0, 0, 0, color, 0, &box);
     ctx->CopySubresourceRegion(c.mv.Get(), 0, 0, 0, 0, R.mv.Get(), 0, &box);
     PassConsts pc{};
     pc.rect[0] = static_cast<float>(x);
     pc.rect[1] = static_cast<float>(y);
     pc.rect[2] = static_cast<float>(w);
     pc.rect[3] = static_cast<float>(h);
+    pc.opt2[2] = floor_v;
+    pc.opt2[3] = g_color_noise.load(std::memory_order_relaxed);
+    pc.opt[0] = static_cast<float>(R.frame & 0xffff);
+    pc.opt[1] = g_depth_const.load(std::memory_order_relaxed);
     D3D11_MAPPED_SUBRESOURCE m{};
     if (FAILED(ctx->Map(R.cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return false;
     std::memcpy(m.pData, &pc, sizeof(pc));
@@ -1924,13 +2075,54 @@ bool prepare_copies(ID3D11DeviceContext* ctx, int eye, ID3D11Resource* color, ID
     ctx->OMSetRenderTargets(1, &rt, nullptr);
     ctx->RSSetViewports(1, &vp);
     ctx->Draw(3, 0);
+    if (draw_color) {
+        ID3D11ShaderResourceView* srvs[3] = {nullptr, nullptr, color_srv};
+        ID3D11RenderTargetView* crt = c.color_rtv.Get();
+        ctx->OMSetRenderTargets(1, &crt, nullptr);
+        ctx->PSSetShader(g_ps_color.Get(), nullptr, 0);
+        ctx->PSSetShaderResources(0, 3, srvs);
+        ctx->Draw(3, 0);
+    }
     ctx->ClearState();
     return true;
+}
+
+// [dlss] eval_at = frame_end: each eye's evaluation queued at its last pass and made at the end
+// of the frame (dlss::frame, before the eye texture goes to the runtime), outside the engine's
+// post-processing; the game's own last pass draws the eye first.
+struct Pending {
+    std::uint64_t frame = 0;
+    Stash s;
+    UINT half = 0, td_w = 0, td_h = 0, id_w = 0, id_h = 0;
+    float vp_w = 0, vp_h = 0;
+    ComPtr<ID3D11Resource> target;
+};
+Pending g_pending[2];  // RHI thread
+
+bool evaluate_upscale(ID3D11DeviceContext* ctx, int eye, Stash& s, UINT half, UINT td_w, UINT td_h, UINT id_w, UINT id_h, ID3D11Resource* target_res,
+                      float vp_w, float vp_h);
+
+// Frame end: the queued evaluations of this frame (frame_end placement).
+void run_pending(ID3D11DeviceContext* ctx) {
+    Rhi& R = *g_rhi;
+    for (int eye = 0; eye < 2; ++eye) {
+        Pending& p = g_pending[eye];
+        if (!p.target) continue;
+        if (p.frame == R.frame && R.ngx_state == 1 && g_set.enabled.load()) {
+            if (!evaluate_upscale(ctx, eye, p.s, p.half, p.td_w, p.td_h, p.id_w, p.id_h, p.target.Get(), p.vp_w, p.vp_h))
+                event(std::format("frame-end evaluation of eye {} not made; the game's image stays", eye));
+        }
+        retire(p.s.depth);
+        retire(p.s.depth_srv);
+        p.target.Reset();
+        p.frame = 0;
+    }
 }
 
 // The last pass of a view in upscale mode: true if it was replaced.
 bool try_final(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_trace::DrawIndexedFn original) {
     Rhi& R = *g_rhi;
+    if (g_set.skip_level.load(std::memory_order_relaxed) >= 2) return false;  // test: the game's last pass as it is
     if (g_stash[0].frame != R.frame && g_stash[1].frame != R.frame) return false;
     ID3D11PixelShader* ps = nullptr;
     ctx->PSGetShader(&ps, nullptr, nullptr);
@@ -1984,8 +2176,10 @@ bool try_final(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_t
     if (!g_graded || g_graded_desc.Width != id.Width || g_graded_desc.Height != id.Height || g_graded_desc.Format != td.Format) {
         retire(g_graded);
         retire(g_graded_rtv);
+        retire(g_graded_srv);
         g_graded = make_tex(R.dev, id.Width, id.Height, td.Format, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
-        if (!g_graded || FAILED(R.dev->CreateRenderTargetView(g_graded.Get(), nullptr, &g_graded_rtv))) {
+        if (!g_graded || FAILED(R.dev->CreateRenderTargetView(g_graded.Get(), nullptr, &g_graded_rtv)) ||
+            FAILED(R.dev->CreateShaderResourceView(g_graded.Get(), nullptr, &g_graded_srv))) {
             g_graded.Reset();
             return false;
         }
@@ -2085,16 +2279,50 @@ bool try_final(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_t
         original(ctx, count, start, base);
         return true;
     }
-    // 2. DLSS from the reduced rectangle into the eye's rectangle.
+    // 2. DLSS from the reduced rectangle into the eye's rectangle: here, or ([dlss] eval_at =
+    //    frame_end) at the end of the frame, after the game's own pass has drawn the eye.
+    if (g_set.eval_at_end.load(std::memory_order_relaxed)) {
+        original(ctx, count, start, base);  // the eye's image if the evaluation does not happen
+        Pending& p = g_pending[eye];
+        p.frame = R.frame;
+        p.s = s;
+        p.half = half;
+        p.td_w = td.Width;
+        p.td_h = td.Height;
+        p.id_w = id.Width;
+        p.id_h = id.Height;
+        p.vp_w = vp.Width;
+        p.vp_h = vp.Height;
+        p.target = target;
+        event(std::format("queued eye {} for the frame end", eye));
+        s.frame = 0;
+        s.depth.Reset();
+        s.depth_srv.Reset();
+        return true;
+    }
+    const bool ok = evaluate_upscale(ctx, eye, s, half, td.Width, td.Height, id.Width, id.Height, target.Get(), vp.Width, vp.Height);
+    s.frame = 0;  // one use per frame
+    retire(s.depth);  // the engine's depth texture, read by this frame's evaluation
+    retire(s.depth_srv);
+    // If DLSS failed, the eye's rectangle still holds the previous frame; draw the game's pass.
+    if (!ok) original(ctx, count, start, base);
+    return true;
+}
+
+// The evaluation of one eye in upscale mode: DLSS from the eye's reduced rectangle of the
+// graded texture into the eye's whole half of the eye texture (target). True if it was written.
+bool evaluate_upscale(ID3D11DeviceContext* ctx, int eye, Stash& s, UINT half, UINT td_w, UINT td_h, UINT id_w, UINT id_h, ID3D11Resource* target_res,
+                      float vp_w, float vp_h) {
+    Rhi& R = *g_rhi;
     ComPtr<ID3D11DeviceContext1> ctx1;
     if (FAILED(ctx->QueryInterface(IID_PPV_ARGS(&ctx1)))) return false;
-    const bool in_game_state = g_set.game_state.load(std::memory_order_relaxed);
+    const bool in_game_state = !g_set.own_state.load(std::memory_order_relaxed);
     ID3DDeviceContextState* game_state = nullptr;
     if (!in_game_state) ctx1->SwapDeviceContextState(R.state.Get(), &game_state);
     bool ok = false, created = false;
     // DLSS writes the eye's whole half, whatever part of it the view rendered.
     const UINT ox = static_cast<UINT>(eye) * half, oy = 0;
-    const UINT ow = half, oh = td.Height;
+    const UINT ow = half, oh = td_h;
     // The feature is created once for the largest input the settings allow, so that dynamic
     // resolution only changes the input rectangle per evaluation (no recreation): the eye's
     // rectangle at [stereo] render_scale (the upper bound of dynamic resolution, rounded like
@@ -2104,8 +2332,8 @@ bool try_final(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_t
     auto scaled = [rs](UINT full) {
         return rs >= 0.999f ? full : std::clamp<UINT>(static_cast<UINT>(std::lround(full * rs / 8.0) * 8), 64u, full);
     };
-    const UINT max_w = std::min(ow, std::max(s.w, static_cast<UINT>(std::ceil(static_cast<double>(scaled(half)) * id.Width / td.Width)) + 2));
-    const UINT max_h = std::min(oh, std::max(s.h, static_cast<UINT>(std::ceil(static_cast<double>(scaled(td.Height)) * id.Height / td.Height)) + 2));
+    const UINT max_w = std::min(ow, std::max(s.w, static_cast<UINT>(std::ceil(static_cast<double>(scaled(half)) * id_w / td_w)) + 2));
+    const UINT max_h = std::min(oh, std::max(s.h, static_cast<UINT>(std::ceil(static_cast<double>(scaled(td_h)) * id_h / td_h)) + 2));
     // NGX allows a smaller input than the creation size only within the range its optimal
     // settings give for the mode (dynamic resolution, guide 3.2.2). With the NVIDIA App's
     // override forcing DLAA the range is about 99-100 % of the output, a reduced creation
@@ -2127,7 +2355,7 @@ bool try_final(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_t
         if (copies) {
             ID3DDeviceContextState* gs2 = nullptr;
             if (in_game_state) ctx1->SwapDeviceContextState(R.state.Get(), &gs2);
-            copies = prepare_copies(ctx, eye, g_graded.Get(), s.depth_srv.Get(), s.x, s.y, s.w, s.h, f.w, f.h, ow, oh, DXGI_FORMAT_R10G10B10A2_UNORM);
+            copies = prepare_copies(ctx, eye, g_graded.Get(), g_graded_srv.Get(), s.depth_srv.Get(), s.x, s.y, s.w, s.h, f.w, f.h, ow, oh, DXGI_FORMAT_R10G10B10A2_UNORM);
             if (in_game_state) {
                 ctx1->SwapDeviceContextState(gs2, nullptr);
                 if (gs2) gs2->Release();
@@ -2176,8 +2404,8 @@ bool try_final(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_t
         }
         if (checked) {
             if (!in_game_state) {
-                if (copies) run_stats(ctx, eye, cp.mv_srv.Get(), cp.depth_srv.Get(), nullptr, 0, 0, s.w, s.h);
-                else run_stats(ctx, eye, R.mv_srv.Get(), s.depth_srv.Get(), nullptr, s.x, s.y, s.w, s.h);
+                if (copies) run_stats(ctx, eye, cp.mv_srv.Get(), cp.depth_srv.Get(), nullptr, true, 0, 0, s.w, s.h);
+                else run_stats(ctx, eye, R.mv_srv.Get(), s.depth_srv.Get(), g_graded_srv.Get(), true, s.x, s.y, s.w, s.h);
             }
             NVSDK_NGX_D3D11_DLSS_Eval_Params ep{};
             ep.Feature.InSharpness = g_set.sharpness.load();
@@ -2205,12 +2433,14 @@ bool try_final(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_t
             event(std::format("eval eye {} result {}", eye, result_text(r)));
         }
         if (NVSDK_NGX_SUCCEED(r)) {
-            if (copies) {
+            if (g_set.no_copyout.load(std::memory_order_relaxed)) {
+                // Test: the output is not used (the eye keeps the game's own image).
+            } else if (copies) {
                 const D3D11_BOX box{0, 0, 0, ow, oh, 1};
-                ctx->CopySubresourceRegion(target.Get(), 0, ox, oy, 0, in_out, 0, &box);
+                ctx->CopySubresourceRegion(target_res, 0, ox, oy, 0, in_out, 0, &box);
             } else {
                 const D3D11_BOX box{ox, oy, 0, ox + ow, oy + oh, 1};
-                ctx->CopySubresourceRegion(target.Get(), 0, ox, oy, 0, g_up_out.Get(), 0, &box);
+                ctx->CopySubresourceRegion(target_res, 0, ox, oy, 0, g_up_out.Get(), 0, &box);
             }
             if (eye == 0 && !copies) cuttest_on_output(ctx, g_up_out.Get(), ox, oy, ow, oh, R.frame);
             f.last_eval_frame = R.frame;
@@ -2223,7 +2453,7 @@ bool try_final(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_t
                 i.jitter_px[eye][1] = s.jy;
                 if (eye == 0)
                     i.up_sizes = std::format("feature {}x{} (largest input) | input {}x{} at {},{} | output {}x{} at {},{} (view rect {}x{})", f.w, f.h, s.w,
-                                             s.h, s.x, s.y, ow, oh, ox, oy, vp.Width, vp.Height);
+                                             s.h, s.x, s.y, ow, oh, ox, oy, vp_w, vp_h);
             });
         } else if (checked) {
             ++g_up_fail;
@@ -2246,12 +2476,7 @@ bool try_final(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_t
         ctx1->SwapDeviceContextState(game_state, nullptr);
         if (game_state) game_state->Release();
     }
-    s.frame = 0;  // one use per frame
-    retire(s.depth);  // the engine's depth texture, read by this frame's evaluation
-    retire(s.depth_srv);
-    // If DLSS failed, the eye's rectangle still holds the previous frame; draw the game's pass.
-    if (!ok) original(ctx, count, start, base);
-    return true;
+    return ok;
 }
 
 ComPtr<ID3D11Texture2D> make_tex(ID3D11Device* dev, UINT w, UINT h, DXGI_FORMAT f, UINT bind) {
@@ -2278,9 +2503,9 @@ void run_bench(ID3D11DeviceContext* ctx) {
     if (!iw || !ih || !ow || !oh || iw > ow || ih > oh || !ensure_shaders(R.dev)) return;
     if (!R.bench_out || R.bench_out_w != ow || R.bench_out_h != oh || R.bench.w != iw || R.bench.h != ih) {
         retire_feature(R.bench);
-        R.bench_color = make_tex(R.dev, iw, ih, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_BIND_SHADER_RESOURCE);
-        R.bench_depth = make_tex(R.dev, iw, ih, DXGI_FORMAT_R32_FLOAT, D3D11_BIND_SHADER_RESOURCE);
-        R.bench_mv = make_tex(R.dev, iw, ih, DXGI_FORMAT_R16G16_FLOAT, D3D11_BIND_SHADER_RESOURCE);
+        R.bench_color = make_tex(R.dev, iw, ih, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET);
+        R.bench_depth = make_tex(R.dev, iw, ih, DXGI_FORMAT_R32_FLOAT, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET);
+        R.bench_mv = make_tex(R.dev, iw, ih, DXGI_FORMAT_R16G16_FLOAT, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET);
         R.bench_out = make_tex(R.dev, ow, oh, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS);
         R.bench_out_w = ow;
         R.bench_out_h = oh;
@@ -2342,8 +2567,43 @@ void run_bench(ID3D11DeviceContext* ctx) {
         ep.InMVScaleX = 1.0f;
         ep.InMVScaleY = 1.0f;
         ep.InFrameTimeDeltaInMsec = R.frame_dt_ms;
-        NGX_D3D11_EVALUATE_DLSS_EXT(ctx, R.bench.handle, R.params, &ep);
+        if (g_set.bench_jitter.load()) {
+            auto halton = [](unsigned i, unsigned b) {
+                float f = 1.0f, r = 0.0f;
+                while (i > 0) {
+                    f /= static_cast<float>(b);
+                    r += f * static_cast<float>(i % b);
+                    i /= b;
+                }
+                return r;
+            };
+            const unsigned k = static_cast<unsigned>(R.frame % 8) + 1;
+            ep.InJitterOffsetX = halton(k, 2) - 0.5f;
+            ep.InJitterOffsetY = halton(k, 3) - 0.5f;
+        }
+        if (g_set.bench_write.load()) {
+            // New input values every frame, written as render targets like the real inputs.
+            ID3D11Resource* targets[3] = {R.bench_color.Get(), R.bench_depth.Get(), R.bench_mv.Get()};
+            const float v = 0.02f + 0.002f * static_cast<float>(R.frame % 8);
+            const float values[3][4] = {{v, v, v, 1.0f}, {0.5f + v, 0, 0, 0}, {0, 0, 0, 0}};
+            for (int k = 0; k < 3; ++k) {
+                ComPtr<ID3D11RenderTargetView> rtv;
+                if (SUCCEEDED(R.dev->CreateRenderTargetView(targets[k], nullptr, &rtv))) ctx->ClearRenderTargetView(rtv.Get(), values[k]);
+            }
+        }
+        const int repeat = std::clamp(g_set.bench_repeat.load(), 1, 8);
+        for (int k = 0; k < repeat; ++k) {
+            g_in_ngx = true;
+            const NVSDK_NGX_Result r = NGX_D3D11_EVALUATE_DLSS_EXT(ctx, R.bench.handle, R.params, &ep);
+            g_in_ngx = false;
+            static std::uint64_t bench_events = 0;
+            if ((bench_events++ & 63) == 0) event(std::format("bench evaluation {} x {}: {}", repeat, bench_events, result_text(r)));
+        }
         ctx->ClearState();
+        if (g_set.bench_copyout.load()) {
+            if (!R.bench_copy) R.bench_copy = make_tex(R.dev, ow, oh, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_BIND_SHADER_RESOURCE);
+            if (R.bench_copy) ctx->CopyResource(R.bench_copy.Get(), R.bench_out.Get());
+        }
         if (t) {
             ctx->End(t->t2);
             ctx->End(t->disjoint);
@@ -2371,16 +2631,61 @@ void start(const Config& cfg, const std::filesystem::path& dll_dir) {
     g_set.log_verbose = cfg.get_bool("dlss", "log_verbose", false);
     g_set.log_lines = static_cast<int>(cfg.get_int("dlss", "log_lines", 0));
     g_set.validate = cfg.get_bool("dlss", "validate", true);
-    g_set.input_stats = cfg.get_bool("dlss", "input_stats", true);
+    g_set.input_stats = cfg.get_bool("dlss", "input_stats", false);
     g_set.own_params = cfg.get_string("dlss", "params", "shared") == "feature";
     // Fault isolation tests, from the first frame (docs/dlss.md, "Dev commands")
     g_set.test_eyes = static_cast<int>(cfg.get_int("dlss", "test_eyes", 0));
     g_set.zero_mv = cfg.get_bool("dlss", "test_zero_mv", false);
     g_set.mv_sanitize = cfg.get_bool("dlss", "test_mv_sanitize", false);
     g_set.flush_after = static_cast<int>(cfg.get_int("dlss", "test_flush", 0));
-    g_set.game_state = cfg.get_bool("dlss", "test_game_state", false);
-    g_set.skip_eval = cfg.get_bool("dlss", "test_skip", false);
+    g_set.own_state = cfg.get_string("dlss", "context_state", "game") == "own";
+    g_set.skip_level = static_cast<int>(cfg.get_int("dlss", "test_skip", 0));
+    g_set.skip_eval = g_set.skip_level.load() >= 1;
+    g_set.no_ngx = cfg.get_bool("dlss", "test_no_ngx", false);
     g_set.copy_inputs = cfg.get_bool("dlss", "test_copy_inputs", false);
+    g_set.eval_at_end = cfg.get_string("dlss", "eval_at", "pass") == "frame_end";
+    g_set.no_copyout = cfg.get_bool("dlss", "test_no_copyout", false);
+    {
+        // test_jitter = <sx> <sy>: scale of the jitter handed to DLSS (default 0.5 -0.5; 0 0 passes no jitter)
+        const std::string j = cfg.get_string("dlss", "test_jitter", "");
+        float sx = 0, sy = 0;
+        if (!j.empty() && sscanf_s(j.c_str(), "%f %f", &sx, &sy) == 2) {
+            g_set.jitter_scale_x = sx;
+            g_set.jitter_scale_y = sy;
+            log::info("dlss: jitter scale {} {} (test_jitter)", sx, sy);
+        }
+    }
+    g_color_floor = static_cast<float>(cfg.get_float("dlss", "test_color_floor", 0.0));
+    g_color_noise = static_cast<float>(cfg.get_float("dlss", "test_color_noise", 0.0));
+    g_depth_const = static_cast<float>(cfg.get_float("dlss", "test_depth_const", 0.0));
+    {
+        // test_bench = <out w> <out h> <in w> <in h> [evaluations per frame]: the synthetic bench
+        // from the first stereo frame (NGX starts even with enabled = 0)
+        const std::string b = cfg.get_string("dlss", "test_bench", "");
+        unsigned v[5] = {0, 0, 0, 0, 1};
+        std::size_t i = 0, n = 0;
+        while (i < b.size() && n < 5) {
+            while (i < b.size() && (b[i] == ' ' || b[i] == 'x' || b[i] == ',')) ++i;
+            std::size_t j = i;
+            while (j < b.size() && std::isdigit(static_cast<unsigned char>(b[j]))) ++j;
+            if (j == i) break;
+            v[n++] = static_cast<unsigned>(std::stoul(b.substr(i, j - i)));
+            i = j;
+        }
+        if (n >= 4 && v[0] && v[1] && v[2] && v[3]) {
+            g_set.bench_out_w = v[0];
+            g_set.bench_out_h = v[1];
+            g_set.bench_in_w = v[2];
+            g_set.bench_in_h = v[3];
+            g_set.bench_repeat = static_cast<int>(std::clamp(v[4], 1u, 8u));
+            g_set.bench_jitter = cfg.get_bool("dlss", "test_bench_jitter", false);
+            g_set.bench_write = cfg.get_bool("dlss", "test_bench_write", false);
+            g_set.bench_copyout = cfg.get_bool("dlss", "test_bench_copyout", false);
+            g_set.bench = true;
+            g_set.init_requested = true;
+            log::info("dlss: bench test from the start: {}x{} from {}x{}, {} evaluation(s) per frame", v[0], v[1], v[2], v[3], v[4]);
+        }
+    }
     const std::string extra = cfg.get_string("dlss", "dll_dir", "");
     if (!extra.empty()) g_extra_dll_dir = log::widen(extra);
     const std::string mode = cfg.get_string("dlss", "mode", "upscale");
@@ -2398,10 +2703,12 @@ void start(const Config& cfg, const std::filesystem::path& dll_dir) {
     log::info("dlss: built in; {} (mode {}, preset {}, auto exposure {}, motion vector jitter mode {}{})",
               g_set.enabled.load() ? "ON" : "off ([dlss] enabled = 0)", g_set.mode.load() ? "upscale" : "dlaa", preset_name(g_set.preset.load()),
               g_set.auto_exposure.load() ? "on" : "off", g_set.mv_jitter.load(), extra.empty() ? "" : ", extra library folder " + extra);
-    log::info("dlss: checks {}, input statistics {}, parameter maps {}; tests: eyes {} zero mv {} mv sanitize {} flush {} game state {} skip {} copy inputs {}",
+    log::info("dlss: evaluations at {}; motion vectors and NGX in {}", g_set.eval_at_end.load() ? "the frame end ([dlss] eval_at = frame_end)" : "each eye's last pass",
+              g_set.own_state.load() ? "our own device context state ([dlss] context_state = own)" : "the game's pipeline state");
+    log::info("dlss: checks {}, input statistics {}, parameter maps {}; tests: eyes {} zero mv {} mv sanitize {} flush {} own context state {} skip {} copy inputs {}",
               g_set.validate.load() ? "on" : "off", g_set.input_stats.load() ? "on" : "off", g_set.own_params.load() ? "one per feature" : "shared",
               g_set.test_eyes.load(), g_set.zero_mv.load() ? 1 : 0, g_set.mv_sanitize.load() ? 1 : 0, g_set.flush_after.load(),
-              g_set.game_state.load() ? 1 : 0, g_set.skip_eval.load() ? 1 : 0, g_set.copy_inputs.load() ? 1 : 0);
+              g_set.own_state.load() ? 1 : 0, g_set.skip_eval.load() ? 1 : 0, g_set.copy_inputs.load() ? 1 : 0);
 }
 
 bool wants_hooks() { return g_set.enabled.load(std::memory_order_relaxed) || g_set.init_requested.load(std::memory_order_relaxed); }
@@ -2414,6 +2721,19 @@ void output_rects(EyeRect rects[2]) {
 
 void frame(ID3D11Texture2D* any_texture) {
     Rhi& R = *g_rhi;
+    if ((g_pending[0].target || g_pending[1].target) && any_texture) {
+        ID3D11Device* d = nullptr;
+        any_texture->GetDevice(&d);
+        if (d) {
+            ID3D11DeviceContext* c = nullptr;
+            d->GetImmediateContext(&c);
+            if (c) {
+                run_pending(c);
+                c->Release();
+            }
+            d->Release();
+        }
+    }
     if (R.ngx_state == 1) event(std::format("frame end (anti-aliasing passes 0x{:x})", g_taa_frame == R.frame ? g_taa_mask : 0u));
     ++R.frame;
     g_rhi_tid.store(GetCurrentThreadId(), std::memory_order_relaxed);
@@ -2460,7 +2780,16 @@ void frame(ID3D11Texture2D* any_texture) {
     dev->GetImmediateContext(&ctx);
     if (ctx) {
         install_ub_hooks(dev, ctx);
-        if (R.ngx_state == 0 && wants_hooks()) init_ngx(dev);
+        if (R.ngx_state == 0 && wants_hooks()) {
+            if (g_set.no_ngx.load() && g_set.skip_level.load() >= 1) {
+                // Test: the DLSS path without NGX (no evaluation is made with test_skip).
+                R.dev = dev;
+                R.ngx_state = 1;
+                log::info("dlss: NGX not initialised (test_no_ngx with test_skip)");
+            } else {
+                init_ngx(dev);
+            }
+        }
         // Features hold several hundred MB of video memory each: release them while DLSS is off.
         if (!g_set.enabled.load() && (R.feat[0].handle || R.feat[1].handle)) {
             retire_feature(R.feat[0]);
@@ -2527,6 +2856,7 @@ bool on_draw_indexed(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base,
     // Test (`[dlss] test_eyes`): one eye only; the other eye runs the game's own passes.
     const int only = g_set.test_eyes.load(std::memory_order_relaxed);
     if ((only == 1 && eye != 0) || (only == 2 && eye != 1)) return false;
+    if (g_set.skip_level.load(std::memory_order_relaxed) >= 4) return false;  // test: recognised only, the game's pass runs
     if (!g_set.enabled.load(std::memory_order_relaxed) || g_rhi->ngx_state != 1) {
         if (g_set.dump_requests.load() > 0) {
             ViewRows rows;
@@ -2674,17 +3004,18 @@ std::string command(const std::string& args) {
         g_set.test_eyes = std::clamp(std::atoi(a[1].c_str()), 0, 2);
         return std::format("ok eyes {}", g_set.test_eyes.load() == 0 ? "both" : g_set.test_eyes.load() == 1 ? "left only" : "right only");
     }
-    if ((sub == "zeromv" || sub == "mvsanitize" || sub == "flush" || sub == "gamestate" || sub == "validate" || sub == "stats" ||
-         sub == "params" || sub == "copyinputs") &&
+    if ((sub == "zeromv" || sub == "mvsanitize" || sub == "flush" || sub == "ownstate" || sub == "validate" || sub == "stats" ||
+         sub == "params" || sub == "copyinputs" || sub == "evalend") &&
         a.size() == 2) {
         const bool on = a[1] == "1" || a[1] == "feature";
         if (sub == "zeromv") g_set.zero_mv = on;
         else if (sub == "mvsanitize") g_set.mv_sanitize = on;
         else if (sub == "flush") g_set.flush_after = on ? 1 : 0;
-        else if (sub == "gamestate") g_set.game_state = on;
+        else if (sub == "ownstate") g_set.own_state = on;
         else if (sub == "validate") g_set.validate = on;
         else if (sub == "stats") g_set.input_stats = on;
         else if (sub == "params") g_set.own_params = on;
+        else if (sub == "evalend") g_set.eval_at_end = on;
         else g_set.copy_inputs = on;
         log::info("dlss: {} {} (dev command)", sub, on ? 1 : 0);
         return std::format("ok {} {}", sub, on ? 1 : 0);
@@ -2757,9 +3088,10 @@ std::string command(const std::string& args) {
                          g_set.input_stats.load() ? "on" : "off", S.read, S.frames_bad, S.mv_nonfinite, S.mv_huge, S.mv_max, S.depth_nonfinite, S.depth_out,
                          S.color_nonfinite, S.color_max);
     }
-    s += std::format(" | parameter maps {} | tests: eyes {} zero mv {} mv sanitize {} flush {} game state {} skip {} copy inputs {} | events {}",
+    s += std::format(" | evaluations at {}", g_set.eval_at_end.load() ? "the frame end" : "each eye's last pass");
+    s += std::format(" | parameter maps {} | tests: eyes {} zero mv {} mv sanitize {} flush {} own context state {} skip {} copy inputs {} | events {}",
                      g_set.own_params.load() ? "one per feature" : "shared", g_set.test_eyes.load(), g_set.zero_mv.load() ? 1 : 0,
-                     g_set.mv_sanitize.load() ? 1 : 0, g_set.flush_after.load(), g_set.game_state.load() ? 1 : 0, g_set.skip_eval.load() ? 1 : 0,
+                     g_set.mv_sanitize.load() ? 1 : 0, g_set.flush_after.load(), g_set.own_state.load() ? 1 : 0, g_set.skip_eval.load() ? 1 : 0,
                      g_set.copy_inputs.load() ? 1 : 0, [] {
                          std::lock_guard lock(g_events.m);
                          return g_events.total;
