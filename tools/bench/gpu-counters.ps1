@@ -7,12 +7,14 @@
     \GPU Engine(*)\Utilization Percentage      per process and engine (3D, copy, video encode, ...)
     \GPU Process Memory(*)\Local Usage         per process, in the card's memory
     \GPU Process Memory(*)\Shared Usage        per process, in shared system memory
+    \GPU Process Memory(*)\Dedicated Usage     per process, allocations whose home is the card
+    \GPU Process Memory(*)\Total Committed     per process, everything committed (card and system memory)
     \GPU Adapter Memory(*)\Dedicated Usage     whole card
     \GPU Adapter Memory(*)\Shared Usage        whole card, shared system memory
   and writes one CSV row per busy engine and per process holding memory:
     time,kind,pid,process,item,value
   kind = engine (value in percent, item = engine type and index, for example copy#11),
-         local / shared (MB per process), adapter (MB, item dedicated / shared).
+         local / shared / dedicated / committed (MB per process), adapter (MB, item dedicated / shared).
   Process id 4 is the System process: the video memory manager's own transfers
   (moving allocations between system memory and the card) are counted there.
 
@@ -33,6 +35,8 @@ $counters = @(
     '\GPU Engine(*)\Utilization Percentage',
     '\GPU Process Memory(*)\Local Usage',
     '\GPU Process Memory(*)\Shared Usage',
+    '\GPU Process Memory(*)\Dedicated Usage',
+    '\GPU Process Memory(*)\Total Committed',
     '\GPU Adapter Memory(*)\Dedicated Usage',
     '\GPU Adapter Memory(*)\Shared Usage'
 )
@@ -76,7 +80,8 @@ try {
             } elseif ($path -like '*\gpu process memory(*)\*') {
                 if ($inst -match '^pid_(\d+)_') {
                     $procId = [int]$Matches[1]
-                    $kind = if ($path -like '*\local usage') { 'local' } else { 'shared' }
+                    $kind = if ($path -like '*\local usage') { 'local' } elseif ($path -like '*\shared usage') { 'shared' }
+                            elseif ($path -like '*\dedicated usage') { 'dedicated' } else { 'committed' }
                     $key = "$procId|$kind"
                     $mem[$key] = ($(if ($mem.ContainsKey($key)) { $mem[$key] } else { 0 })) + $v
                 }
