@@ -137,8 +137,11 @@ struct MarkOffsets {
 MarkOffsets g_mark;
 hook::InlineHook g_renderHook, g_processHook;
 std::atomic<bool> g_marksReady{false};
-bool g_layoutSearched = false;  // render thread
-bool g_sceneOpen = false;       // render thread: a begin was appended and no end yet
+bool g_layoutFound = false;          // render thread: latched once both offsets are found
+std::uint64_t g_layoutFailures = 0;  // render thread: searches that failed so far
+std::uint64_t g_layoutNextWarn = 1;  // render thread: warn at failures 1, 2, 4, 8, ...
+int g_layoutForceFail = 0;           // [dev] foveation_layout_fail: fail the first N searches (tests the retry)
+bool g_sceneOpen = false;     // render thread: a begin was appended and no end yet
 std::atomic<std::uint64_t> g_marksBegun{0}, g_marksEnded{0};
 
 void close_scene(void* cmdList);
@@ -348,33 +351,47 @@ bool is_projection(const float* m) {
            std::fabs(m[8]) < 1.0f && std::fabs(m[9]) < 1.0f;
 }
 
-// Finds, once, where FViewInfo keeps the view rect and the projection matrix: the first
-// FIntRect that reads (0, 0, W, H) in the left eye and (W, 0, 2W, H) in the right eye, and
-// the first matrix of the projection's form in both. Logged; the markers stay off if either
-// is missing.
+// Finds where FViewInfo keeps the view rect and the projection matrix: the first FIntRect
+// that reads (0, 0, W, H) in the left eye and (W, 0, 2W, H) in the right eye, and the first
+// matrix of the projection's form in both. The first stereo frame can fail (with stereo on
+// from the start the views of tick 2 do not have the eye rects yet), so a failed search is
+// repeated on the next stereo frames, with a warning at failures 1, 2, 4, 8, ...; only a
+// success latches. The markers stay off until then.
 void find_view_layout(const std::uint8_t* left, const std::uint8_t* right) {
-    g_layoutSearched = true;
+    g_mark.rect = -1;
+    g_mark.proj = -1;
     const std::size_t span = g_mark.viewStride - 64;
-    if (!readable(left, span) || !readable(right, span)) return;
-    for (std::size_t o = 0; o + 16 <= span && g_mark.rect < 0; o += 4) {
-        const auto* a = reinterpret_cast<const std::int32_t*>(left + o);
-        const auto* b = reinterpret_cast<const std::int32_t*>(right + o);
-        if (a[0] == 0 && a[1] == 0 && a[2] >= 64 && a[2] <= 16384 && a[3] >= 64 && a[3] <= 16384 && b[0] == a[2] && b[1] == 0 &&
-            b[2] == 2 * a[2] && b[3] == a[3])
-            g_mark.rect = static_cast<int>(o);
+    const bool forced = g_layoutForceFail > 0 && g_layoutFailures < static_cast<std::uint64_t>(g_layoutForceFail);
+    if (!forced && readable(left, span) && readable(right, span)) {
+        for (std::size_t o = 0; o + 16 <= span && g_mark.rect < 0; o += 4) {
+            const auto* a = reinterpret_cast<const std::int32_t*>(left + o);
+            const auto* b = reinterpret_cast<const std::int32_t*>(right + o);
+            if (a[0] == 0 && a[1] == 0 && a[2] >= 64 && a[2] <= 16384 && a[3] >= 64 && a[3] <= 16384 && b[0] == a[2] && b[1] == 0 &&
+                b[2] == 2 * a[2] && b[3] == a[3])
+                g_mark.rect = static_cast<int>(o);
+        }
+        for (std::size_t o = 0; o + 64 <= span && g_mark.proj < 0; o += 16)
+            if (is_projection(reinterpret_cast<const float*>(left + o)) && is_projection(reinterpret_cast<const float*>(right + o)))
+                g_mark.proj = static_cast<int>(o);
     }
-    for (std::size_t o = 0; o + 64 <= span && g_mark.proj < 0; o += 16)
-        if (is_projection(reinterpret_cast<const float*>(left + o)) && is_projection(reinterpret_cast<const float*>(right + o)))
-            g_mark.proj = static_cast<int>(o);
     if (g_mark.rect < 0 || g_mark.proj < 0) {
-        log::warn("foveation: view rect (+0x{:x}) or projection (+0x{:x}) not found in the eye views; no foveated rendering", g_mark.rect,
-                  g_mark.proj);
+        const int rect = g_mark.rect, proj = g_mark.proj;
+        g_mark.rect = g_mark.proj = -1;
+        if (++g_layoutFailures >= g_layoutNextWarn) {
+            g_layoutNextWarn *= 2;
+            log::warn("foveation: view rect ({}) or projection ({}) not found in the eye views{} (search {} failed); no foveated rendering "
+                      "until a later stereo frame finds them",
+                      rect < 0 ? std::string("missing") : std::format("+0x{:x}", rect), proj < 0 ? std::string("missing") : std::format("+0x{:x}", proj),
+                      forced ? " (forced by [dev] foveation_layout_fail)" : "", g_layoutFailures);
+        }
         return;
     }
+    g_layoutFound = true;
     const float* m = reinterpret_cast<const float*>(left + g_mark.proj);
     const auto* r = reinterpret_cast<const std::int32_t*>(left + g_mark.rect);
-    log::info("foveation: eye views: rect at +0x{:x} ({}x{}), projection at +0x{:x} (left eye scale {:.4f} {:.4f}, axis at NDC {:.4f} {:.4f})",
-              g_mark.rect, r[2], r[3], g_mark.proj, m[0], m[5], m[8], m[9]);
+    log::info("foveation: eye views: rect at +0x{:x} ({}x{}), projection at +0x{:x} (left eye scale {:.4f} {:.4f}, axis at NDC {:.4f} {:.4f}){}",
+              g_mark.rect, r[2], r[3], g_mark.proj, m[0], m[5], m[8], m[9],
+              g_layoutFailures ? std::format(", found after {} failed search(es)", g_layoutFailures) : std::string());
 }
 
 // Both eyes of a stereo view family, or false.
@@ -386,8 +403,8 @@ bool stereo_eyes(void* renderer, render::FoveationEye out[2]) {
     const std::uint8_t* v[2] = {views, views + g_mark.viewStride};
     if (*reinterpret_cast<const std::int32_t*>(v[0] + g_mark.stereoPass) != 1 || *reinterpret_cast<const std::int32_t*>(v[1] + g_mark.stereoPass) != 2)
         return false;
-    if (!g_layoutSearched) find_view_layout(v[0], v[1]);
-    if (g_mark.rect < 0 || g_mark.proj < 0) return false;
+    if (!g_layoutFound) find_view_layout(v[0], v[1]);
+    if (!g_layoutFound) return false;
     for (int e = 0; e < 2; ++e) {
         const auto* rc = reinterpret_cast<const std::int32_t*>(v[e] + g_mark.rect);
         const float* m = reinterpret_cast<const float*>(v[e] + g_mark.proj);
@@ -505,6 +522,7 @@ bool start_ui_layer(const StartupContext& ctx) {
     const auto t0 = GetTickCount64();
     // Independent of the UI layer: foveated rendering needs only the scene markers. They
     // pass straight through while it is off ([foveation] enabled, `fov on|off`).
+    g_layoutForceFail = static_cast<int>(ctx.config->get_int("dev", "foveation_layout_fail", 0));
     start_scene_marks(base, known);
     std::string why;
     std::int64_t begin = 0, end = 0, uiTarget = 0, uiSize = 0, flag = 0, stereoPass = 0, endTarget = 0;
