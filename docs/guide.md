@@ -396,3 +396,21 @@ game, standing still, without a headset:
 
 Busy scenes (combat, open areas) cost more than a quiet room, and Virtual
 Desktop's video encoding comes on top.
+
+## DLSS (optional, NVIDIA RTX cards)
+
+A package whose folder name ends in `-dlss` can use NVIDIA DLSS: each eye is rendered at
+a fraction of its size and DLSS rebuilds the full-size image from it and from the
+previous frames, in place of the game's own anti-aliasing. To try it, set `enabled = 1`
+under `[dlss]` in `ff7vr.ini`; `input_scale` sets the rendered share of each eye's width
+and height (0.5 = a quarter of the pixels). On the development PC (RTX 5080, no headset,
+DLSS model L) 0.5 cost about as much as the game at full size (5 % more at 3072x3264 per
+eye, between 9 % less and 4 % more at 3600x3600), with detail close to it and far sharper
+than rendering at 0.5 without DLSS; hair and soft shadow edges are grainier than at full
+size; 0.67 is calmer and closer to full size but costs about half as much again.
+What it looks like in a headset has not been seen yet. It needs an NVIDIA RTX graphics
+card with a current driver: the DLSS model comes with the driver (or from an
+`nvngx_dlss.dll` in the game folder), and if the NVIDIA App's DLSS override is set for
+this game, the App's choice of model applies, not `[dlss] preset`; with that override,
+leave `[stereo] dynamic_resolution` off while DLSS is on (every change of the render size
+then stutters for a frame). Packages without `-dlss` ignore the `[dlss]` section.

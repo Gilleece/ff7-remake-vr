@@ -3,10 +3,15 @@
 NVIDIA DLSS in place of the game's temporal anti-aliasing, per eye, in the stereo rendering
 of the engine module. Optional at build time and off by default at run time.
 
-Status: a working prototype in two modes, DLAA (anti-aliasing at the eye size) and upscale
-(DLSS scales each eye up from a lower screen percentage). Everything here was measured
-headless (Null backend, no headset); nothing has been seen in a headset yet. Not handled:
-camera cuts, texture mip bias in upscale mode, mono frames.
+Status: two modes, upscale (DLSS scales each eye up to its full size from the rendered part,
+`[dlss] input_scale`; the useful one) and DLAA (anti-aliasing at the rendered size; too slow
+at headset resolution). The history is reset on camera cuts; upscale mode works with
+`[stereo] render_scale` and dynamic resolution (under the NVIDIA App's DLSS override each
+change of the size recreates the features, a hitch) and always hands the runtime the full
+eye. Everything here was measured headless (Null backend, no headset); nothing has been seen
+in a headset yet. Not handled: texture mip bias in upscale mode, mono frames. **Open: three
+GPU faults (driver resets) in the test runs with DLSS on**, one explained and fixed, two not
+(section "GPU faults").
 
 ## Building it
 
@@ -37,7 +42,7 @@ immediate context's `DrawIndexed` that the bloom and occlusion fixes use:
    target of `t2`'s size and has the view's uniform buffer at `cb1`. The first match fixes the
    pixel shader; later draws must use the same one (2 per stereo frame, checked).
 2. **Jitter.** The engine writes each view's uniform buffer through `Map`/`Unmap` or
-   `UpdateSubresource`; hooks on those (and on `CreateBuffer`) keep rows 110-145 of every
+   `UpdateSubresource`; hooks on those (and on `CreateBuffer`) keep rows 50-145 of every
    4096-byte constant buffer, keyed by the buffer. At the draw, the rows of the bound `cb1`
    give `TemporalAAJitter`; DLSS gets `x * width / 2`, `-y * height / 2` pixels.
 3. **Motion vectors.** A small pixel shader (compiled at run time) draws the eye's
@@ -135,11 +140,14 @@ The cost follows the input pixel count more than the output. NVIDIA's table for 
 should cost about 0.6 times and M about 0.8 times these numbers (not measured here: the
 override forces L).
 
-## Upscale mode (`[dlss] mode = upscale`, with `r.ScreenPercentage` below 100)
+## Upscale mode (`[dlss] mode = upscale`, the default)
 
-Below 100 % screen percentage this engine renders each eye at the reduced size up to and
-including the tonemapper, and its last pass (colour grading and grain) scales the result up
-into the eye texture (`docs/re/engine.md` section 12). In upscale mode:
+Each eye is rendered at a part of its size, set by `[dlss] input_scale` (which sets
+`[stereo] render_scale`: the views' rectangles shrink inside full-size targets, see
+`docs/engine-module.md`), by `r.ScreenPercentage`, or both (they multiply). The engine runs
+everything up to and including the tonemapper at that size, and its last pass (colour grading
+and grain) writes the eye texture: scaled up to the full eye with `r.ScreenPercentage`, at
+the view's rectangle with `render_scale` (`docs/re/engine.md` section 12). In upscale mode:
 
 1. the anti-aliasing pass only copies the jittered scene colour through (and the motion
    vectors are drawn then, at the reduced size);
@@ -149,60 +157,262 @@ into the eye texture (`docs/re/engine.md` section 12). In upscale mode:
    without scaling; the constants are checked once against the viewport and the mode stops
    if they do not match;
 3. DLSS (display-referred input, one feature per eye, output sub-rectangles) scales that
-   into the eye's rectangle of an `R10G10B10A2_UNORM` texture, which is copied into the eye
-   texture; the game's scaling draw is skipped.
+   into the eye's whole half of an `R10G10B10A2_UNORM` texture, which is copied into the eye
+   texture; the game's draw is skipped;
+4. the eye rectangles handed to the runtime (`render_host.cpp`) become the whole halves for
+   the eyes DLSS wrote that frame, so the headset gets the full-size image also when the views
+   rendered less (`render_scale`, dynamic resolution); an eye that fell back to the game's
+   pass keeps its rectangle.
 
-The percentage is the game's own console variable, for example in `[stereo_cvars]`:
-`r.ScreenPercentage = 50` (Performance), `58` (Balanced), `67` (Quality). With the driver
-override described below forcing DLAA as the "performance mode", explicit input and output
-sizes still upscale (checked: a 1536x1632 input gives a full 3072x3264 eye image).
+With the driver override described below forcing DLAA as the "performance mode", explicit
+input and output sizes still upscale (checked: a 1536x1632 input gives a full 3072x3264 eye
+image).
 
-Measured at eyes 3072x3264 (first room, third person, still camera; `captures/dlss/r8`,
-`r9`; preset L):
+**`input_scale` (`render_scale`) or `r.ScreenPercentage`?** Use `[dlss] input_scale`
+(0.5, 0.58, 0.67 for NVIDIA's Performance, Balanced and Quality ratios). It changes only the
+views' rectangles: no reallocation when it changes (`r.ScreenPercentage` changes reallocate the
+scene buffers, 54 to 138 ms hitches), it is what `[stereo] dynamic_resolution` moves, and
+the rectangles are multiples of 8 at the start of each half, so the right eye's view never
+overhangs a scaled buffer (at 58 and 67 % of a 3072-wide eye, `r.ScreenPercentage` makes the
+right view reach 1 to 3 pixels past the buffer; the bloom and occlusion fixes clamp that
+since `bbe071a`, the DLSS pass clips it). `r.ScreenPercentage` through `[stereo_cvars]`
+still works with DLSS (the input is then the product of both, the output still the full eye)
+and was checked once together with `render_scale` (`captures/dlss/r22`); it only keeps the
+hitch.
 
-| Path | Rendered per eye | Frame time | DLSS GPU per eye |
+### The numbers (preset L, measured; K and M inferred)
+
+Null backend, Quest 3 class asymmetric field of view, RTX 5080, `xr.null_pace = 0`, frame cap
+lifted; upscale mode through `render_scale` (`[dlss] input_scale`); frame times are the
+average and 95th percentile of 6 s windows (`stereo status`), DLSS GPU time per eye from
+timestamp queries around the motion vectors, the evaluation and the copy. Room = the first
+room of the test save, third person, still camera; street = the alley outside, first person,
+reached by walking (`captures/dlss/r23` at 3072x3264, `r24` at 3600x3600; the game's own
+anti-aliasing at 100 % measured in the same run as the reference). Every DLSS number is
+preset L, forced by the NVIDIA App override on the test machine. The K and M columns are
+**inferred, not measured**: the frame time with the DLSS share scaled by NVIDIA's own cost
+ratios for an RTX 5080 (guide, 4K Performance: L 2.24 ms, M 1.74 ms, K 1.31 ms), and the
+DLSS time per eye scaled the same way.
+
+| Eye | Scene | Path | Input per eye | Frame ms avg (p95) | DLSS ms per eye, L (measured) | K inferred: frame / DLSS per eye | M inferred: frame / DLSS per eye | Picture (from the sheets) |
+|---|---|---|---|---|---|---|---|---|
+| 3072x3264 | room | game's anti-aliasing, 100 % | 3072x3264 | 9.91 (10.35) | - | - | - | the reference |
+| 3072x3264 | room | DLSS from 0.5 | 1536x1632 | 10.49 (10.94) | 2.50 | 8.4 / 1.46 | 9.4 / 1.94 | edges and textures close to 100 %; hair grainy; grain in soft shadow edges |
+| 3072x3264 | room | DLSS from 0.58 | 1784x1896 | 12.49 (13.03) | 3.14 | 9.9 / 1.84 | 11.1 / 2.44 | as 0.5, hair less grainy |
+| 3072x3264 | room | DLSS from 0.67 | 2056x2184 | 14.69 (15.12) | 3.83 | 11.5 / 2.24 | 13.0 / 2.98 | closest to 100 %; hair about as at 100 % |
+| 3072x3264 | room | game, render scale 0.5 (runtime scales up) | 1536x1632 | not timed in this run | - | - | - | clearly blurred (`sheet_room.png`) |
+| 3072x3264 | street | game's anti-aliasing, 100 % | 3072x3264 | 9.10 (9.46) | - | - | - | the reference |
+| 3072x3264 | street | DLSS from 0.5 | 1536x1632 | 9.56 (9.95) | 2.53 | 7.5 / 1.48 | 8.4 / 1.96 | bricks, stairs, walls close to 100 %; shadowed ground a little crunchier |
+| 3072x3264 | street | DLSS from 0.58 | 1784x1896 | 11.35 (11.66) | 3.17 | 8.7 / 1.85 | 9.9 / 2.46 | as 0.5 |
+| 3072x3264 | street | DLSS from 0.67 | 2056x2184 | 13.51 (14.00) | 3.92 | 10.3 / 2.29 | 11.8 / 3.04 | closest to 100 % |
+| 3600x3600 | room | game's anti-aliasing, 100 % | 3600x3600 | 14.43 (14.90) | - | - | - | the reference (not captured) |
+| 3600x3600 | room | DLSS from 0.5 | 1800x1800 | 13.11 (13.64) | 3.30 | 10.4 / 1.93 | 11.6 / 2.57 | not captured (same ratios as at 3072x3264) |
+| 3600x3600 | room | DLSS from 0.58 | 2088x2088 | 15.41 (15.76) | 4.06 | 12.0 / 2.38 | 13.6 / 3.16 | not captured (same ratios as at 3072x3264) |
+| 3600x3600 | room | DLSS from 0.67 | 2416x2416 | 18.36 (18.81) | 4.98 | 14.2 / 2.91 | 16.1 / 3.86 | not captured (same ratios as at 3072x3264) |
+| 3600x3600 | room | game, render scale 0.5 (runtime scales up) | 1800x1800 | 6.34 (6.72) | - | - | - | blurred (as at 3072x3264) |
+| 3600x3600 | street | game's anti-aliasing, 100 % | 3600x3600 | 11.55 (12.55) | - | - | - | the reference (not captured) |
+| 3600x3600 | street | DLSS from 0.5 | 1800x1800 | 12.06 (12.50) | 3.34 | 9.3 / 1.95 | 10.6 / 2.59 | not captured (same ratios as at 3072x3264) |
+| 3600x3600 | street | DLSS from 0.58 | 2088x2088 | 14.23 (14.68) | 4.12 | 10.8 / 2.41 | 12.4 / 3.20 | not captured (same ratios as at 3072x3264) |
+| 3600x3600 | street | DLSS from 0.67 | 2416x2416 | 17.03 (17.36) | 5.06 | 12.8 / 2.96 | 14.8 / 3.93 | not captured (same ratios as at 3072x3264) |
+| 3600x3600 | street | game, render scale 0.5 (runtime scales up) | 1800x1800 | 5.23 (5.62) | - | - | - | blurred (as at 3072x3264) |
+
+What the table says, with preset L as forced now:
+
+- At 3072x3264, DLSS from 0.5 costs 5 to 6 % more than the game's own anti-aliasing at
+  100 % (10.49 against 9.91 ms in the room, 9.56 against 9.10 in the street) for a picture
+  close to it: with L it is a picture choice, not a speed gain. 0.58 costs about 25 % more,
+  0.67 about 48 % more. The game itself at 0.5 without DLSS is more than twice as fast (6.34
+  against 14.43 ms at 3600x3600) but blurred.
+- At 3600x3600, DLSS from 0.5 is 9 % faster than the game at 100 % in the room (13.11
+  against 14.43 ms) and 4 % slower in the street (12.06 against 11.55). Headless, that is
+  inside 72 Hz (13.9 ms) at both spots, before Virtual Desktop's encoding; 0.58 and 0.67
+  are not.
+- DLSS costs 2.5 ms per eye at 3072x3264 from 0.5 and 3.3 ms at 3600x3600; it grows with
+  the input (about 3.9 and 5.0 ms at 0.67). Two eyes double it: at 0.5 and 3072x3264 DLSS
+  is 5 of the 10.5 ms.
+- Inferred, not measured: with preset K the same frames would take 2 to 2.7 ms less at 0.5
+  (8.4 and 7.5 ms at 3072x3264, 10.4 and 9.3 at 3600x3600), 15 to 28 % faster than the
+  game at 100 %; with M 1 to 1.5 ms less. Whether K's picture at 0.5 holds up against L's is
+  not known here (the override prevents the comparison).
+
+### Picture at 50 to 67 %
+
+What DLSS from a reduced input looks like against the game's own anti-aliasing at 100 %
+(left eye, eyes 3072x3264, preset L; `captures/dlss/r23/sheet_room.png`,
+`sheet_street.png`; the street spot of r23 is an alley, the one of r12 the yard behind it):
+
+- **Edges and texture detail:** at 0.5, 0.58 and 0.67 close to the 100 % image (bricks,
+  stairs, the gramophone, the vent bars); rendering at 0.5 without DLSS (the runtime scales
+  the image) is clearly blurred.
+- **Hair:** Cloud's dithered hair is grainy at 0.5 (dark speckled strands), less at 0.58,
+  about like the 100 % image at 0.67.
+- **Shadows:** where a shadow edge is soft (the penumbra under the pipe and on the wall in the
+  yard, `r12/sheet_street_up.png`), 0.5 shows a fine grain that the 100 % image does not
+  have. In the alley and the room (`r23/sheet_st_tests.png`) the shadowed ground and walls at
+  0.5 are as clean as at 100 %: a count of isolated bright dots in shadow (pixels more than
+  6 levels above the median of their 3x3 neighbours, among pixels whose median is below 50)
+  gave 0.22 % at 0.5 against 0.26 % at 100 % (`speckle.py`, a quarter of the eye with
+  shadowed ground, 4 captures each). On a still camera in the room DLSS from 0.5 is calmer
+  than the game's anti-aliasing (mean change between captures in dark areas 0.25 against
+  0.50 levels, `r21`).
+
+Cheap settings tried at 0.5 for the shadow grain (street, `r23` and `r25`, preset L):
+
+| Setting at 0.5 | Isolated bright dots in shadow, alley (`r23`, >6 / >12 levels) | Seen in the crops (`r23/sheet_st_tests.png`) |
+|---|---|---|
+| game's anti-aliasing at 100 % (reference) | 0.26 % / 0.04 % | - |
+| DLSS defaults | 0.22 % / 0.04 % | as the reference |
+| `dlss autoexp 0` (no auto exposure; preset L ignores it per the guide) | 0.17 % / 0.03 % | no visible change |
+| `dlss hdr 1` (input flagged HDR, 16-bit internal) | 0.24 % / 0.05 % | no visible change |
+| `dlss mvjitter 1` (motion vectors flagged as jittered) | 0.06 % / 0.01 % | softer overall (fewer dots because less detail) |
+| `dlss nograin 1` (last pass without its noise texture) | 0.31 % / 0.05 % | no visible change |
+| `dlss sharpness`, `preexp` | not measured | `InSharpness` is deprecated (guide 3.11: the SDK's sharpening pass was removed); `InPreExposure` is for engines that pre-multiply exposure into HDR input (guide 3.9.2), which the display-referred input here is not |
+
+So the grain comes with the input, not with the last pass or with DLSS's exposure: the
+game's soft shadows (and the hair) are dithered, its anti-aliasing at 100 % averages that
+in linear HDR before tonemapping, and at a quarter of the pixels the dither is coarser than
+what DLSS (display-referred, after grading) smooths out. What helps is more input: 0.58
+or 0.67. `[dlss] mv_jitter = 2` (the default) stays right in upscale mode; `1` softens and
+in DLAA made the image shimmer (table above, "Stability"). `NVSDK_NGX_DLSS_Feature_Flags_MVLowRes`
+is required here (the motion vectors are drawn at the input size; without the flag DLSS
+would read them as output-size vectors). Texture mip bias for the lower render size (DLSS
+guide 3.5): `r.MipMapLODBias -1` at 0.5 showed no clear difference in the crops checked
+(`r14/sheet_bias.png`, the counter and the gramophone), so it is left to the player
+(`[stereo_cvars] r.MipMapLODBias = -1`); the flat-screen Luma mod instead adds a bias to the
+game's samplers (recreated with `MipLODBias`), which was not tried. `render_scale` and
+`r.ScreenPercentage` at the same input give the same texture sharpness
+(`r22/sheet_rs_vs_sp.png`).
+
+### DLSS before the tonemapper (not built; what it would take)
+
+NVIDIA's guide (3.1) puts DLSS before tonemapping, as early in post-processing as possible:
+here that is the anti-aliasing pass, with linear HDR input (the scene colour before grading
+and grain) and a full-size output. Then every pass after it must run at the full eye size:
+the bloom chain (about 6 levels per eye, its first pass with the right-eye fix of
+`docs/engine-module.md`), eye adaptation, the tonemapper, the glare pass and the last pass.
+This engine (4.18) has no notion of an upscale inside the anti-aliasing pass (UE's TAAU and
+its two view rectangles came in 4.19), so these passes take their size from the view
+rectangle. Two ways, both untried:
+
+1. Retarget each later pass by hand, as the last pass is retargeted now: recognise it, give
+   it full-size targets of our own, patch its viewport and the rectangles in its constants
+   (each pass has its own layout, found with `gpu trace` dumps). About 15 to 25 draws per eye,
+   and the bloom, occlusion and reflection fixes of the right eye work on these rectangles
+   too. Estimate: two to three days, with GPU traces and per-eye checks of every pass.
+2. With `[stereo] render_scale` the scene buffers already have the full size: change the
+   views' rectangles from the reduced to the full size between the anti-aliasing pass and
+   the rest of post-processing (the `FViewInfo` rectangle and rows 121-126 of the view
+   constants, the post-processing hook point the foveation code already has), so that the
+   engine itself sizes the later passes for the full eye. Fewer patches, but it touches how
+   the engine builds the post-processing chain of a frame (4.18 builds it from the view
+   rectangle when post-processing starts, with the anti-aliasing pass inside that chain).
+   Estimate: one to two days to find out whether it holds, more if passes cache the size.
+
+What it would gain: DLSS would see the image before the grain and the colour grading, at
+16-bit precision, and noise that the game's anti-aliasing averages before the tonemapper
+(dithered shadows, hair) would reach DLSS as such and be resolved instead of upscaled as
+detail; the later passes would cost their full-size price (about 0.9 ms of post-processing
+at 3072x3264, `docs/engine-module.md`). Not attempted: the display-referred route turned
+out usable (section "Picture at 50 to 67 %").
+
+### Dynamic resolution
+
+DLSS supports an input that changes size from frame to frame within a range NGX gives per
+output size and mode (guide 3.2.2): the feature is created for the largest input, and each
+evaluation names the current rectangle. The mod asks NGX for that range
+(`dlss: input range for output ...` in the log) and uses it when the largest input of
+`[stereo] render_scale` and the current input are inside it; a change of the scale then
+changes only the rectangle. Otherwise each eye's feature is created for exactly the current
+input and recreated when it changes.
+
+On the test machine the NVIDIA App override (next section) forces the DLAA "performance
+mode", NGX reports the range 3041x3231 to 3072x3264 for a 3072x3264 output in every mode, and
+so every scale change of `[stereo] dynamic_resolution` recreates both features: measured
+14 to 17 ms per eye on the RHI thread (`captures/dlss/r22`, `dynres` with min 0.5 and
+`render_scale` 0.67: changes 0.67 -> 0.56 -> 0.50 and back up, each logged as two
+`dlss: feature eye ...` lines), a longest frame of 31 to 43 ms in the 6 s windows with a step
+(11 to 14 ms in windows without one, frames otherwise 10.5 to 12.5 ms), no failed evaluation,
+the eye image handed to the runtime always the full 3072x3264. With the override off the
+range would be NGX's own for the mode (not measurable here); NVIDIA notes that presets L and
+M then cost as much as their largest input, whatever the frame's input is (guide 3.2.2.1).
+So with the override as it is, use a fixed `input_scale` and leave `dynamic_resolution` off
+while DLSS is on.
+
+An earlier version created the features for the largest input without asking for the
+range: NGX refused the smaller input ("Dynamic scaling disabled as Creation time res
+outside of dynamic scale range. RenderSubrect (1536x1632) must match Creation time res
+(2058x2186)") and the failed evaluation was followed by a GPU fault and a driver reset
+(System log `nvlddmkm` event 153 at that second, `captures/dlss/r21`). The mod now never
+evaluates outside the range NGX gives.
+
+## GPU faults seen in the test runs
+
+Three times during the headless runs of the upscale mode the GPU faulted, the driver reset
+(System log: `nvlddmkm` event 153, `Error occurred on GPUID`), the game's device was
+removed (`0x887A0005` in the next D3D call) and the game stopped presenting:
+
+1. `captures/dlss/r21`, 02:02:50: an evaluation with an input smaller than the feature's
+   creation size while NGX allowed no dynamic range (section "Dynamic resolution"). NGX
+   logged the refusal on both eyes, then the fault. Fixed: the input range is now asked of
+   NGX and never left.
+2. `r22`, 02:14:27: 9 s after switching to `r.ScreenPercentage 50` with `render_scale` 1
+   (features recreated twice in that second), during the second `capture` of a burst. No NGX
+   message.
+3. `r23`, 02:23:18: in the alley at `render_scale` 0.5, 15 s after the features were
+   recreated for a test switch, during the fourth `capture` of a burst with `dlss nograin 1`.
+   No NGX message.
+
+The second and third are not explained. Both came during a `capture` (which waits on the
+GPU for a read-back) a few seconds after features had been recreated; about 150 captures
+with DLSS on succeeded, and no fault was seen in runs without DLSS tonight. They were not
+reproduced on purpose, since each one resets the driver for the whole machine. Until it is
+understood, use the DLSS build without the capture helper, and treat a stutter followed by
+a frozen picture as this fault (the log then shows `stereo mode, but the game thread is not
+starting frames`).
+
+## Camera cuts
+
+Each eye's history is reset (`InReset`) when its camera jumps, decided per eye and frame
+from the view constants the anti-aliasing pass reads (`docs/re/engine.md` section 12):
+
+- **engine**: the camera the engine's motion is relative to (`PrevWorldCameraOrigin`, row
+  103) is not the camera of the eye's previous frame (row 59 one frame earlier). The engine
+  resets its previous-frame matrices on its own cuts (cutscene cuts, teleports, a new view
+  state, and turns of more than 45 degrees in one frame); then the motion vectors of
+  everything static are zero although the picture changed.
+- **distance / angle**: the camera moved more than `cut_distance` (100 cm) or turned more
+  than `cut_angle` (30 degrees, from `ViewForward`, row 52) since the eye's previous frame.
+  This catches the mod's own jumps: a switch between the game's camera and the first or
+  third person camera, recentering. The 0.35 s blend between first and third person stays
+  far below it (about 8 cm per frame). The player module's camera mode changes are not
+  passed to DLSS directly: they are decided on the game thread one or two frames before the
+  RHI thread renders them, so a frame-exact signal would have to travel with the frame
+  through the stereo device's frame queue; the view constants are already frame-exact.
+- Switching stereo or DLSS on, and an eye that was not evaluated in the previous frame,
+  already reset as before.
+- Row 140 `.y` (a camera-cut flag in a flat-screen mod's reading) stayed 0 in every frame,
+  also on the engine's own resets; it is only counted (`dlss cutflag 1` would use it).
+
+Tested headless with the Null backend's emulated head (`captures/dlss/r21`, room, third
+person, upscale from render scale 0.5, preset L): a 150 degree turn in one frame
+(`xr-sim head 150`) was detected on both eyes as `engine angle` (the engine had reset its
+previous camera itself), a 2.5 m jump of the head (`xr-sim head 0 0 0 0 2.5`) as
+`distance` (the engine kept its previous camera, `engine` did not fire), and nothing else was
+detected in the run. `dlss cuttest` wrote the left eye's image of the frames after each
+cut, with and without the reset; mean difference to the settled frame 60 (0-255 levels)
+and the share of pixels more than 16 levels off:
+
+| Cut | Motion vectors of the cut frame | No reset: frame 1 / frame 2 | Reset: frame 1 / frame 2 |
 |---|---|---|---|
-| game, 100 % | 3072x3264 | 10.16 ms | - |
-| game, 67 % (its own upscale) | 2059x2187 | 6.84 to 7.18 ms | - |
-| game, 50 % (its own upscale) | 1536x1632 | 5.35 ms | - |
-| DLSS upscale, 67 % | 2059x2187 | 14.23 to 14.35 ms | 3.83 ms |
-| DLSS upscale, 58 % | 1782x1893 | 11.80 to 11.93 ms | 3.14 ms |
-| DLSS upscale, 50 % | 1536x1632 | 9.81 to 9.92 ms | 2.50 ms |
+| 150 degree turn | zero (as the engine gave them) | 1.12, 0.12 % / 0.94, 0.05 % | 1.04, 0.08 % / 0.90, 0.04 % |
+| 2.5 m jump | zero (as on an engine cut) | 1.29, 0.49 % / 1.06, 0.27 % | 1.15, 0.25 % / 0.98, 0.17 % |
 
-Outside in the street, first person, eyes 3072x3264 (`captures/dlss/r12`): game 100 %
-8.85 ms, game 50 % 4.19 ms; DLSS upscale from 50 % 8.99 ms (2.53 ms per eye), from 67 %
-13.22 ms (3.93 ms per eye).
-
-At eyes 3600x3600 (same spot, `captures/dlss/r5`, `r10`): game 100 % 12.58 ms; DLSS upscale
-from 50 % (1800x1800) 12.22 ms, 58 % (2088x2088) 14.69 ms, 67 % (2412x2412) 17.78 ms; DLSS
-3.30, 4.06 and 5.00 ms per eye.
-
-Picture (`r8/sheet_up_a.png`, `sheet_up_c.png`, `r9/sheet_up_all.png`,
-`r9/sheet_up50_R.png`): DLSS from 50 % is close to the native 100 % image in texture detail
-and edges and far sharper than the game's own 50 % (blurred, stair-stepped grille edges);
-Cloud's dithered hair is grainier at 50 % than at 58 or 67 %; both eyes correct (the right
-eye was black before the scissor fix). In the street (`r12/sheet_street_up.png`) shadowed
-areas show a fine speckle that the 100 % image does not have: the image DLSS receives here
-has already been graded and grained by the last pass, and noise that the game's
-anti-aliasing would have averaged before the tonemapper reaches DLSS as detail. Walking
-(`r12/sheet_walk_up.png`): no ghosting or smearing seen. With preset L this is a quality gain at equal cost,
-not a speed gain: DLSS from 50 % costs as much as rendering 100 % with the game's
-anti-aliasing. With K (about 0.6 times the cost, inferred from NVIDIA's table) 50 % would
-come to roughly 8 ms; not measured.
-
-Where NVIDIA's guide puts DLSS (3.1: before tonemapping, as early in post-processing as
-possible) would be the anti-aliasing pass with a full-size output; then bloom, the
-tonemapper and the last pass would have to run at the full size, which means changing the
-rectangles and constants of every later pass of each view (the flat-screen Luma mod does
-that for its single view). Not attempted; the upscale mode here uses the one pass that
-already changes size.
-
-Texture mip bias for the lower render size (DLSS guide 3.5): `r.MipMapLODBias` exists in
-this build (0 by default); at 50 % with `-1` the crops checked (`r14/sheet_bias.png`, the
-counter top and the gramophone) show no clear difference, so it is left to the player
-(`[stereo_cvars] r.MipMapLODBias = -1`). Not done in upscale mode: a check of the game's
-dynamic resolution (it never changed the view size in any run, also not at 26 ms frames),
-and the history reset on camera cuts.
+After a full change of view DLSS discards the old history by itself (no ghost either way,
+`sheet_cut_first.png`). Where the old and the new view overlap and the motion vectors say
+nothing moved, as on the engine's cuts, the frame after the cut shows a doubled, smeared copy
+of the old view without the reset (the door frame and the sword in `sheet_cutpos_f1.png`)
+and is clean with it. Not tested: cuts of real cutscenes (no cutscene is reachable from the
+test save), the game-camera to first-person switch in a real conversation.
 
 ## The NVIDIA App's DLSS override decides the model
 
@@ -233,6 +443,28 @@ The mod cannot opt out of it (the SDK has no setting for this). To compare prese
 let the mod's choice apply, the override for this game has to be switched off (or set to
 the wanted preset) in the NVIDIA App; that also changes what Luma gets in flat play.
 
+The override also takes away DLSS's dynamic input range (99 to 100 % of the output in every
+mode), so a change of the input size recreates the features (section "Dynamic resolution").
+
+**Letting the mod choose (steps in the NVIDIA App, not done on the test machine):** NVIDIA
+App, `Graphics`, `Program Settings`, choose `FINAL FANTASY VII REMAKE INTERGRADE` in the
+program list; in its settings find the DLSS override entries (in current versions
+`DLSS Override - Model Presets` and `DLSS Override - Super Resolution Mode`, the names vary
+between versions) and set both back to the application's choice (`Off` / "use the 3D
+application setting"); apply. The NGX lines `Override Reported: ... Applied: Yes` and
+`Using DRS Overridden Preset L` then disappear from `ff7vr.log`, and `[dlss] preset` and the
+mode the mod asks for apply. Alternatively set the model override to the preset wanted for
+both flat and VR play.
+
+What that changes for flat play with Luma: the override applies to the program
+`ff7remake_.exe`, which flat play and VR play share; there is no separate profile per mod.
+With it off, Luma's DLSS uses Luma's own choices again: its `DLSS Preset` setting (in its
+ReShade overlay menu; "Default" means NVIDIA's default for the mode, K for DLAA and Quality)
+and the render resolution Luma asks for instead of the forced DLAA, and the model from the
+`nvngx_dlss.dll` in the game folder (310.6.0, which has L and M) instead of the driver's
+downloaded 310.9.0. To keep flat play as it is now (preset L at DLAA), select preset L and
+DLAA in Luma's settings. Not checked in flat play here.
+
 ## Preset names and versions
 
 From the SDK's `nvsdk_ngx_defs.h` and programming guide (SDK 310.9.1, guide revision
@@ -255,27 +487,29 @@ always uses AutoExposure"; the mod sets the auto-exposure flag.
 |---|---|---|
 | Foveated rendering (variable rate shading) | works; it shades the scene before the anti-aliasing pass, DLSS resolves the periphery like the game's pass does | `fov off` / `fov on` with DLSS on, `r3/sheet_fov.png` |
 | Bloom and ambient occlusion fixes | still applied once per stereo frame at 100 % | `stereo bloomfix`, `stereo aofix` counters with DLSS on |
-| Bloom and ambient occlusion fixes below 100 % | **not applied at 58 and 67 % with eyes 3072 wide** (pre-existing, also without DLSS): the right view's rectangle reaches 1-3 pixels past the scaled buffer, the fixes' size check fails (`missed 4759`, `failed 4844` in `r9`), and the right eye gets the left eye's bloom and occlusion ghost (seen in `r8/sheet_up_R.png`, game path and DLSS alike). At 50 % and at eyes 3600x3600 they apply (`missed 0`) | counters, captures |
+| Bloom and ambient occlusion fixes below 100 % | with `r.ScreenPercentage` 58 and 67 at eyes 3072 wide the right view's rectangle reaches 1-3 pixels past the scaled buffer; before `bbe071a` the fixes skipped those frames (`missed 4759`, `failed 4844` in `r9`, the right eye showed the left eye's bloom and occlusion ghost, `r8/sheet_up_R.png`), since then they clamp the rectangle. With `input_scale` / `render_scale` the rectangles never overhang | counters, captures |
 | Light sort-key fix, UI layer | unaffected (the UI is drawn into its own layer; the light fix is in the scene) | captures show the HUD layer and lit scenes as before |
 | Stereo off and on | the features keep their size; an eye not evaluated in the previous frame is reset; first frames clean | `r3/sheet_after_on.png` |
-| Camera cuts | not handled yet (the history is not reset on a cut; row 140 of the view buffer is a candidate flag, unverified) | - |
+| Camera cuts | the eye's history is reset (section "Camera cuts") | `dlss cuttest`, `captures/dlss/r21` |
 | The game's dynamic resolution | a change of the view size recreates the feature (a hitch of 15-100 ms); the view size never changed in any run, also not at 26 ms frames | feature creation lines in the logs |
-| `[stereo] render_scale` / `dynamic_resolution` (the mod's own, view rects inside full-size targets) | not tested together. DLAA follows the view rectangle, but a feature is recreated at every size change; with dynamic resolution the features would have to be created at the largest size and evaluated with `InRenderSubrectDimensions`. For upscaling with it, DLSS would write the full eye rectangle and the layer's sub-image would go back to full size (a change in the render host) | - |
+| `[stereo] render_scale` / `dynamic_resolution` (the mod's own, view rects inside full-size targets) | upscale mode: DLSS reads the view's rectangle and writes the whole half, the runtime gets the whole half (section "Upscale mode"). Dynamic resolution: where NGX allows a range of input sizes the features are created once for the largest input of `render_scale` and evaluated with the current rectangle; under the NVIDIA App override (DLAA forced) it does not, and each change of the scale recreates both features (about 15 ms each on the RHI thread, a hitch per step) — see "Dynamic resolution" below. DLAA mode follows the view rectangle and recreates its features at every change | `captures/dlss/r21`, `r22` |
 | Mono frames (menus, virtual screen) | nothing happens (the pass is only replaced while the engine renders in stereo) | - |
 
 ## What a player needs to try it
 
 - An NVIDIA RTX GPU and a current driver (NGX ships with the driver).
-- A mod DLL built with `-DFF7VR_DLSS=ON` (not in the default build or the packages).
-- `[dlss] enabled = 1` in `ff7vr.ini`, and for upscaling `mode = upscale` plus
-  `[stereo_cvars] r.ScreenPercentage = 50` (or 58, 67).
+- A mod DLL built with `-DFF7VR_DLSS=ON`: `tools\package\package.ps1 -Dlss` builds it into
+  `build\release-dlss` and makes a package named `ff7vr-<date>-<commit>-dlss` (the default package
+  is built explicitly without DLSS, and the script checks the DLL for NGX names either way).
+- `[dlss] enabled = 1` in `ff7vr.ini`; `mode = upscale` and `input_scale = 0.5` (or 0.58, 0.67)
+  are the defaults. Leave `[stereo] dynamic_resolution` off while the NVIDIA App override is set.
 - A DLSS model: if the NVIDIA App's override is set for the game, the driver's own copy is
   used and nothing else is needed; otherwise `nvngx_dlss.dll` (310.5.0 or later for presets
   L/M) next to the game's exe or in `[dlss] dll_dir`. The game folder may already have one
   from a flat-screen DLSS mod.
 - Expect DLAA to cost about 8 ms per eye at 3072x3264 with preset L: too slow for 72 Hz on
-  an RTX 5080. Upscale mode from 50 % costs about what the game's own 100 % costs, with a
-  picture close to it.
+  an RTX 5080. Upscale mode from 0.5 costs about what the game's own 100 % costs, with a
+  picture close to it (section "The numbers").
 
 A public release with DLSS would need: the NGX static library linked into the released DLL
 (object code, allowed by the licence's grant 1.c), either NVIDIA's `nvngx_dlss.dll` shipped
@@ -290,11 +524,13 @@ by the project's maintainers on how an MIT-licensed project and NVIDIA's terms f
 |---|---|---|
 | `enabled` | `0` | `1`: DLSS replaces the game's temporal anti-aliasing while the engine renders in stereo |
 | `init` | `0` | `1`: initialise NGX and query DLSS at the first stereo frame even while `enabled = 0` (diagnostics) |
-| `mode` | `dlaa` | `dlaa`: anti-aliasing at the eye size, in place of the game's; `upscale`: DLSS scales the eye up from the size set by `r.ScreenPercentage` (see "Upscale mode") |
-| `preset` | `default` | DLSS model: `default` (NVIDIA's choice for the mode), `j`, `k`, `l`, `m` |
+| `mode` | `upscale` | `upscale`: DLSS scales each eye up to its full size from the rendered part (see "Upscale mode"); `dlaa`: anti-aliasing at the rendered size, in place of the game's |
+| `input_scale` | `0.5` | upscale mode: the rendered share of each eye's width and height. At start (with `enabled = 1` and `mode = upscale`) it sets `[stereo] render_scale`, which is also the upper bound of `[stereo] dynamic_resolution`; `0` leaves `render_scale` alone |
+| `preset` | `default` | DLSS model: `default` (NVIDIA's choice for the mode), `j`, `k`, `l`, `m`. The NVIDIA App's override for the game wins |
 | `auto_exposure` | `1` | DLSS computes the exposure itself |
 | `mv_jitter` | `2` | how the camera motion vectors treat the jitter: `2` as the engine computes them, not flagged; `1` flagged as jittered; `0` the jitter difference removed |
-| `camera_cut_reset` | `0` | reset the history when the view's camera-cut flag is set (field not verified) |
+| `camera_cut_reset` | `1` | reset an eye's history on a camera cut (see "Camera cuts") |
+| `cut_distance`, `cut_angle` | `100`, `30` | a camera move of more than this many world units (cm) or degrees in one frame counts as a cut |
 | `dll_dir` | empty | extra folder searched for `nvngx_dlss.dll` (searched before the mod's folder) |
 | `log_ngx` | `1` | NGX's own messages in `ff7vr.log` (the first 400) |
 
@@ -308,7 +544,11 @@ by the project's maintainers on how an MIT-licensed project and NVIDIA's terms f
 | `dlss bench <out w> <out h> <in w> <in h>`, `dlss bench off` | one extra evaluation per frame of that size on blank textures, timed (cost of a mode without changing the engine) |
 | `dlss init` | initialise NGX now (at the next stereo frame) |
 | `dlss preset <default\|j\|k\|l\|m>` | change the model (features are recreated) |
-| `dlss autoexp <0\|1>`, `dlss mvjitter <0\|1\|2>`, `dlss jitter <sx> <sy>`, `dlss cutreset <0\|1>` | tests |
+| `dlss autoexp <0\|1>`, `dlss mvjitter <0\|1\|2>`, `dlss jitter <sx> <sy>` | tests |
+| `dlss cutreset <0\|1>`, `dlss cutflag <0\|1>`, `dlss cutlimits <cm> <deg>` | the camera cut reset, the candidate flag of row 140, the limits |
+| `dlss cuttest <path prefix> <reset 0\|1> <zero_mv 0\|1>` | at the next camera cut, with or without the reset and with the cut frame's motion vectors zeroed or not, write the left eye's upscaled image (a centred crop up to 2048x2048) of frames 0, 1, 2, 3, 5, 10 and 60 after the cut as raw `R10G10B10A2` files `<prefix>_f<n>_<w>x<h>.r10g10b10a2` |
+| `dlss hdr <0\|1>`, `dlss sharpness <v>`, `dlss preexp <v>`, `dlss nograin <0\|1>` | upscale mode tests: the input flagged HDR, `InSharpness`, `InPreExposure`, the last pass at the reduced size without its noise texture |
+| `dlss maxinput <full\|setting>` | upscale mode test: size a dynamic feature for render scale 1 instead of `[stereo] render_scale` |
 | `dlss reset`, `dlss recreate` | reset the history, release and recreate the features |
 | `dlss dump` | log the view uniform buffer rows 110-145 of the next two views |
 | `dlss timing` | restart the GPU time averages |
