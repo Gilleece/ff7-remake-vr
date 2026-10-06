@@ -14,6 +14,7 @@
 #include <d3d11.h>
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstring>
 #include <format>
@@ -194,6 +195,13 @@ bool draw_with_shifted_input(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView*
         static_cast<ID3D11Texture2D*>(res)->GetDesc(&td);
         D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
         srv->GetDesc(&vd);
+        // A view rectangle scaled by r.ScreenPercentage or the render scale can overhang the
+        // buffer by a few pixels (2059 wide at x 2059 in a 4116-wide buffer): copy the part
+        // that exists.
+        if (x >= 0 && y >= 0 && static_cast<UINT>(x) < td.Width && static_cast<UINT>(y) < td.Height) {
+            w = std::min(w, static_cast<std::int32_t>(td.Width) - x);
+            h = std::min(h, static_cast<std::int32_t>(td.Height) - y);
+        }
         ID3D11Device* dev = nullptr;
         ctx->GetDevice(&dev);
         const bool fits = td.SampleDesc.Count == 1 && x >= 0 && y >= 0 && w > 0 && h > 0 && static_cast<UINT>(x + w) <= td.Width &&
@@ -256,6 +264,7 @@ bool ao_fix(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_trac
 }
 
 bool on_draw_indexed(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_trace::DrawIndexedFn original) {
+    fixes::ssr_before_draw(ctx);
 #if FF7VR_ENGINE_WITH_DLSS
     if (!g_armed.active && dlss::on_draw_indexed(ctx, count, start, base, original)) return true;
 #endif
@@ -308,7 +317,7 @@ void frame(ID3D11Texture2D* any_texture) {
     g_armed.active = false;
     g_last = LastFullscreen{};
     fixes::ssr_frame();
-    bool hooks = g_enabled.load(std::memory_order_relaxed) || g_ao_enabled.load(std::memory_order_relaxed) || fixes::ssr_per_eye();
+    bool hooks = g_enabled.load(std::memory_order_relaxed) || g_ao_enabled.load(std::memory_order_relaxed) || fixes::ssr_wants_hooks();
 #if FF7VR_ENGINE_WITH_DLSS
     dlss::frame(any_texture);
     hooks = hooks || dlss::wants_hooks();

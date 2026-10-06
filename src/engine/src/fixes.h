@@ -69,6 +69,20 @@ std::string vr_window_status();
 void set_ssr_per_eye(bool on);
 bool ssr_per_eye();
 void set_ssr_poison(int mode);  // test: 1 fills the half a run skipped with a loud colour, 2 its own half (control), 0 off
+
+// Right-eye reflections ([stereo] ssr_fix, `ssr fix 0|1`). The run of the view in the right
+// half of the target computes that view's reflections at the origin of the target and leaves
+// its own half, the one its composite reads, at zero: without the fix the right eye has no
+// screen-space reflections. With it, that draw renders into a scratch target half as wide
+// (the half at the origin) and the result is copied into the right half. Works with and
+// without ssr_per_eye. docs/engine-module.md, "Reflections per eye".
+void set_ssr_fix(bool on);
+bool ssr_fix();
+bool ssr_wants_hooks();  // either switch on: the context hooks are needed
+// RHI thread, before every DrawIndexed: places a fixed right-eye result once the draw that
+// reads it (the right view's composite) shows where the right view's rectangle starts.
+void ssr_before_draw(ID3D11DeviceContext* ctx);
+
 // RHI thread: true if the draw was recognised and run (limited to its half).
 bool ssr_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base,
               void(STDMETHODCALLTYPE* original)(ID3D11DeviceContext*, UINT, UINT, INT));

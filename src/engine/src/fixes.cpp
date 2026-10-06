@@ -172,6 +172,10 @@ namespace {
 std::atomic<bool> g_ssr_on{false};
 std::atomic<int> g_ssr_poison{0};  // test (`ssr poison 1`): fill the skipped half with a loud colour (2: the run's own half, the control)
 std::atomic<std::uint64_t> g_ssr_limited{0}, g_ssr_extra{0}, g_ssr_frames{0};
+// Columns added on the far side of the middle when a run or copy is limited to one view's
+// half: with r.ScreenPercentage below 100 the engine's rounded view rectangles can cross the
+// middle by a pixel or two (a 2059-wide left view in a 4116-wide target).
+constexpr UINT kSsrMargin = 16;
 int g_ssr_index = 0;  // RHI thread: reflection runs seen this frame
 // RHI thread: the engine's rasterizer state -> the same state with the scissor test on.
 struct RsPair {
@@ -292,7 +296,8 @@ bool ssr_copy(ID3D11DeviceContext* ctx, ID3D11Resource* dst, ID3D11Resource* src
         return false;
     const bool right_half = (view == 1) != device::settings().swap_rects.load();
     const UINT half = dd.Width / 2;
-    const D3D11_BOX box{right_half ? half : 0, 0, 0, right_half ? dd.Width : half, dd.Height, 1};
+    const D3D11_BOX box{right_half ? half - std::min(half, kSsrMargin) : 0, 0, 0, right_half ? dd.Width : std::min(dd.Width, half + kSsrMargin),
+                        dd.Height, 1};
     ctx->CopySubresourceRegion(dst, 0, box.left, 0, 0, src, 0, &box);
     if (const int p = g_ssr_poison.load(std::memory_order_relaxed); p == 1 || p == 3) poison_half(ctx, dst, dd, p == 3 ? !right_half : right_half);
     (void)original;
@@ -300,6 +305,178 @@ bool ssr_copy(ID3D11DeviceContext* ctx, ID3D11Resource* dst, ID3D11Resource* src
     return true;
 }
 }  // namespace
+
+// ------------------------------------------------------------------ right-eye reflections
+namespace {
+// The run of the view whose rectangle does not start at the origin computes that view's
+// reflections at the origin of the target (it reads its inputs at its own rectangle, but
+// writes relative to the origin) and leaves its own half at zero, which is the half its
+// composite reads. The fix runs that draw into a scratch target of half the width (so only
+// the half at the origin is computed) and copies the result into the view's own half.
+std::atomic<bool> g_ssr_fix{false};
+std::atomic<std::uint64_t> g_ssr_fixed{0}, g_ssr_fix_failed{0};
+struct SsrScratch {
+    ID3D11Texture2D* tex = nullptr;
+    ID3D11RenderTargetView* rtv = nullptr;
+    D3D11_TEXTURE2D_DESC desc{};
+    DXGI_FORMAT view_format = DXGI_FORMAT_UNKNOWN;
+    unsigned idle_frames = 0;
+};
+SsrScratch g_ssr_scratch;  // RHI thread
+
+void release_ssr_scratch() {
+    if (g_ssr_scratch.rtv) g_ssr_scratch.rtv->Release();
+    if (g_ssr_scratch.tex) g_ssr_scratch.tex->Release();
+    g_ssr_scratch = SsrScratch{};
+}
+
+SsrScratch* ensure_ssr_scratch(ID3D11DeviceContext* ctx, UINT width, UINT height, DXGI_FORMAT format, DXGI_FORMAT view_format) {
+    SsrScratch& s = g_ssr_scratch;
+    s.idle_frames = 0;
+    if (s.tex && s.desc.Width == width && s.desc.Height == height && s.desc.Format == format && s.view_format == view_format) return &s;
+    release_ssr_scratch();
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    if (!dev) return nullptr;
+    D3D11_TEXTURE2D_DESC d{};
+    d.Width = width;
+    d.Height = height;
+    d.MipLevels = 1;
+    d.ArraySize = 1;
+    d.Format = format;
+    d.SampleDesc.Count = 1;
+    d.Usage = D3D11_USAGE_DEFAULT;
+    d.BindFlags = D3D11_BIND_RENDER_TARGET;
+    bool ok = SUCCEEDED(dev->CreateTexture2D(&d, nullptr, &s.tex)) && s.tex;
+    if (ok) {
+        D3D11_RENDER_TARGET_VIEW_DESC v{};
+        v.Format = view_format;
+        v.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+        ok = SUCCEEDED(dev->CreateRenderTargetView(s.tex, &v, &s.rtv)) && s.rtv;
+    }
+    dev->Release();
+    if (!ok) {
+        release_ssr_scratch();
+        return nullptr;
+    }
+    s.desc = d;
+    s.view_format = view_format;
+    log::info("fixes: right-eye reflections scratch target {}x{} format {}", width, height, static_cast<int>(format));
+    return &s;
+}
+
+// Where the right view's rectangle starts in the target. Half the width at full resolution;
+// with r.ScreenPercentage below 100 the engine rounds the scaled rectangles (a 4116-wide
+// target has the right view at x 2059 or 2060), so the x actually used is taken from the
+// right view's composite, the next draw that reads the reflections, and remembered for the
+// following frames. RHI thread.
+UINT g_ssr_right_x = 0, g_ssr_right_x_width = 0;
+std::atomic<std::uint64_t> g_ssr_moved{0}, g_ssr_unread{0};
+std::atomic<int> g_ssr_last_x{-1};
+struct SsrPending {
+    ID3D11Resource* target = nullptr;       // referenced
+    ID3D11RenderTargetView* rtv = nullptr;  // referenced
+    UINT sub = 0, x = 0, width = 0, height = 0;
+};
+SsrPending g_ssr_pending;
+
+void clear_ssr_pending() {
+    if (g_ssr_pending.rtv) g_ssr_pending.rtv->Release();
+    if (g_ssr_pending.target) g_ssr_pending.target->Release();
+    g_ssr_pending = SsrPending{};
+}
+
+void copy_ssr_result(ID3D11DeviceContext* ctx, const SsrPending& p, UINT x) {
+    const UINT w = std::min(g_ssr_scratch.desc.Width, p.width - x);
+    const D3D11_BOX box{0, 0, 0, w, std::min(g_ssr_scratch.desc.Height, p.height), 1};
+    ctx->CopySubresourceRegion(p.target, p.sub, x, 0, 0, g_ssr_scratch.tex, 0, &box);
+}
+
+// Runs the reflection draw of the view in the right half into the scratch target and copies
+// the result to that view's rectangle in the engine's target. False if it could not (nothing
+// drawn).
+bool ssr_draw_shifted(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base,
+                      void(STDMETHODCALLTYPE* original)(ID3D11DeviceContext*, UINT, UINT, INT)) {
+    clear_ssr_pending();
+    ID3D11RenderTargetView* engine_rtv = nullptr;
+    ID3D11DepthStencilView* engine_dsv = nullptr;
+    ctx->OMGetRenderTargets(1, &engine_rtv, &engine_dsv);
+    bool done = false;
+    ID3D11Resource* target = nullptr;
+    if (engine_rtv) engine_rtv->GetResource(&target);
+    D3D11_RENDER_TARGET_VIEW_DESC vd{};
+    if (engine_rtv) engine_rtv->GetDesc(&vd);
+    if (target && !engine_dsv && vd.ViewDimension == D3D11_RTV_DIMENSION_TEXTURE2D) {
+        D3D11_TEXTURE2D_DESC td{};
+        static_cast<ID3D11Texture2D*>(target)->GetDesc(&td);
+        const UINT half = td.Width / 2;
+        // A little wider than half, for a right view that starts left of the middle.
+        SsrScratch* s = ensure_ssr_scratch(ctx, std::min(td.Width, half + kSsrMargin), td.Height, td.Format, vd.Format);
+        if (s) {
+            ctx->OMSetRenderTargets(1, &s->rtv, nullptr);
+            // Viewport, scissor and inputs stay the engine's: the scratch target clips the
+            // full-width triangle to the part at the origin.
+            original(ctx, count, start, base);
+            ctx->OMSetRenderTargets(1, &engine_rtv, nullptr);
+            const UINT x = (g_ssr_right_x_width == td.Width && g_ssr_right_x > 0 && g_ssr_right_x < td.Width) ? g_ssr_right_x : half;
+            g_ssr_pending = SsrPending{target, engine_rtv, D3D11CalcSubresource(vd.Texture2D.MipSlice, 0, td.MipLevels), x, td.Width, td.Height};
+            target = nullptr;  // references now held by g_ssr_pending
+            engine_rtv = nullptr;
+            copy_ssr_result(ctx, g_ssr_pending, x);
+            g_ssr_last_x = static_cast<int>(x);
+            done = true;
+        }
+    }
+    if (target) target->Release();
+    if (engine_rtv) engine_rtv->Release();
+    if (engine_dsv) engine_dsv->Release();
+    ++(done ? g_ssr_fixed : g_ssr_fix_failed);
+    return done;
+}
+}  // namespace
+
+void ssr_before_draw(ID3D11DeviceContext* ctx) {
+    if (!g_ssr_pending.target) return;
+    ID3D11ShaderResourceView* srvs[16]{};
+    ctx->PSGetShaderResources(0, 16, srvs);
+    bool reads = false;
+    for (auto* v : srvs) {
+        if (!v) continue;
+        if (!reads) {
+            ID3D11Resource* r = nullptr;
+            v->GetResource(&r);
+            reads = r == g_ssr_pending.target;
+            if (r) r->Release();
+        }
+        v->Release();
+    }
+    if (!reads) return;
+    D3D11_VIEWPORT vp{};
+    UINT nvp = 1;
+    ctx->RSGetViewports(&nvp, &vp);
+    const UINT x = nvp ? static_cast<UINT>(vp.TopLeftX) : 0;
+    if (x > 0 && x < g_ssr_pending.width) {
+        g_ssr_right_x = x;
+        g_ssr_right_x_width = g_ssr_pending.width;
+        if (x != g_ssr_pending.x) {
+            copy_ssr_result(ctx, g_ssr_pending, x);
+            g_ssr_last_x = static_cast<int>(x);
+            ++g_ssr_moved;
+        }
+    }
+    if (g_ssr_poison.load(std::memory_order_relaxed) == 2) {
+        // Test: fill the right view's own part with a loud colour (it must show in that eye).
+        ID3D11DeviceContext1* ctx1 = nullptr;
+        if (SUCCEEDED(ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&ctx1))) && ctx1) {
+            const D3D11_RECT r{static_cast<LONG>(g_ssr_last_x.load()), 0, static_cast<LONG>(g_ssr_pending.width),
+                               static_cast<LONG>(g_ssr_pending.height)};
+            const float magenta[4] = {50.0f, 0.0f, 50.0f, 1.0f};
+            ctx1->ClearView(g_ssr_pending.rtv, magenta, &r, 1);
+            ctx1->Release();
+        }
+    }
+    clear_ssr_pending();
+}
 
 void set_ssr_per_eye(bool on) {
     static bool registered = false;
@@ -312,10 +489,18 @@ void set_ssr_per_eye(bool on) {
 }
 bool ssr_per_eye() { return g_ssr_on.load(); }
 void set_ssr_poison(int mode) { g_ssr_poison = mode; }
+void set_ssr_fix(bool on) {
+    g_ssr_fix = on;
+    log::info("fixes: right-eye reflections fix {}", on ? "on" : "off ([stereo] ssr_fix = 0)");
+}
+bool ssr_fix() { return g_ssr_fix.load(); }
+bool ssr_wants_hooks() { return g_ssr_on.load(std::memory_order_relaxed) || g_ssr_fix.load(std::memory_order_relaxed); }
 
 bool ssr_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base,
               void(STDMETHODCALLTYPE* original)(ID3D11DeviceContext*, UINT, UINT, INT)) {
-    if (count != 3 || !g_ssr_on.load(std::memory_order_relaxed)) return false;
+    const bool per_eye = g_ssr_on.load(std::memory_order_relaxed);
+    const bool fix = g_ssr_fix.load(std::memory_order_relaxed);
+    if (count != 3 || (!per_eye && !fix)) return false;
     ID3D11RenderTargetView* rtvs[2]{};
     ID3D11DepthStencilView* dsv = nullptr;
     ctx->OMGetRenderTargets(2, rtvs, &dsv);
@@ -358,7 +543,12 @@ bool ssr_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base,
     // Views are rendered left eye first; `stereo swap` puts the left eye into the right half.
     const bool right_half = (index == 1) != device::settings().swap_rects.load();
     const LONG half = static_cast<LONG>(td.Width / 2);
-    D3D11_RECT rect{right_half ? half : 0, 0, right_half ? static_cast<LONG>(td.Width) : half, static_cast<LONG>(td.Height)};
+    const LONG margin = static_cast<LONG>(kSsrMargin);
+    const LONG width = static_cast<LONG>(td.Width);
+    // The run's part, a few columns past the middle (kSsrMargin), and the rest.
+    D3D11_RECT rect{right_half ? half - margin : 0, 0, right_half ? width : half + margin, static_cast<LONG>(td.Height)};
+    const D3D11_RECT rest{right_half ? 0 : half + margin, 0, right_half ? half - margin : width, static_cast<LONG>(td.Height)};
+    const LONG right_x = (g_ssr_right_x_width == td.Width && g_ssr_right_x > 0) ? static_cast<LONG>(g_ssr_right_x) : half;
 
     ID3D11RasterizerState* engine_rs = nullptr;
     ctx->RSGetState(&engine_rs);
@@ -367,6 +557,42 @@ bool ssr_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base,
     UINT nsc = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
     D3D11_RECT saved[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
     ctx->RSGetScissorRects(&nsc, saved);
+
+    if (fix && right_half) {
+        // The right view's run writes at the origin: run it into the scratch target and
+        // copy the result into the right half. An engine scissor moves with it.
+        const bool engine_scissor = engine_rs && ed.ScissorEnable && nsc > 0;
+        if (engine_scissor) {
+            const D3D11_RECT shifted{saved[0].left - right_x, saved[0].top, saved[0].right - right_x, saved[0].bottom};
+            ctx->RSSetScissorRects(1, &shifted);
+        }
+        const bool done = ssr_draw_shifted(ctx, count, start, base, original);
+        if (engine_scissor) ctx->RSSetScissorRects(nsc, saved);
+        if (done) {
+            if (g_ssr_poison.load(std::memory_order_relaxed) == 1) {
+                // Test: fill the part left of the right view, which this run no longer writes,
+                // with a loud colour (mode 2, the right view's own part, is filled once the
+                // result is in place: ssr_before_draw).
+                ID3D11RenderTargetView* rtv = nullptr;
+                ctx->OMGetRenderTargets(1, &rtv, nullptr);
+                ID3D11DeviceContext1* ctx1 = nullptr;
+                if (rtv && SUCCEEDED(ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&ctx1))) && ctx1) {
+                    const D3D11_RECT other{0, 0, std::min(half, static_cast<LONG>(g_ssr_last_x.load())), static_cast<LONG>(td.Height)};
+                    const float magenta[4] = {50.0f, 0.0f, 50.0f, 1.0f};
+                    ctx1->ClearView(rtv, magenta, &other, 1);
+                    ctx1->Release();
+                }
+                if (rtv) rtv->Release();
+            }
+            if (engine_rs) engine_rs->Release();
+            ++g_ssr_limited;
+            return true;
+        }
+    }
+    if (!per_eye) {
+        if (engine_rs) engine_rs->Release();
+        return false;
+    }
     if (engine_rs && ed.ScissorEnable && nsc > 0) {
         // The engine already scissors this draw: keep the overlap.
         rect.left = std::max(rect.left, saved[0].left);
@@ -389,9 +615,7 @@ bool ssr_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base,
         ctx->OMGetRenderTargets(1, &rtv, nullptr);
         ID3D11DeviceContext1* ctx1 = nullptr;
         if (rtv && SUCCEEDED(ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&ctx1))) && ctx1) {
-            const bool own = g_ssr_poison.load() == 2;
-            const bool left = own ? !right_half : right_half;
-            const D3D11_RECT other{left ? 0 : half, 0, left ? half : static_cast<LONG>(td.Width), static_cast<LONG>(td.Height)};
+            const D3D11_RECT other = pm == 2 ? rect : rest;
             const float magenta[4] = {50.0f, 0.0f, 50.0f, 1.0f};
             ctx1->ClearView(rtv, magenta, &other, 1);
             ctx1->Release();
@@ -410,11 +634,23 @@ void ssr_frame() {
     g_ssr_index = 0;
     for (auto& v : g_ssr_inputs)
         for (auto& r : v) r = nullptr;
+    if (g_ssr_pending.target) {  // no draw read the result this frame (it stays where it was copied)
+        ++g_ssr_unread;
+        clear_ssr_pending();
+    }
+    // The scratch target goes after about ten seconds without a reflection run to fix.
+    if (g_ssr_scratch.tex && ++g_ssr_scratch.idle_frames > 900) {
+        release_ssr_scratch();
+        log::info("fixes: right-eye reflections scratch target released (unused)");
+    }
 }
 
 std::string ssr_status() {
-    return std::format("reflections per eye {}: runs limited {} in {} frames, extra runs left alone {}, colour copies halved {}",
-                       g_ssr_on.load() ? "on" : "off", g_ssr_limited.load(), g_ssr_frames.load(), g_ssr_extra.load(), g_ssr_copies_halved.load());
+    return std::format("reflections per eye {}: runs limited {} in {} frames, extra runs left alone {}, colour copies halved {}; "
+                       "right-eye fix {}: applied {} failed {} at x {} (moved {}, not read {})",
+                       g_ssr_on.load() ? "on" : "off", g_ssr_limited.load(), g_ssr_frames.load(), g_ssr_extra.load(), g_ssr_copies_halved.load(),
+                       g_ssr_fix.load() ? "on" : "off", g_ssr_fixed.load(), g_ssr_fix_failed.load(), g_ssr_last_x.load(), g_ssr_moved.load(),
+                       g_ssr_unread.load());
 }
 
 }  // namespace ff7vr::engine::fixes
