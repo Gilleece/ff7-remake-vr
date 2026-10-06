@@ -165,6 +165,10 @@ Measured at eyes 3072x3264 (first room, third person, still camera; `captures/dl
 | DLSS upscale, 58 % | 1782x1893 | 11.80 to 11.93 ms | 3.14 ms |
 | DLSS upscale, 50 % | 1536x1632 | 9.81 to 9.92 ms | 2.50 ms |
 
+Outside in the street, first person, eyes 3072x3264 (`captures/dlss/r12`): game 100 %
+8.85 ms, game 50 % 4.19 ms; DLSS upscale from 50 % 8.99 ms (2.53 ms per eye), from 67 %
+13.22 ms (3.93 ms per eye).
+
 At eyes 3600x3600 (same spot, `captures/dlss/r5`, `r10`): game 100 % 12.58 ms; DLSS upscale
 from 50 % (1800x1800) 12.22 ms, 58 % (2088x2088) 14.69 ms, 67 % (2412x2412) 17.78 ms; DLSS
 3.30, 4.06 and 5.00 ms per eye.
@@ -173,10 +177,21 @@ Picture (`r8/sheet_up_a.png`, `sheet_up_c.png`, `r9/sheet_up_all.png`,
 `r9/sheet_up50_R.png`): DLSS from 50 % is close to the native 100 % image in texture detail
 and edges and far sharper than the game's own 50 % (blurred, stair-stepped grille edges);
 Cloud's dithered hair is grainier at 50 % than at 58 or 67 %; both eyes correct (the right
-eye was black before the scissor fix). With preset L this is a quality gain at equal cost,
+eye was black before the scissor fix). In the street (`r12/sheet_street_up.png`) shadowed
+areas show a fine speckle that the 100 % image does not have: the image DLSS receives here
+has already been graded and grained by the last pass, and noise that the game's
+anti-aliasing would have averaged before the tonemapper reaches DLSS as detail. Walking
+(`r12/sheet_walk_up.png`): no ghosting or smearing seen. With preset L this is a quality gain at equal cost,
 not a speed gain: DLSS from 50 % costs as much as rendering 100 % with the game's
 anti-aliasing. With K (about 0.6 times the cost, inferred from NVIDIA's table) 50 % would
 come to roughly 8 ms; not measured.
+
+Where NVIDIA's guide puts DLSS (3.1: before tonemapping, as early in post-processing as
+possible) would be the anti-aliasing pass with a full-size output; then bloom, the
+tonemapper and the last pass would have to run at the full size, which means changing the
+rectangles and constants of every later pass of each view (the flat-screen Luma mod does
+that for its single view). Not attempted; the upscale mode here uses the one pass that
+already changes size.
 
 Not done in upscale mode: a texture mip bias for the lower render size (DLSS guide 3.5;
 `r.MipMapLODBias -1` in `[stereo_cvars]` is the candidate, untested), a check of the game's
