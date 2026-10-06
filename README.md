@@ -95,7 +95,7 @@ package folder.
 | `[stereo] movie_screen` | `0` | `1` = pre-rendered movies on the virtual screen; try it if movies look broken in 3D |
 | `[stereo] ao_fix` | `1` | corrects the right eye's ambient occlusion (without it the right eye shows a dark ghost of nearby objects). `0` only to compare |
 | `[stereo] light_fix` | `1` | corrects indoor lamp lighting in 3D (without it skin shows white blocks indoors). `0` only to compare |
-| `[stereo_cvars]` | none set | the game's console variables, `name = value`, applied only while 3D renders. Uncommenting `r.BloomQuality = 0` makes the picture a little less washed out |
+| `[stereo_cvars]` | four level-of-detail lines | the game's console variables, `name = value`, applied only while 3D renders. The shipped lines push the engine's detail levels further out (the wide per-eye view makes it drop detail much nearer than in the flat game). Uncommenting `r.BloomQuality = 0` makes the picture a little less washed out |
 | `[log] level` | `debug` | how much goes into the log; `info` keeps it shorter |
 
 ## Known problems
