@@ -434,6 +434,9 @@ not found in the eye views").
 | r33 | **on** (late) | as r31 | 2.7 min | **hang**, same place as r32 |
 | r34 | off (`[foveation] enabled = 0`, late) | as r31 (79 captures, 26 recreations, 18 scale changes) | 10 min | clean; no warning or error in the log |
 | r36 | **on** (late), DLSS off (NGX not started) | as r31 without DLSS (82 captures, 18 scale changes) | 10 min | clean |
+| r37 | **on** (late), DLSS on with `dlss skip 1` (motion vectors, pass-through, the graded copy and the state swaps run; no NGX evaluation) | 77 captures, 18 scale changes | 10 min | clean: the NGX evaluation is the part of DLSS the hang needs |
+| r38 | **on** (late), DLSS on | 79 captures, no scale change, no recreation (steady) | 10 min | clean |
+| r39 | **on** (late), DLSS on | 78 captures, `dlss recreate` every 10 s (51), no scale change | 10 min | clean: feature recreation alone does not do it |
 | r35 (soak) | off (`[foveation] enabled = 0`, ini start as a player would have it) | capture every 15 s (64), scale change every 60 s (19, each recreating both features) | 20 min | clean: no driver event, no warning, error or NGX error in the log, no failed evaluation; frame times per 30 s window 10.3 to 12.6 ms average, 95th percentile 11.1 to 13.6 ms, no drift |
 
 In both hangs the RHI thread was blocked inside the NVIDIA driver in the engine's own
@@ -441,7 +444,14 @@ In both hangs the RHI thread was blocked inside the NVIDIA driver in the engine'
 code on the blocked call chain; the GPU had stopped finishing work without being reset.
 With foveated rendering off, the same DLSS load ran clean for 40 minutes in all (r31, r34
 and the 20-minute soak r35); foveated rendering with the same load but without DLSS ran
-clean for 10 minutes (r36). Only the two together failed, both times within 3 minutes.
+clean for 10 minutes (r36), and so did everything DLSS does except the NGX evaluation
+itself (r37). With both on, a steady size (r38) and feature recreations at a steady size
+(r39) ran clean for 10 minutes each; both failing runs changed `[stereo] render_scale`
+(between 0.5 and 0.58, every 30 or 60 s), which makes foveated rendering rebuild its
+shading-rate surface for a new layout and recreates the features. The hangs did not come
+right at a change (22 s and about 50 s after the last one), so the trigger is not pinned
+down further; with two failures, a single clean 10-minute run is evidence (at the failing
+runs' rate a clean 10 minutes would have a chance of about 4 %), not proof.
 
 ### Conclusion so far
 
@@ -450,12 +460,13 @@ with DLSS the runs fail only while foveated rendering is on. Foveated rendering 
 NVIDIA's variable rate shading through NVAPI (`src/render/src/foveation.cpp`). It is not
 simply "variable rate shading plus DLSS": the first DLSS runs (about 100 captures with
 DLSS and foveated rendering both on, `r.ScreenPercentage` changes, few feature
-recreations) had no fault. The faulting runs added changes of `[stereo] render_scale`
-(view rectangles inside full-size targets, for which foveated rendering rebuilds its
-shading-rate surface each time), frequent feature recreations, and a newer foveated
-rendering. Which part is involved is not known yet. Until then, run DLSS with
-`[foveation] enabled = 0`; started from the ini with an `input_scale` below 1, foveated
-rendering is off anyway (see above).
+recreations) had no fault, and neither did r38 and r39. What the failing runs had in
+addition is changes of `[stereo] render_scale` (view rectangles inside full-size targets,
+for which foveated rendering rebuilds its shading-rate surface) while NGX evaluated. Where
+inside the driver, NGX or foveated rendering the GPU then waits is not known. Until it
+is, run DLSS with `[foveation] enabled = 0`; started from the ini with an `input_scale`
+below 1, foveated rendering is off anyway (see above). The deferred release ("Lifetimes")
+is right by the SDK's rules but did not prevent the hangs, so it is not the explanation.
 
 ## Camera cuts
 
