@@ -629,7 +629,114 @@ bool ssr_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base,
     return true;
 }
 
+// ------------------------------------------------------------------ unread hierarchical depth chain
+namespace {
+std::atomic<int> g_hzb_mode{0};
+// HZB occlusion culling (r.HZBOcclusion 1) reads a hierarchical depth chain; the game runs with
+// 0. Checked on the game thread every 120 frames; while it is not 0 nothing is left out.
+std::atomic<bool> g_hzb_occlusion_off{false};
+unsigned g_hzb_check = 0;  // game thread
+std::atomic<std::uint64_t> g_hzb_chains{0}, g_hzb_skipped{0};
+ID3D11Resource* g_hzb_furthest = nullptr;  // RHI thread, compared only: the chain of the view being built
+ID3D11Resource* g_hzb_closest = nullptr;
+
+bool hzb_texture(ID3D11RenderTargetView* v, ID3D11Resource** res, UINT* mip) {
+    *res = nullptr;
+    D3D11_RENDER_TARGET_VIEW_DESC vd{};
+    v->GetDesc(&vd);
+    if (vd.ViewDimension != D3D11_RTV_DIMENSION_TEXTURE2D) return false;
+    ID3D11Resource* r = nullptr;
+    v->GetResource(&r);
+    if (!r) return false;
+    D3D11_RESOURCE_DIMENSION dim{};
+    r->GetType(&dim);
+    bool ok = false;
+    if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+        D3D11_TEXTURE2D_DESC d{};
+        static_cast<ID3D11Texture2D*>(r)->GetDesc(&d);
+        ok = (d.Format == DXGI_FORMAT_R16_FLOAT || d.Format == DXGI_FORMAT_R16_TYPELESS) && d.MipLevels >= 4 && d.ArraySize == 1;
+    }
+    *res = r;
+    r->Release();  // compared only; the engine holds it
+    *mip = vd.Texture2D.MipSlice;
+    return ok;
+}
+
+void hzb_fill(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, float value) {
+    ID3D11DeviceContext1* ctx1 = nullptr;
+    if (SUCCEEDED(ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&ctx1))) && ctx1) {
+        const float v[4] = {value, value, value, value};
+        ctx1->ClearView(rtv, v, nullptr, 0);
+        ctx1->Release();
+    }
+}
+}  // namespace
+
+void set_hzb_skip(int mode) {
+    g_hzb_mode = std::clamp(mode, 0, 4);
+    log::info("fixes: unread hierarchical depth chain: {}", mode == 0 ? "built (game default)" : mode == 1 ? "mips 1+ not built" : "test fill");
+}
+int hzb_skip() { return g_hzb_mode.load(); }
+
+void hzb_tick() {
+    if (g_hzb_mode.load(std::memory_order_relaxed) == 0 || g_hzb_check-- != 0) return;
+    g_hzb_check = 120;
+    const auto v = cvar::get(L"r.HZBOcclusion");
+    const bool off = v && v->i == 0;
+    if (off != g_hzb_occlusion_off.exchange(off))
+        log::info("fixes: r.HZBOcclusion {}: the unread hierarchical depth chain is {}", v ? v->i : -1,
+                  off ? "left out (hzb_skip)" : "built (HZB occlusion may read it)");
+}
+
+bool hzb_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, void(STDMETHODCALLTYPE* original)(ID3D11DeviceContext*, UINT, UINT, INT)) {
+    const int mode = g_hzb_mode.load(std::memory_order_relaxed);
+    if (mode == 0 || count != 3 || !g_hzb_occlusion_off.load(std::memory_order_relaxed)) return false;
+    ID3D11RenderTargetView* rtvs[2]{};
+    ID3D11DepthStencilView* dsv = nullptr;
+    ctx->OMGetRenderTargets(2, rtvs, &dsv);
+    bool done = false;
+    ID3D11Resource *r0 = nullptr, *r1 = nullptr;
+    UINT m0 = 0, m1 = 0;
+    if (!dsv && rtvs[0] && hzb_texture(rtvs[0], &r0, &m0)) {
+        if (rtvs[1] && hzb_texture(rtvs[1], &r1, &m1) && m0 == 0 && m1 == 0 && r0 != r1) {
+            // Mip 0 of both chains of one view (one draw, two targets): the first target is the
+            // chain nothing reads (docs/engine-module.md, "Hierarchical depth").
+            g_hzb_furthest = r0;
+            g_hzb_closest = r1;
+            ++g_hzb_chains;
+            if (mode == 2) {  // test: the whole chain filled with near depth instead
+                original(ctx, count, start, base);
+                hzb_fill(ctx, rtvs[0], 1.0f);
+                done = true;
+            }
+        } else if (!rtvs[1] && m0 >= 1) {
+            if (r0 == g_hzb_furthest) {
+                if (mode == 2 || mode == 3) hzb_fill(ctx, rtvs[0], mode == 2 ? 1.0f : 0.0f);
+                if (mode != 4) {
+                    ++g_hzb_skipped;
+                    done = true;
+                }
+            } else if (r0 == g_hzb_closest && mode == 4) {
+                // Control: the chain that is read, filled with near depth (must show in the picture).
+                hzb_fill(ctx, rtvs[0], 1.0f);
+                done = true;
+            }
+        }
+    }
+    for (auto* v : rtvs)
+        if (v) v->Release();
+    if (dsv) dsv->Release();
+    return done;
+}
+
+std::string hzb_status() {
+    return std::format("hierarchical depth: mode {} ({}), r.HZBOcclusion {}, view chains seen {}, mips not built {}", g_hzb_mode.load(),
+                       g_hzb_mode.load() == 0 ? "off" : g_hzb_mode.load() == 1 ? "skip" : "test",
+                       g_hzb_occlusion_off.load() ? "0" : "not 0 or not read yet (nothing left out)", g_hzb_chains.load(), g_hzb_skipped.load());
+}
+
 void ssr_frame() {
+    g_hzb_furthest = g_hzb_closest = nullptr;
     if (g_ssr_index) ++g_ssr_frames;
     g_ssr_index = 0;
     for (auto& v : g_ssr_inputs)

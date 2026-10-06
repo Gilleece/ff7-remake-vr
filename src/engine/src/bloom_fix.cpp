@@ -346,6 +346,7 @@ bool on_draw_indexed(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base,
     if (!g_armed.active) {
         // Full-screen passes are one triangle.
         if (count == 3 && device::active()) {
+            if (fixes::hzb_draw(ctx, count, start, base, original)) return true;
             if (g_ao_enabled.load(std::memory_order_relaxed) && ao_fix(ctx, count, start, base, original)) return true;
             return fixes::ssr_draw(ctx, count, start, base, original);
         }
@@ -393,7 +394,8 @@ void frame(ID3D11Texture2D* any_texture) {
     g_last = LastFullscreen{};
     fixes::ssr_frame();
     update_tonemap_shift();
-    bool hooks = g_enabled.load(std::memory_order_relaxed) || g_ao_enabled.load(std::memory_order_relaxed) || fixes::ssr_wants_hooks();
+    bool hooks = g_enabled.load(std::memory_order_relaxed) || g_ao_enabled.load(std::memory_order_relaxed) || fixes::ssr_wants_hooks() ||
+                 fixes::hzb_skip() != 0;
 #if FF7VR_ENGINE_WITH_DLSS
     dlss::frame(any_texture);
     hooks = hooks || dlss::wants_hooks();

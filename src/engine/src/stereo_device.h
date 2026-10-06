@@ -16,6 +16,7 @@
 #include <atomic>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace ff7vr::engine::device {
 
@@ -62,5 +63,9 @@ void tick_end();
 
 std::string status();
 std::string last_views();
+
+// Dev command `stereo framelog start | stop <csv>` (arguments as split by the command parser,
+// a[0] = "stereo", a[1] = "framelog").
+std::string framelog_command(const std::vector<std::string>& a);
 
 }  // namespace ff7vr::engine::device

@@ -86,6 +86,20 @@ void ssr_before_draw(ID3D11DeviceContext* ctx);
 // RHI thread: true if the draw was recognised and run (limited to its half).
 bool ssr_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base,
               void(STDMETHODCALLTYPE* original)(ID3D11DeviceContext*, UINT, UINT, INT));
+// The hierarchical depth chain nothing reads ([stereo] hzb_skip, `hzb 0-4`). Per view the engine
+// builds two chains from the view's depth with one two-target draw for mip 0 and one draw per
+// further mip and chain; only the second chain is read (ambient occlusion, reflections, ray traced
+// shadows). Mode 1 leaves out the further mips of the first chain; 2 and 3 fill that chain with
+// near / far depth instead (tests: nothing may change), 4 fills the further mips of the read chain
+// (control: the picture must change). docs/engine-module.md, "Hierarchical depth".
+void set_hzb_skip(int mode);
+int hzb_skip();
+void hzb_tick();  // game thread, every frame: follows r.HZBOcclusion (only 0 lets the chain be left out)
+// RHI thread: true if the draw was handled (left out or replaced).
+bool hzb_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base,
+              void(STDMETHODCALLTYPE* original)(ID3D11DeviceContext*, UINT, UINT, INT));
+std::string hzb_status();
+
 // RHI thread, once per frame (frame end).
 void ssr_frame();
 std::string ssr_status();

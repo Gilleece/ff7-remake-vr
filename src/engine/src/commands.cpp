@@ -240,6 +240,7 @@ std::string stereo_command(const std::vector<std::string>& a) {
         s.frame_window_reset = true;
         return std::format("ok frame time window {} s, restarted", v[0]);
     }
+    if (c == "framelog") return device::framelog_command(a);
     if (c == "swap" && a.size() == 3) {
         s.swap_rects = a[2] == "1";
         return std::format("ok swap_rects {}", s.swap_rects.load() ? 1 : 0);

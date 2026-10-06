@@ -18,13 +18,16 @@
 #include "ff7vr/engine/cvars.h"
 
 #include <d3d11.h>
+#include <intrin.h>
 
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <format>
 #include <mutex>
+#include <new>
 #include <vector>
 
 namespace ff7vr::engine::device {
@@ -202,6 +205,97 @@ struct FrameTimer {
 };
 FrameTimer g_timer;
 
+// Frame log (development, `stereo framelog start|stop <csv>`): timestamps and the calling
+// thread's CPU time at fixed points of each frame on the game thread, the render thread and
+// the thread that runs the frame-end command, so a slow frame can be attributed to a thread
+// and to waiting or working. Off by default; when off each point costs one relaxed load.
+namespace framelog {
+enum Point : std::uint32_t {
+    kTickBegin = 0,  // start of UGameEngine::Tick (game thread)
+    kHostDone,       // the host's begin_game_frame returned (XR frame wait and poses)
+    kTickBeginDone,  // the device's per-frame work at the start of Tick is done
+    kTickEnd,        // end of UGameEngine::Tick
+    kRenderEnd,      // RenderTexture_RenderThread: the render thread finished the frame's scene
+    kRhiEnd,         // frame-end command starts on the thread that owns the immediate context
+    kRhiEndDone,     // frame-end command done (hand-over to the host, desktop mirror)
+};
+struct Event {
+    std::int64_t qpc;
+    float cpu_ms;  // CPU time of the calling thread since it started (its cycle count, in ms)
+    float gpu_ms;  // latest GPU frame time from the host (kTickBegin only)
+    std::uint32_t point;
+    std::uint32_t tid;
+    std::uint64_t gpu_samples;
+};
+constexpr std::size_t kCapacity = std::size_t{1} << 18;
+std::atomic<bool> g_on{false};
+std::atomic<std::uint64_t> g_next{0};
+Event* g_events = nullptr;  // allocated on the first start, never freed
+
+// GetThreadTimes only advances in scheduler ticks (15.6 ms); the thread's cycle count is exact.
+// Cycles are converted with the rate of the time stamp counter measured between start and stop.
+double g_cycles_per_ms = 0;
+std::int64_t g_start_qpc = 0;
+std::uint64_t g_start_tsc = 0;
+float thread_cpu_ms() {
+    ULONG64 cycles = 0;
+    if (!QueryThreadCycleTime(GetCurrentThread(), &cycles)) return -1.0f;
+    const double rate = g_cycles_per_ms > 0 ? g_cycles_per_ms : 3.4e6;
+    return static_cast<float>(static_cast<double>(cycles) / rate);
+}
+
+void record(Point p, float gpu_ms = 0.0f, std::uint64_t gpu_samples = 0) {
+    if (!g_on.load(std::memory_order_relaxed)) return;
+    const std::uint64_t i = g_next.fetch_add(1, std::memory_order_relaxed);
+    if (i >= kCapacity) return;
+    LARGE_INTEGER q;
+    QueryPerformanceCounter(&q);
+    g_events[i] = Event{q.QuadPart, thread_cpu_ms(), gpu_ms, p, GetCurrentThreadId(), gpu_samples};
+}
+
+std::string command(const std::vector<std::string>& a) {
+    if (a.size() >= 3 && a[2] == "start") {
+        if (!g_events) g_events = new (std::nothrow) Event[kCapacity];
+        if (!g_events) return "err out of memory";
+        g_on = false;
+        g_next = 0;
+        LARGE_INTEGER q;
+        QueryPerformanceCounter(&q);
+        g_start_qpc = q.QuadPart;
+        g_start_tsc = __rdtsc();
+        g_on = true;
+        return std::format("ok frame log recording (up to {} events)", kCapacity);
+    }
+    if (a.size() >= 4 && a[2] == "stop") {
+        g_on = false;
+        Sleep(50);  // let a point being recorded finish
+        const std::uint64_t n = std::min<std::uint64_t>(g_next.load(), kCapacity);
+        std::string path = a[3];
+        for (std::size_t i = 4; i < a.size(); ++i) path += " " + a[i];
+        FILE* f = nullptr;
+        if (_wfopen_s(&f, log::widen(path).c_str(), L"w") != 0 || !f) return "err cannot write " + path;
+        LARGE_INTEGER fq, q;
+        QueryPerformanceFrequency(&fq);
+        QueryPerformanceCounter(&q);
+        const double tsc_per_ms = static_cast<double>(__rdtsc() - g_start_tsc) /
+                                  (static_cast<double>(q.QuadPart - g_start_qpc) * 1000.0 / static_cast<double>(fq.QuadPart));
+        // The CPU times were recorded with the previous rate (or a guess): rescale them.
+        const double used = g_cycles_per_ms > 0 ? g_cycles_per_ms : 3.4e6;
+        g_cycles_per_ms = tsc_per_ms;
+        for (std::uint64_t i = 0; i < n; ++i) g_events[i].cpu_ms = static_cast<float>(g_events[i].cpu_ms * used / tsc_per_ms);
+        std::fprintf(f, "qpc_freq,%lld\npoint,tid,qpc,cpu_ms,gpu_ms,gpu_samples\n", fq.QuadPart);
+        for (std::uint64_t i = 0; i < n; ++i) {
+            const Event& e = g_events[i];
+            std::fprintf(f, "%u,%u,%lld,%.4f,%.4f,%llu\n", e.point, e.tid, e.qpc, e.cpu_ms, e.gpu_ms,
+                         static_cast<unsigned long long>(e.gpu_samples));
+        }
+        std::fclose(f);
+        return std::format("ok {} events written to {}", n, path);
+    }
+    return "err usage: stereo framelog start | stop <csv>";
+}
+}  // namespace framelog
+
 // ------------------------------------------------------------------ helpers
 int eye_index(EStereoscopicPass pass) { return pass == eSSP_RIGHT_EYE ? 1 : 0; }
 
@@ -349,6 +443,7 @@ unsigned g_frame_end_next = 0;  // render thread only
 
 void frame_end_execute(void*, rhi::Command* self) {
     auto* c = reinterpret_cast<FrameEndCommand*>(self);
+    framelog::record(framelog::kRhiEnd);
     try {
         gpu_trace::frame_boundary(c->eyes.texture);
         bloom_fix::frame(c->eyes.texture);
@@ -361,11 +456,13 @@ void frame_end_execute(void*, rhi::Command* self) {
     } catch (...) {
     }
     ++g_count.frame_end_run;
+    framelog::record(framelog::kRhiEndDone);
     c->pending.store(false, std::memory_order_release);
 }
 
 void RenderTexture_RenderThread(const void*, FRHICommandListImmediate* cmd_list, FRHITexture2D* back_buffer,
                                 FRHITexture2D* src, FVector2D /*window_size*/) {
+    framelog::record(framelog::kRenderEnd);
     ++g_count.render_texture;
     if (!src) return;
     ID3D11Texture2D* eye = native_texture(src);
@@ -709,6 +806,13 @@ void configure_render_scale(const Config& cfg) {
                           else if (!args.empty() && args != "status") return std::string("err usage: ssr [status] | on | off | fix 0|1 | poison 0-3");
                           return "ok " + fixes::ssr_status();
                       });
+    fixes::set_hzb_skip(static_cast<int>(cfg.get_int("stereo", "hzb_skip", 0)));
+    dev_commands::add("hzb", "hzb [status] | 0-4: the unread hierarchical depth chain (1 = not built; 2, 3, 4 = tests)",
+                      [](std::string_view args) {
+                          if (args.size() == 1 && args[0] >= '0' && args[0] <= '4') fixes::set_hzb_skip(args[0] - '0');
+                          else if (!args.empty() && args != "status") return std::string("err usage: hzb [status] | 0-4");
+                          return "ok " + fixes::hzb_status();
+                      });
     {
         const std::string m = cfg.get_string("stereo", "tonemap_shift", "auto");
         bloom_fix::set_tonemap_shift(m == "0" || m == "off" ? 0 : m == "1" || m == "on" ? 1 : 2);
@@ -760,6 +864,12 @@ bool active() { return g_active.load(); }
 bool wanted() { return g_wanted.load(); }
 
 void tick_begin() {
+    if (framelog::g_on.load(std::memory_order_relaxed)) {
+        float gpu_ms = 0, hz = 0;
+        std::uint64_t samples = 0;
+        if (StereoHost* h = g_host.load()) h->gpu_frame_time(gpu_ms, samples, hz);
+        framelog::record(framelog::kTickBegin, gpu_ms, samples);
+    }
     g.in_tick = true;
     g.views_built = false;
     ++g.ticks;
@@ -770,6 +880,7 @@ void tick_begin() {
     if (StereoHost* h = g_host.load()) {
         GameFrame f;
         h->begin_game_frame(wanted, f);
+        framelog::record(framelog::kHostDone);
         ++g_count.host_frames;
         if (f.views_valid && !(usable(f.views[0]) && usable(f.views[1]) && usable(f.head))) {
             // Keep the last good views and head; the image is still handed over with the
@@ -829,9 +940,12 @@ void tick_begin() {
     if (frame_stereo)
         fixes::apply_system_resolution(static_cast<std::int32_t>(2 * g.eye_w), static_cast<std::int32_t>(g.eye_h));
     g_timer.tick(frame_stereo);
+    fixes::hzb_tick();
+    framelog::record(framelog::kTickBeginDone);
 }
 
 void tick_end() {
+    framelog::record(framelog::kTickEnd);
     g.in_tick = false;
     // Mono frames have no separate target, so the render thread consumes nothing for them.
     if (g_active.load()) {
@@ -864,6 +978,8 @@ std::string status() {
         fixes::system_resolution_overridden() ? 1 : 0, g_latest_frame_id.load(), g_timer.last_avg, g_timer.last_p50, g_timer.last_p95,
         g_timer.last_max, g_timer.last_n, g_timer.last_window_stereo ? "stereo" : "mixed/mono", host_desc);
 }
+
+std::string framelog_command(const std::vector<std::string>& a) { return framelog::command(a); }
 
 std::string last_views() {
     std::lock_guard lock(g_diag_mutex);
