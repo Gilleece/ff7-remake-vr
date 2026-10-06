@@ -34,10 +34,12 @@ add_library(ff7vr_render STATIC
     src/foveation.cpp
     src/timing.h
     src/timing.cpp
+    src/video_memory.h
+    src/video_memory.cpp
     src/xr_controller.h
     src/xr_controller.cpp
     src/render_module.cpp
 )
 target_include_directories(ff7vr_render PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(ff7vr_render PUBLIC ff7vr_core ff7vr_xr PRIVATE d3d11 dxgi ff7vr_nvapi)
+target_link_libraries(ff7vr_render PUBLIC ff7vr_core ff7vr_xr PRIVATE d3d11 dxgi pdh ff7vr_nvapi)
 ff7vr_set_warnings(ff7vr_render)

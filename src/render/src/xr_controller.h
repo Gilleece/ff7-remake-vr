@@ -90,6 +90,8 @@ public:
 
     // Dev commands (any thread).
     std::string Status();
+    // `vram` dev command: the process's video memory usage and budget now.
+    std::string VideoMemoryStatus();
     std::string Capture(const std::string& prefix, uint32_t timeoutMs);
     std::string Recenter();
     std::string Restart();

@@ -155,7 +155,9 @@ void RegisterCommands() {
                           if (a.size() >= 2 && a.front() == '"' && a.back() == '"') a = a.substr(1, a.size() - 2);
                           return XrController::Get().Capture(a, timeout);
                       });
-    dev_commands::add("recenter", "recenter: the current head position and yaw become the origin", [](std::string_view) {
+    dev_commands::add("vram", "vram: the game's video memory usage against the budget Windows grants it (card and shared system memory)",
+                      [](std::string_view) { return XrController::Get().VideoMemoryStatus(); });
+    dev_commands::add("recenter","recenter: the current head position and yaw become the origin", [](std::string_view) {
         return XrController::Get().Recenter();
     });
     dev_commands::add("xr-restart", "xr-restart: end the XR session (if any) and start a new one now", [](std::string_view) {

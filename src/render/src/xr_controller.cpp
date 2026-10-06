@@ -1,6 +1,7 @@
 #include "xr_controller.h"
 
 #include "foveation.h"
+#include "video_memory.h"
 
 #include "ff7vr/core/dev_commands.h"
 #include "ff7vr/core/log.h"
@@ -432,6 +433,23 @@ void XrController::LogStats() {
     }
     for (const std::string& line : foveation::TakeTimingLines()) log::info("timing:   {}", line);
     if (!runtimeCalls.empty()) log::info("timing:   {}", runtimeCalls);
+    ComPtr<ID3D11Device> dev;
+    {
+        std::lock_guard lk(devMutex_);
+        dev = seenDevice_;
+    }
+    if (dev) video_memory::LogReport(dev.Get());
+}
+
+std::string XrController::VideoMemoryStatus() {
+    ComPtr<ID3D11Device> dev;
+    {
+        std::lock_guard lk(devMutex_);
+        dev = seenDevice_;
+    }
+    if (!dev) return "err no D3D11 device seen yet";
+    const std::string l = video_memory::Line(video_memory::Query(dev.Get()));
+    return l.empty() ? "err QueryVideoMemoryInfo failed" : "ok " + l;
 }
 
 void XrController::StereoTestThread() {
