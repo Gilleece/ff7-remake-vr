@@ -1370,7 +1370,7 @@ Result OpenXrBackend::SubmitFrame(uint64_t frameId, const SubmitDesc& desc) {
             QuadSlot* slot = FindQuad(q.layer);
             if (!slot) continue;
             if (q.texture &&
-                UpdateImage(slot->sc, [&](const EyeTarget& t, uint32_t* ow, uint32_t* oh) { return TransferQuad(q, t, ow, oh); }) ==
+                UpdateImage(slot->sc, [&](const EyeTarget& t, uint32_t* ow, uint32_t* oh) { return TransferQuad(desc, q, t, ow, oh); }) ==
                     ImageWait::Failed)
                 ok = false;
             if (!slot->sc.hasImage) continue;

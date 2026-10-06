@@ -353,7 +353,7 @@ public:
                 if (!s || !q.texture) continue;
                 uint32_t w = 0, h = 0;
                 const EyeTarget t{s->sc.owned.Get(), s->sc.format, s->sc.width, s->sc.height, 0};
-                if (TransferQuad(q, t, &w, &h)) {
+                if (TransferQuad(desc, q, t, &w, &h)) {
                     s->sc.hasImage = true;
                     s->sc.lastW = w;
                     s->sc.lastH = h;

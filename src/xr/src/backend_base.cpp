@@ -430,6 +430,7 @@ bool BackendBase::TransferEye(Eye eye, const SubmitDesc& desc, const EyeTarget& 
     src.encoding = desc.encoding;
     src.arraySlice = desc.arraySlice;
     src.mipLevel = desc.mipLevel;
+    src.picture = &desc.picture;
     BlitDest dst{t.texture, t.viewFormat, t.width, t.height, t.arraySlice};
     Blitter::Path path{};
     if (gpuTiming_) gpuCopy_.Before(context_.Get());
@@ -439,7 +440,7 @@ bool BackendBase::TransferEye(Eye eye, const SubmitDesc& desc, const EyeTarget& 
     return ok;
 }
 
-bool BackendBase::TransferQuad(const QuadLayer& q, const EyeTarget& t, uint32_t* outW, uint32_t* outH) {
+bool BackendBase::TransferQuad(const SubmitDesc& desc, const QuadLayer& q, const EyeTarget& t, uint32_t* outW, uint32_t* outH) {
     BlitSource src;
     src.texture = q.texture;
     src.viewFormat = q.viewFormat;
@@ -451,6 +452,7 @@ bool BackendBase::TransferQuad(const QuadLayer& q, const EyeTarget& t, uint32_t*
                 : q.sourceAlpha == SourceAlpha::Straight              ? BlitAlpha::Straight
                 : q.sourceAlpha == SourceAlpha::PremultipliedInverted ? BlitAlpha::PremultipliedInverted
                                                                       : BlitAlpha::Premultiplied;
+    if (q.adjustPicture && !q.alphaBlend) src.picture = &desc.picture;
     BlitDest dst{t.texture, t.viewFormat, t.width, t.height, t.arraySlice};
     Blitter::Path path{};
     if (gpuTiming_) gpuCopy_.Before(context_.Get());

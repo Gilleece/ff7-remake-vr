@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cmath>
 #include <format>
+#include <sstream>
 
 namespace ff7vr::render {
 namespace {
@@ -58,6 +59,10 @@ void XrController::Start(const RenderConfig& cfg) {
     waitOnPresent_ = cfg_.waitOnPresentThread;
     uiOn_ = cfg_.uiLayer;
     uiMirror_ = cfg_.uiMirror;
+    {
+        std::lock_guard lk(pictureMutex_);
+        picture_ = ClampPicture(cfg_.picture);
+    }
     if (cfg_.stereoTest) mode_ = Mode::Stereo;
     lastStatsQpc_ = QpcNow();
     dev_commands::add("xr-sim",
@@ -654,8 +659,13 @@ void XrController::SubmitOne(const PresentInfo& p, const Waited& w, const Pendin
         q.pose.position = xr::Vec3{0.0f, cfg_.screenOffsetY, -cfg_.screenDistance};
         q.width = cfg_.screenWidth;
         q.height = cfg_.screenWidth * float(p.height) / float(std::max(1u, p.width));
+        q.adjustPicture = true;
         d.quads = &q;
         d.quadCount = 1;
+    }
+    {
+        std::lock_guard lk(pictureMutex_);
+        d.picture = picture_;
     }
     if (cfg_.gpuTiming) gpu_.Begin(p.device, p.context);
     if (ui) DrawUiOnWindow(p, *ui);
@@ -682,6 +692,7 @@ void XrController::SubmitOne(const PresentInfo& p, const Waited& w, const Pendin
 
 void XrController::OnPresent(const PresentInfo& p) {
     ++presents_;
+    if (cfg_.brightnessUpKey || cfg_.brightnessDownKey) PollPictureKeys();
     // The UI texture reported for this frame (before its Present) belongs to this Present only.
     PendingUi ui;
     bool haveUi = false;
@@ -974,6 +985,77 @@ std::string XrController::UiCommand(const std::string& args) {
 }
 
 // ---------------------------------------------------------------------------
+// Picture adjustment
+// ---------------------------------------------------------------------------
+xr::PictureAdjust ClampPicture(const xr::PictureAdjust& p) {
+    auto clamp = [](float v, float lo, float hi, float none) { return std::isfinite(v) ? std::clamp(v, lo, hi) : none; };
+    xr::PictureAdjust r;
+    r.brightness = clamp(p.brightness, -1.0f, 1.0f, 0.0f);
+    r.contrast = clamp(p.contrast, 0.5f, 2.0f, 1.0f);
+    r.saturation = clamp(p.saturation, 0.0f, 2.0f, 1.0f);
+    r.gamma = clamp(p.gamma, 0.5f, 2.0f, 1.0f);
+    r.blackLevel = clamp(p.blackLevel, -0.1f, 0.1f, 0.0f);
+    return r;
+}
+
+std::string PictureText(const xr::PictureAdjust& p) {
+    return std::format("brightness {:.3f} contrast {:.3f} saturation {:.3f} gamma {:.3f} black_level {:.4f} ({})", p.brightness, p.contrast,
+                       p.saturation, p.gamma, p.blackLevel, p.IsIdentity() ? "no change" : "applied to the eyes and the virtual screen");
+}
+
+std::string XrController::PictureCommand(const std::string& args) {
+    std::istringstream in(args);
+    std::string key, value;
+    in >> key >> value;
+    std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    const char* usage = "err usage: picture status | reset | brightness|contrast|saturation|gamma|black_level <value>";
+    std::lock_guard lk(pictureMutex_);
+    if (key.empty() || key == "status") return "ok picture " + PictureText(picture_);
+    if (key == "reset") {
+        picture_ = xr::PictureAdjust{};
+    } else {
+        float v = 0;
+        const auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), v);
+        if (value.empty() || ec != std::errc() || ptr != value.data() + value.size()) return usage;
+        xr::PictureAdjust p = picture_;
+        if (key == "brightness") p.brightness = v;
+        else if (key == "contrast") p.contrast = v;
+        else if (key == "saturation") p.saturation = v;
+        else if (key == "gamma") p.gamma = v;
+        else if (key == "black_level" || key == "blacklevel" || key == "black") p.blackLevel = v;
+        else return usage;
+        picture_ = ClampPicture(p);
+    }
+    const std::string text = PictureText(picture_);
+    log::info("render: picture {}", text);
+    return "ok picture " + text;
+}
+
+void XrController::PollPictureKeys() {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(GetForegroundWindow(), &pid);
+    const bool focus = pid == GetCurrentProcessId();
+    const int keys[2] = {cfg_.brightnessUpKey, cfg_.brightnessDownKey};
+    for (int i = 0; i < 2; ++i) {
+        const int vk = keys[i];
+        const bool down = focus && vk > 0 && vk < 256 && (GetAsyncKeyState(vk) & 0x8000) != 0;
+        if (down && !brightnessKeyDown_[i]) {
+            std::string text;
+            {
+                std::lock_guard lk(pictureMutex_);
+                xr::PictureAdjust p = picture_;
+                p.brightness += i == 0 ? cfg_.brightnessStep : -cfg_.brightnessStep;
+                if (std::fabs(p.brightness) < 1e-4f) p.brightness = 0.0f;  // back to exactly none after steps up and down
+                picture_ = ClampPicture(p);
+                text = PictureText(picture_);
+            }
+            log::info("render: picture (brightness key): {}", text);
+        }
+        brightnessKeyDown_[i] = down;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Dev commands
 // ---------------------------------------------------------------------------
 std::string XrController::Status() {
@@ -1006,6 +1088,10 @@ std::string XrController::Status() {
     log::info("status: threads: {}", ThreadReport());
     log::info("status: {}", xrLine);
     log::info("status: {}", counters);
+    {
+        std::lock_guard lk(pictureMutex_);
+        log::info("status: picture {}", PictureText(picture_));
+    }
     if (ready) log::info("status: screen layer for a {}x{} {} back buffer", screenW_, screenH_, xr::DxgiFormatName(screenFmt_));
     log::info("status: {}", UiCommand("status").substr(3));
     log::info("status: {}", foveation::Status());

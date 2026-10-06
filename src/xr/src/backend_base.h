@@ -112,7 +112,7 @@ protected:
     };
     // RT, inside a saved-state scope: copy one eye of `desc` / one quad's new content into `target`.
     bool TransferEye(Eye eye, const SubmitDesc& desc, const EyeTarget& target, uint32_t* outW, uint32_t* outH);
-    bool TransferQuad(const QuadLayer& q, const EyeTarget& target, uint32_t* outW, uint32_t* outH);
+    bool TransferQuad(const SubmitDesc& desc, const QuadLayer& q, const EyeTarget& target, uint32_t* outW, uint32_t* outH);
     static Rect EyeRect(const SubmitDesc& desc, Eye eye);
     static Rect QuadRect(const QuadLayer& q);
     // Raw (pre-recenter) view an eye image was rendered with.

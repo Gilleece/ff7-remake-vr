@@ -74,7 +74,18 @@ struct RenderConfig {
     bool uiFollowHead = false;
     uint32_t uiLayerWidth = 1920;  // width of the layer image; 0 = the game's UI texture width
     bool uiMirror = true;          // draw the UI over the desktop window too (it is not in the eye images)
+    // [picture] Colour adjustment of the eye images and the virtual screen (not the UI
+    // layer); defaults change nothing. See xr::PictureAdjust and docs/render.md.
+    xr::PictureAdjust picture{};
+    // [controls] brightness_up_key / brightness_down_key (virtual-key codes, 0 = none) and
+    // brightness_step: change [picture] brightness while the game window has the focus.
+    int brightnessUpKey = 0, brightnessDownKey = 0;
+    float brightnessStep = 0.05f;
 };
+
+// Limits of the [picture] keys (also applied to the `picture` command).
+xr::PictureAdjust ClampPicture(const xr::PictureAdjust& p);
+std::string PictureText(const xr::PictureAdjust& p);
 
 class XrController {
 public:
@@ -130,8 +141,11 @@ public:
     bool UiDumpRequested() const { return uiDumpRequested_.load(); }
     void SubmitUiLayer(const UiLayerSource& s);
     std::string UiCommand(const std::string& args);
+    // `picture status | reset | <key> <value>` (any thread).
+    std::string PictureCommand(const std::string& args);
 
 private:
+    void PollPictureKeys();  // RT, once per Present
     // UI texture reported for the coming Present (presenting thread).
     struct PendingUi {
         UiLayerSource src;
@@ -250,6 +264,11 @@ private:
     bool uiShownLast_ = false;  // RT: the last stereo frame showed the UI quad
     std::atomic<uint64_t> uiSubmitted_{0}, uiHeld_{0}, uiDropped_{0};
     std::string uiLastSource_;  // RT, for status
+
+    // Picture adjustment, changeable at run time (`picture` command, brightness keys).
+    std::mutex pictureMutex_;
+    xr::PictureAdjust picture_{};  // under pictureMutex_
+    bool brightnessKeyDown_[2]{};  // RT
 
     // Tracking of the last waited frame (the backend's pose filter, see xr.h POSE VALIDITY).
     std::atomic<bool> lastOrientationValid_{true}, lastPositionValid_{true};

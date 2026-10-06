@@ -13,6 +13,13 @@ cbuffer BlitConstants : register(b0)
     uint   encodeSrgb; // 1: the target stores gamma-encoded values in a non-sRGB view -> encode
                        //    (premultiplied output: rgb = encode(rgb / a) * a, blended in gamma space)
     uint   pad;
+    // Picture adjustment (PictureAdjust in xr.h), used when picture != 0 and the
+    // output is opaque (alphaMode 0). pic0: brightness gain (2^stops), saturation,
+    // contrast, 1 / gamma; pic1.x: black level.
+    float4 pic0;
+    float4 pic1;
+    uint   picture;
+    uint3  pad2;
 };
 
 Texture2DArray<float4> src : register(t0);
@@ -50,12 +57,35 @@ float3 LinearToSrgb(float3 c)
     return (c <= 0.0031308) ? lo : hi;
 }
 
+// Linear in, linear out. Brightness and saturation act on light (a gain keeps black
+// black; mixing towards the luminance keeps it). Contrast is a slope in stops around
+// mid-grey (18 % light): a straight line on a log scale, which is how brightness is
+// perceived; black stays black and no shade is clipped to black, so it does not raise
+// or crush the floor of a dark scene (black_level does that). Gamma and black level act
+// on the sRGB-encoded value, which is roughly perceptual: a black-level step of 0.01 is
+// the same visible step in dark and bright scenes (in linear light it would swamp the
+// shadows).
+float3 AdjustPicture(float3 lin)
+{
+    lin *= pic0.x;
+    float y = dot(lin, float3(0.2126, 0.7152, 0.0722));
+    lin = max(y + (lin - y) * pic0.y, 0.0);
+    lin = 0.18 * pow(lin / 0.18, pic0.z);
+    // Encoded values above 1 (a gain above 1) keep their excess: the target clips them.
+    float3 e = (lin <= 0.0031308) ? lin * 12.92 : 1.055 * pow(lin, 1.0 / 2.4) - 0.055;
+    e = pow(max(e, 0.0), pic0.w);
+    e = max(e * (1.0 - pic1.x) + pic1.x, 0.0);
+    return (e <= 0.04045) ? e / 12.92 : pow((e + 0.055) / 1.055, 2.4);
+}
+
 float4 PSMain(VSOut i) : SV_Target
 {
     float2 uv = uvOffset + i.uv * uvScale;
     float4 c = src.SampleLevel(samp, float3(uv, 0.0), 0.0);
     if (decodeSrgb != 0)
         c.rgb = SrgbToLinear(c.rgb);
+    if (picture != 0 && alphaMode == 0)
+        c.rgb = AdjustPicture(c.rgb);
     if (alphaMode == 0)
         c.a = 1.0;
     else if (alphaMode == 2)

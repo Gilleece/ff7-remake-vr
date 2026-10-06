@@ -316,6 +316,28 @@ enum class ColorEncoding {
     Linear,  // linear light (scene colour, FP16, or a texture read through an _SRGB view)
 };
 
+// Picture adjustment applied while an image is copied into a swapchain (the eye
+// images, and quads with QuadLayer::adjustPicture). The defaults change nothing: an
+// image with the defaults goes through exactly the same shader path as without them.
+// Order and spaces (see docs/render.md, "Picture controls"):
+//   1. brightness  linear light, a gain of 2^brightness (stops): black stays black
+//   2. saturation  linear light, around the pixel's luminance (Rec. 709), which is kept
+//   3. contrast    linear light, a slope in stops around mid-grey (18 %):
+//                  c = 0.18 * (c / 0.18)^contrast; black stays black
+//   4. gamma       sRGB-encoded value: e = e^(1 / gamma); above 1 lifts the mid-tones
+//   5. black_level sRGB-encoded value: e = e * (1 - b) + b; white stays white, the floor
+//                  moves by b (negative: the darkest -b / (1 - b) of the range become black)
+struct PictureAdjust {
+    float brightness = 0.0f;  // -1..1 stops
+    float contrast = 1.0f;    // 0.5..2
+    float saturation = 1.0f;  // 0..2
+    float gamma = 1.0f;       // 0.5..2
+    float blackLevel = 0.0f;  // -0.1..0.1
+    bool IsIdentity() const {
+        return brightness == 0.0f && contrast == 1.0f && saturation == 1.0f && gamma == 1.0f && blackLevel == 0.0f;
+    }
+};
+
 struct EyeSubmit {
     // Region of the source texture holding this eye, in pixels of the selected
     // mip, origin top-left. width or height 0 = the left (Eye::Left) or right
@@ -378,6 +400,9 @@ struct QuadLayer {
     float width = 1.0f, height = 1.0f;  // metres
     bool alphaBlend = false;            // false: opaque; true: blend over the layers below with the image's alpha
     SourceAlpha sourceAlpha = SourceAlpha::Premultiplied;  // with alphaBlend: how `texture` stores alpha
+    // Opaque quads only: apply SubmitDesc::picture when the content is copied in (a
+    // virtual screen showing the game; not a UI layer, whose text stays as drawn).
+    bool adjustPicture = false;
 };
 
 struct SubmitDesc {
@@ -392,6 +417,9 @@ struct SubmitDesc {
     // Quad layers drawn over the projection layer, back to front.
     const QuadLayer* quads = nullptr;
     uint32_t quadCount = 0;
+    // Applied to the eye images and to quads with adjustPicture when they are copied in.
+    // An eye or quad that keeps its last image keeps the adjustment it was copied with.
+    PictureAdjust picture{};
 };
 
 // The part of an eye's image the headset cannot show (lens edges, display corners),

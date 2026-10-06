@@ -93,6 +93,17 @@ RenderConfig LoadConfig(const StartupContext& ctx) {
     r.uiFollowHead = c.get_bool("ui", "follow_head", r.uiFollowHead);
     r.uiLayerWidth = static_cast<uint32_t>(std::clamp<long long>(c.get_int("ui", "layer_width", r.uiLayerWidth), 0, 8192));
     r.uiMirror = c.get_bool("ui", "mirror", r.uiMirror);
+
+    xr::PictureAdjust pic;
+    pic.brightness = static_cast<float>(c.get_float("picture", "brightness", pic.brightness));
+    pic.contrast = static_cast<float>(c.get_float("picture", "contrast", pic.contrast));
+    pic.saturation = static_cast<float>(c.get_float("picture", "saturation", pic.saturation));
+    pic.gamma = static_cast<float>(c.get_float("picture", "gamma", pic.gamma));
+    pic.blackLevel = static_cast<float>(c.get_float("picture", "black_level", pic.blackLevel));
+    r.picture = ClampPicture(pic);
+    r.brightnessUpKey = static_cast<int>(std::clamp<long long>(c.get_int("controls", "brightness_up_key", 0), 0, 255));
+    r.brightnessDownKey = static_cast<int>(std::clamp<long long>(c.get_int("controls", "brightness_down_key", 0), 0, 255));
+    r.brightnessStep = static_cast<float>(std::clamp(c.get_float("controls", "brightness_step", r.brightnessStep), 0.005, 0.5));
     return r;
 }
 
@@ -196,6 +207,10 @@ void RegisterCommands() {
                           const std::string verb = Lower(a.substr(0, sp));
                           return XrController::Get().UiCommand(sp == std::string::npos ? verb : verb + a.substr(sp));
                       });
+    dev_commands::add("picture",
+                      "picture status | reset | brightness|contrast|saturation|gamma|black_level <value>: colour adjustment of the eye "
+                      "images and the virtual screen (not the UI layer)",
+                      [](std::string_view args) { return XrController::Get().PictureCommand(std::string(args)); });
 }
 
 }  // namespace
@@ -208,6 +223,8 @@ bool start(const StartupContext& ctx) {
               cfg.waitOnPresentThread ? "present" : "xr", cfg.screenWidth, cfg.screenDistance, log::narrow(cfg.captureDir.wstring()));
     log::info("render: UI layer in stereo {}: {:.2f} m high at {:.2f} m, offset {:.2f} {:.2f}, {}, image width {}", cfg.uiLayer ? "on" : "off",
               cfg.uiSize, cfg.uiDistance, cfg.uiOffsetX, cfg.uiOffsetY, cfg.uiFollowHead ? "head-locked" : "world-locked", cfg.uiLayerWidth);
+    log::info("render: picture {}; brightness keys up {} down {} (step {:.3f})", PictureText(cfg.picture), cfg.brightnessUpKey,
+              cfg.brightnessDownKey, cfg.brightnessStep);
     foveation::Configure(*ctx.config);
     HookCallbacks cb;
     cb.onPresent = &OnPresentCb;

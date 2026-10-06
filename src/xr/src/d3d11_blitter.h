@@ -74,6 +74,9 @@ struct BlitSource {
     uint32_t arraySlice = 0;
     uint32_t mipLevel = 0;
     BlitAlpha alpha = BlitAlpha::Opaque;
+    // Picture adjustment for an opaque transfer (null or identity: none). A source that
+    // could be copied as it is goes through the shader instead while it is set.
+    const PictureAdjust* picture = nullptr;
 };
 
 struct BlitDest {

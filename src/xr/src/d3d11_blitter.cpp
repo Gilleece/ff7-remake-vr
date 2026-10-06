@@ -176,7 +176,25 @@ struct BlitConstants {
     uint32_t alphaMode;  // BlitAlpha
     uint32_t encodeSrgb;  // 1: store gamma-encoded values (non-sRGB view of a gamma-encoded target)
     uint32_t pad;
+    float pic0[4];  // brightness gain, saturation, contrast, 1 / gamma
+    float pic1[4];  // black level
+    uint32_t picture;  // 1: apply pic0/pic1 (opaque output only)
+    uint32_t pad2[3];
 };
+static_assert(sizeof(BlitConstants) == 80, "must match BlitConstants in blit.hlsl");
+
+static bool WantsPicture(const BlitSource& src) {
+    return src.picture && src.alpha == BlitAlpha::Opaque && !src.picture->IsIdentity();
+}
+
+static void FillPicture(BlitConstants& c, const PictureAdjust& p) {
+    c.picture = 1;
+    c.pic0[0] = std::exp2(p.brightness);
+    c.pic0[1] = p.saturation;
+    c.pic0[2] = p.contrast;
+    c.pic0[3] = p.gamma > 0.0f ? 1.0f / p.gamma : 1.0f;
+    c.pic1[0] = p.blackLevel;
+}
 
 bool Blitter::Init(ID3D11Device* device, const Logger* log) {
     log_ = log;
@@ -368,7 +386,8 @@ bool Blitter::Transfer(ID3D11DeviceContext* ctx, const BlitSource& src, const Re
 
     // A copy keeps the source's alpha bits: right for opaque and premultiplied sources only.
     const bool alphaAsIs = src.alpha == BlitAlpha::Opaque || src.alpha == BlitAlpha::Premultiplied;
-    const bool canCopy = fits && alphaAsIs && sd.SampleDesc.Count == 1 && dd.SampleDesc.Count == 1 &&
+    const bool picture = WantsPicture(src);
+    const bool canCopy = fits && alphaAsIs && !picture && sd.SampleDesc.Count == 1 && dd.SampleDesc.Count == 1 &&
                          TypelessFamily(sd.Format) == TypelessFamily(dd.Format) && srcBitsSrgb == dstBitsSrgb &&
                          TypelessFamily(srcFmt) == TypelessFamily(dstFmt);
     if (canCopy) {
@@ -442,6 +461,7 @@ bool Blitter::Transfer(ID3D11DeviceContext* ctx, const BlitSource& src, const Re
     c.uvScale[1] = float(readRect.height) / readH;
     c.decodeSrgb = (src.encoding == ColorEncoding::Srgb && !IsSrgbFormat(readFmt)) ? 1u : 0u;
     c.alphaMode = static_cast<uint32_t>(src.alpha);
+    if (picture) FillPicture(c, *src.picture);
     memcpy(m.pData, &c, sizeof(c));
     ctx->Unmap(cb_.Get(), 0);
 
