@@ -61,7 +61,8 @@ void XrController::Start(const RenderConfig& cfg) {
     lastStatsQpc_ = QpcNow();
     dev_commands::add("xr-sim",
                       "xr-sim status | head <yaw deg> [pitch deg] [x y z m] | recenter-event [nopose] [delay <frames>] | lose orientation|position "
-                      "<frames>: Null backend only, emulate the headset's head pose, its own recenter, or lost tracking",
+                      "<frames> | gaze <yaw> <pitch> | gaze off | gaze sweep [radius deg] [period s] | gaze blink <frames>: Null backend only, emulate the "
+                      "headset's head pose, its own recenter, lost tracking, or an eye tracker",
                       [this](std::string_view a) { return SimulateCommand(std::string(a)); });
     thread_ = std::thread([this] { ThreadMain(); });
     if (cfg_.stereoTest) stereoTest_ = std::thread([this] { StereoTestThread(); });
@@ -190,6 +191,7 @@ void XrController::TryInit() {
     d.disableImplicitApiLayersMatching = cfg_.disableLayersMatching;
     d.enableDebugUtils = cfg_.debugUtils;
     d.gpuTiming = cfg_.gpuTiming;
+    d.eyeGaze = foveation::EyeTrackingRequested();  // [foveation] eye_tracking = 1 or auto
     d.null.refreshHz = cfg_.nullRefreshHz;
     d.null.paceToRefresh = cfg_.nullPace;
     d.null.motion = cfg_.nullMotion;
@@ -243,6 +245,9 @@ void XrController::TryInit() {
         eye_.eyeWidth = ri.eyeSwapchain[0].width;
         eye_.eyeHeight = ri.eyeSwapchain[0].height;
         eye_.refreshHz = ri.refreshHz;
+        gaze_ = GazeState{};
+        gaze_.source = ri.gazeSource;
+        gaze_.note = ri.gazeNote;
         eyeValid_ = true;
     }
     sessionStarted_ = false;
@@ -285,6 +290,19 @@ bool XrController::WaitOne(bool fromGameThread, xr::FrameInfo* out) {
         std::lock_guard lk(eyeMutex_);
         eye_.fov[0] = out->views[0].fov;
         eye_.fov[1] = out->views[1].fov;
+        if (out->gaze.available) {
+            const xr::GazeSample& g = out->gaze;
+            gaze_.available = true;
+            gaze_.tracked = g.tracked;
+            gaze_.nominal = g.nominal;
+            if (g.tracked) gaze_.headDirection = g.direction;
+            // Each eye relative to the head (canted displays turn the eyes; most headsets do not).
+            for (int e = 0; e < 2; ++e)
+                gaze_.eyeFromHead[e] = xr::QuatNormalize(xr::QuatMultiply(xr::QuatConjugate(out->views[e].pose.orientation), out->head.orientation));
+            gaze_.ageMs = g.sampleTime > 0 ? double(g.displayTime - g.sampleTime) / 1e6 : -1.0;
+            gaze_.frameId = out->frameId;
+            ++gaze_.samples;
+        }
     }
     if (const uint32_t v = backend_->HiddenAreaMeshVersion(); v != hiddenBackendVersion_) {
         hiddenBackendVersion_ = v;
@@ -368,6 +386,7 @@ void XrController::Teardown(TeardownReason why, const char* text) {
     {
         std::lock_guard lk(eyeMutex_);
         eyeValid_ = false;
+        gaze_ = GazeState{};
     }
     {
         std::lock_guard pl(parkMutex_);
@@ -755,6 +774,12 @@ bool XrController::GetHiddenArea(int eye, xr::HiddenAreaMesh* out, uint32_t* ver
     if (!eyeValid_ || m.indices.size() < 3) return false;
     if (out) *out = m;
     return true;
+}
+
+bool XrController::GetGaze(GazeState* out) {
+    std::lock_guard lk(eyeMutex_);
+    if (out) *out = gaze_;
+    return eyeValid_ && gaze_.available;
 }
 
 bool XrController::GetEyeSetup(EyeSetup* out) {

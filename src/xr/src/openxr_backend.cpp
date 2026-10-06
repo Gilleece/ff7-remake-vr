@@ -32,6 +32,9 @@ XrPosef ToXr(const Pose& p) {
 Fov ToFov(const XrFovf& f) { return Fov{f.angleLeft, f.angleRight, f.angleUp, f.angleDown}; }
 XrFovf ToXr(const Fov& f) { return XrFovf{f.angleLeft, f.angleRight, f.angleUp, f.angleDown}; }
 
+// Rate limiter for repeated log lines: true for the 1st, 2nd, 4th, 8th, ... occurrence.
+bool PowerOfTwo(uint64_t n) { return n != 0 && (n & (n - 1)) == 0; }
+
 std::string VersionString(XrVersion v) {
     return std::format("{}.{}.{}", XR_VERSION_MAJOR(v), XR_VERSION_MINOR(v), XR_VERSION_PATCH(v));
 }
@@ -90,6 +93,13 @@ private:
     // Reads an eye's hidden area mesh (XR_KHR_visibility_mask) into the base class.
     void QueryHiddenArea(uint32_t eye);
     bool LocateViews(int64_t time, View raw[2], bool* orientationValid, bool* positionValid);
+    // Eye gaze (see EYE GAZE in xr.h). SetupGaze after the session and the VIEW
+    // space exist: picks the source and logs it. SampleGaze on the GT per frame.
+    void SetupGaze(RuntimeInfo& info);
+    bool SetupGazeExt(std::string* why);
+    bool SetupGazeFb(std::string* why);
+    void SampleGaze(int64_t time, GazeSample* out);
+    void DestroyGaze();
     Result EndFrameLocked(int64_t displayTime, const XrCompositionLayerBaseHeader* const* layers, uint32_t layerCount);
     Result StaleOrUnknown(uint64_t frameId);
     Result BeginLocked(FrameRecord& r);
@@ -126,6 +136,23 @@ private:
     PFN_xrEnumerateDisplayRefreshRatesFB pfnEnumRefresh_ = nullptr;
     PFN_xrCreateDebugUtilsMessengerEXT pfnCreateMessenger_ = nullptr;
     PFN_xrDestroyDebugUtilsMessengerEXT pfnDestroyMessenger_ = nullptr;
+
+    // Eye gaze.
+    enum class GazeSource { None, Ext, Fb };
+    bool wantGaze_ = false;
+    bool hasEyeGazeExt_ = false, hasEyeTrackingFb_ = false;  // extensions enabled
+    bool extSupported_ = false, fbSupported_ = false;        // system properties
+    GazeSource gazeSource_ = GazeSource::None;
+    XrActionSet gazeSet_ = XR_NULL_HANDLE;
+    XrAction gazeAction_ = XR_NULL_HANDLE;
+    XrSpace gazeSpace_ = XR_NULL_HANDLE;
+    XrEyeTrackerFB eyeTracker_ = XR_NULL_HANDLE;
+    PFN_xrCreateEyeTrackerFB pfnCreateEyeTracker_ = nullptr;
+    PFN_xrDestroyEyeTrackerFB pfnDestroyEyeTracker_ = nullptr;
+    PFN_xrGetEyeGazesFB pfnGetEyeGazes_ = nullptr;
+    // GT: last reported activity of the gaze input (for one log line per change).
+    int gazeActiveLogged_ = -1;
+    uint64_t gazeActivityChanges_ = 0, gazeErrors_ = 0;
 
     std::string runtimeJson_;
 };
@@ -336,6 +363,18 @@ Result OpenXrBackend::InitImpl(const InitDesc& desc) {
         enable.push_back(XR_EXT_DEBUG_UTILS_EXTENSION_NAME);
         hasDebugUtils_ = true;
     }
+    wantGaze_ = desc.eyeGaze;
+    if (wantGaze_) {
+        // Both when offered: which one is usable is known only from the system properties.
+        if (has(XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME)) {
+            enable.push_back(XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME);
+            hasEyeGazeExt_ = true;
+        }
+        if (has(XR_FB_EYE_TRACKING_SOCIAL_EXTENSION_NAME)) {
+            enable.push_back(XR_FB_EYE_TRACKING_SOCIAL_EXTENSION_NAME);
+            hasEyeTrackingFb_ = true;
+        }
+    }
     for (const char* e : enable) info.enabledExtensions.emplace_back(e);
 
     // ---- instance ----
@@ -370,6 +409,9 @@ Result OpenXrBackend::InitImpl(const InitDesc& desc) {
         hasRefreshRate_ = getProc("xrGetDisplayRefreshRateFB", &pfnGetRefresh_) && getProc("xrEnumerateDisplayRefreshRatesFB", &pfnEnumRefresh_);
     }
     if (hasVisibilityMask_) hasVisibilityMask_ = getProc("xrGetVisibilityMaskKHR", &pfnGetVisibilityMask_);
+    if (hasEyeTrackingFb_)
+        hasEyeTrackingFb_ = getProc("xrCreateEyeTrackerFB", &pfnCreateEyeTracker_) && getProc("xrDestroyEyeTrackerFB", &pfnDestroyEyeTracker_) &&
+                            getProc("xrGetEyeGazesFB", &pfnGetEyeGazes_);
     if (hasDebugUtils_ && getProc("xrCreateDebugUtilsMessengerEXT", &pfnCreateMessenger_) &&
         getProc("xrDestroyDebugUtilsMessengerEXT", &pfnDestroyMessenger_)) {
         XrDebugUtilsMessengerCreateInfoEXT ci{XR_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};
@@ -400,7 +442,19 @@ Result OpenXrBackend::InitImpl(const InitDesc& desc) {
     }
     if (!Check(xr, "xrGetSystem")) return Result::SystemUnavailable;
     XrSystemProperties sp{XR_TYPE_SYSTEM_PROPERTIES};
+    XrSystemEyeGazeInteractionPropertiesEXT gazeProps{XR_TYPE_SYSTEM_EYE_GAZE_INTERACTION_PROPERTIES_EXT};
+    XrSystemEyeTrackingPropertiesFB fbProps{XR_TYPE_SYSTEM_EYE_TRACKING_PROPERTIES_FB};
+    {
+        void** tail = &sp.next;
+        if (hasEyeGazeExt_) {
+            *tail = &gazeProps;
+            tail = &gazeProps.next;
+        }
+        if (hasEyeTrackingFb_) *tail = &fbProps;
+    }
     if (Check(xrGetSystemProperties(instance_, systemId_, &sp), "xrGetSystemProperties")) {
+        extSupported_ = hasEyeGazeExt_ && gazeProps.supportsEyeGazeInteraction != XR_FALSE;
+        fbSupported_ = hasEyeTrackingFb_ && fbProps.supportsEyeTracking != XR_FALSE;
         info.systemName = sp.systemName;
         info.vendorId = sp.vendorId;
         info.maxSwapchainWidth = sp.graphicsProperties.maxSwapchainImageWidth;
@@ -489,6 +543,7 @@ Result OpenXrBackend::InitImpl(const InitDesc& desc) {
     if (!Check(xrCreateReferenceSpace(session_, &rsci, &localSpace_), "xrCreateReferenceSpace(LOCAL)")) return Result::Error;
     rsci.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
     if (!Check(xrCreateReferenceSpace(session_, &rsci, &viewSpace_), "xrCreateReferenceSpace(VIEW)")) return Result::Error;
+    SetupGaze(info);  // never fails the session: without a usable source the gaze is simply not available
 
     // ---- swapchain format ----
     {
@@ -606,6 +661,7 @@ void OpenXrBackend::DestroyAll() {
         }
     }
     for (auto& e : eyes_) DestroySwapchain(e);
+    DestroyGaze();
     if (viewSpace_ != XR_NULL_HANDLE) xrDestroySpace(viewSpace_);
     if (localSpace_ != XR_NULL_HANDLE) xrDestroySpace(localSpace_);
     viewSpace_ = localSpace_ = XR_NULL_HANDLE;
@@ -775,6 +831,206 @@ bool OpenXrBackend::LocateViews(int64_t time, View raw[2], bool* orientationVali
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Eye gaze
+// ---------------------------------------------------------------------------
+void OpenXrBackend::SetupGaze(RuntimeInfo& info) {
+    gazeSource_ = GazeSource::None;
+    if (!wantGaze_) return;
+    std::string why;
+    std::string notes;
+    auto note = [&](const std::string& s) { notes += (notes.empty() ? "" : "; ") + s; };
+    if (!hasEyeGazeExt_) {
+        note("XR_EXT_eye_gaze_interaction not offered");
+    } else if (!extSupported_) {
+        note("XR_EXT_eye_gaze_interaction offered, but the system reports supportsEyeGazeInteraction = false (no eye tracker)");
+    } else if (SetupGazeExt(&why)) {
+        gazeSource_ = GazeSource::Ext;
+    } else {
+        note("XR_EXT_eye_gaze_interaction set-up failed: " + why);
+    }
+    if (gazeSource_ == GazeSource::None) {
+        if (!hasEyeTrackingFb_) {
+            note("XR_FB_eye_tracking_social not offered");
+        } else if (!fbSupported_) {
+            note("XR_FB_eye_tracking_social offered, but the system reports supportsEyeTracking = false");
+        } else if (SetupGazeFb(&why)) {
+            gazeSource_ = GazeSource::Fb;
+        } else {
+            note("XR_FB_eye_tracking_social set-up failed: " + why);
+        }
+    }
+    gazeActiveLogged_ = -1;
+    gazeActivityChanges_ = gazeErrors_ = 0;
+    if (gazeSource_ == GazeSource::None) {
+        info.gazeSource.clear();
+        info.gazeNote = notes;
+        DestroyGaze();
+        log_.Info("eye gaze: no source ({})", notes);
+        return;
+    }
+    info.gazeSource = gazeSource_ == GazeSource::Ext ? XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME : XR_FB_EYE_TRACKING_SOCIAL_EXTENSION_NAME;
+    info.gazeNote = notes;
+    log_.Info("eye gaze: source {}{}", info.gazeSource, notes.empty() ? std::string() : " (" + notes + ")");
+}
+
+bool OpenXrBackend::SetupGazeExt(std::string* why) {
+    XrActionSetCreateInfo asci{XR_TYPE_ACTION_SET_CREATE_INFO};
+    strncpy_s(asci.actionSetName, "ff7vr_eye_gaze", _TRUNCATE);
+    strncpy_s(asci.localizedActionSetName, "Eye gaze", _TRUNCATE);
+    XrResult r = xrCreateActionSet(instance_, &asci, &gazeSet_);
+    if (XR_FAILED(r)) {
+        *why = "xrCreateActionSet: " + Name(r);
+        return false;
+    }
+    XrActionCreateInfo aci{XR_TYPE_ACTION_CREATE_INFO};
+    aci.actionType = XR_ACTION_TYPE_POSE_INPUT;
+    strncpy_s(aci.actionName, "gaze", _TRUNCATE);
+    strncpy_s(aci.localizedActionName, "Gaze", _TRUNCATE);
+    r = xrCreateAction(gazeSet_, &aci, &gazeAction_);
+    if (XR_FAILED(r)) {
+        *why = "xrCreateAction: " + Name(r);
+        return false;
+    }
+    XrPath profile = XR_NULL_PATH, pose = XR_NULL_PATH;
+    if (XR_FAILED(r = xrStringToPath(instance_, "/interaction_profiles/ext/eye_gaze_interaction", &profile)) ||
+        XR_FAILED(r = xrStringToPath(instance_, "/user/eyes_ext/input/gaze_ext/pose", &pose))) {
+        *why = "xrStringToPath: " + Name(r);
+        return false;
+    }
+    XrActionSuggestedBinding binding{gazeAction_, pose};
+    XrInteractionProfileSuggestedBinding sb{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+    sb.interactionProfile = profile;
+    sb.countSuggestedBindings = 1;
+    sb.suggestedBindings = &binding;
+    r = xrSuggestInteractionProfileBindings(instance_, &sb);
+    if (XR_FAILED(r)) {
+        *why = "xrSuggestInteractionProfileBindings: " + Name(r);
+        return false;
+    }
+    // The only action set of this application: attaching it here means no other action
+    // set can be attached later in this session (OpenXR allows one attach per session).
+    XrSessionActionSetsAttachInfo ai{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+    ai.countActionSets = 1;
+    ai.actionSets = &gazeSet_;
+    r = xrAttachSessionActionSets(session_, &ai);
+    if (XR_FAILED(r)) {
+        *why = "xrAttachSessionActionSets: " + Name(r);
+        return false;
+    }
+    XrActionSpaceCreateInfo sci{XR_TYPE_ACTION_SPACE_CREATE_INFO};
+    sci.action = gazeAction_;
+    sci.poseInActionSpace.orientation.w = 1.0f;
+    r = xrCreateActionSpace(session_, &sci, &gazeSpace_);
+    if (XR_FAILED(r)) {
+        *why = "xrCreateActionSpace: " + Name(r);
+        return false;
+    }
+    return true;
+}
+
+bool OpenXrBackend::SetupGazeFb(std::string* why) {
+    XrEyeTrackerCreateInfoFB ci{XR_TYPE_EYE_TRACKER_CREATE_INFO_FB};
+    const XrResult r = pfnCreateEyeTracker_(session_, &ci, &eyeTracker_);
+    if (XR_FAILED(r)) {
+        eyeTracker_ = XR_NULL_HANDLE;
+        *why = "xrCreateEyeTrackerFB: " + Name(r);
+        return false;
+    }
+    return true;
+}
+
+void OpenXrBackend::DestroyGaze() {
+    if (eyeTracker_ != XR_NULL_HANDLE && pfnDestroyEyeTracker_) pfnDestroyEyeTracker_(eyeTracker_);
+    eyeTracker_ = XR_NULL_HANDLE;
+    if (gazeSpace_ != XR_NULL_HANDLE) xrDestroySpace(gazeSpace_);
+    gazeSpace_ = XR_NULL_HANDLE;
+    if (gazeSet_ != XR_NULL_HANDLE) xrDestroyActionSet(gazeSet_);  // destroys its action too
+    gazeSet_ = XR_NULL_HANDLE;
+    gazeAction_ = XR_NULL_HANDLE;
+    gazeSource_ = GazeSource::None;
+    hasEyeGazeExt_ = hasEyeTrackingFb_ = extSupported_ = fbSupported_ = false;
+    pfnCreateEyeTracker_ = nullptr;
+    pfnDestroyEyeTracker_ = nullptr;
+    pfnGetEyeGazes_ = nullptr;
+}
+
+void OpenXrBackend::SampleGaze(int64_t time, GazeSample* out) {
+    *out = GazeSample{};
+    out->available = true;
+    out->displayTime = time;
+    bool active = false;
+    if (gazeSource_ == GazeSource::Ext) {
+        XrActiveActionSet as{gazeSet_, XR_NULL_PATH};
+        XrActionsSyncInfo si{XR_TYPE_ACTIONS_SYNC_INFO};
+        si.countActiveActionSets = 1;
+        si.activeActionSets = &as;
+        XrResult r = xrSyncActions(session_, &si);  // XR_SESSION_NOT_FOCUSED: every action inactive
+        if (XR_FAILED(r)) {
+            if (PowerOfTwo(++gazeErrors_)) log_.Warn("eye gaze: xrSyncActions failed: {} ({} times)", Name(r), gazeErrors_);
+            return;
+        }
+        XrActionStateGetInfo gi{XR_TYPE_ACTION_STATE_GET_INFO};
+        gi.action = gazeAction_;
+        XrActionStatePose ps{XR_TYPE_ACTION_STATE_POSE};
+        r = xrGetActionStatePose(session_, &gi, &ps);
+        active = XR_SUCCEEDED(r) && ps.isActive != XR_FALSE;
+        if (active) {
+            XrEyeGazeSampleTimeEXT st{XR_TYPE_EYE_GAZE_SAMPLE_TIME_EXT};
+            XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
+            loc.next = &st;
+            r = xrLocateSpace(gazeSpace_, viewSpace_, time, &loc);
+            if (XR_SUCCEEDED(r)) {
+                constexpr XrSpaceLocationFlags kTracked = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT;
+                out->tracked = (loc.locationFlags & kTracked) == kTracked;
+                out->nominal = (loc.locationFlags & XR_SPACE_LOCATION_POSITION_TRACKED_BIT) != 0;
+                out->sampleTime = st.time;
+                if (out->tracked) out->direction = QuatRotate(ToPose(loc.pose).orientation, Vec3{0.0f, 0.0f, -1.0f});
+            } else if (PowerOfTwo(++gazeErrors_)) {
+                log_.Warn("eye gaze: xrLocateSpace failed: {} ({} times)", Name(r), gazeErrors_);
+            }
+        }
+    } else if (gazeSource_ == GazeSource::Fb) {
+        XrEyeGazesInfoFB gi{XR_TYPE_EYE_GAZES_INFO_FB};
+        gi.baseSpace = viewSpace_;
+        gi.time = time;
+        XrEyeGazesFB g{XR_TYPE_EYE_GAZES_FB};
+        const XrResult r = pfnGetEyeGazes_(eyeTracker_, &gi, &g);
+        if (XR_FAILED(r)) {
+            if (PowerOfTwo(++gazeErrors_)) log_.Warn("eye gaze: xrGetEyeGazesFB failed: {} ({} times)", Name(r), gazeErrors_);
+            return;
+        }
+        active = true;
+        Vec3 sum{};
+        int n = 0;
+        for (const XrEyeGazeFB& e : g.gaze) {
+            if (!e.isValid) continue;
+            const Vec3 d = QuatRotate(ToPose(e.gazePose).orientation, Vec3{0.0f, 0.0f, -1.0f});
+            sum = Vec3{sum.x + d.x, sum.y + d.y, sum.z + d.z};
+            ++n;
+        }
+        const float len = std::sqrt(sum.x * sum.x + sum.y * sum.y + sum.z * sum.z);
+        if (n > 0 && len > 1e-4f && std::isfinite(len)) {
+            out->tracked = true;
+            out->nominal = n == 2;
+            out->direction = Vec3{sum.x / len, sum.y / len, sum.z / len};
+            out->sampleTime = g.time;
+        }
+    }
+    if (out->tracked) {
+        const Vec3& d = out->direction;
+        if (!(std::isfinite(d.x) && std::isfinite(d.y) && std::isfinite(d.z))) {
+            out->tracked = false;
+            out->direction = Vec3{0.0f, 0.0f, -1.0f};
+        }
+    }
+    if (int(active) != gazeActiveLogged_) {
+        gazeActiveLogged_ = int(active);
+        if (PowerOfTwo(++gazeActivityChanges_))
+            log_.Info("eye gaze: input {} ({} changes)", active ? "active" : "inactive (no permission, not focused, or no tracker)", gazeActivityChanges_);
+    }
+}
+
 Result OpenXrBackend::WaitFrame(FrameInfo& info) {
     info = FrameInfo{};
     if (!initialized_) return Result::NotInitialized;
@@ -804,6 +1060,8 @@ Result OpenXrBackend::WaitFrame(FrameInfo& info) {
         headP = (head.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0;
         rawHead = ToPose(head.pose);
     }
+    GazeSample gaze;
+    if (gazeSource_ != GazeSource::None) SampleGaze(fs.predictedDisplayTime, &gaze);
     {
         std::lock_guard lk(frameMutex_);
         FrameRecord& r = NewFrameLocked();
@@ -819,6 +1077,7 @@ Result OpenXrBackend::WaitFrame(FrameInfo& info) {
         r.recenter = UpdateRecenter(r.rawHead, r.orientationValid);
         FillFrameInfo(r, info);
     }
+    info.gaze = gaze;
     {
         std::lock_guard lk(infoMutex_);
         info_.lastPredictedDisplayPeriod = fs.predictedDisplayPeriod;

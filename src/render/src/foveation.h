@@ -44,6 +44,10 @@ bool Wanted();
 void SceneBegin(const FoveationEye eyes[2]);
 void SceneEnd();
 
+// Any thread. [foveation] eye_tracking is 1 or auto (and foveation is on): the XR
+// session asks the runtime for an eye tracker when it starts.
+bool EyeTrackingRequested();
+
 // Dev command `fov ...`.
 std::string Command(const std::string& args);
 

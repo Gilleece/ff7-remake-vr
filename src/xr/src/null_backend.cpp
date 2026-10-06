@@ -161,7 +161,13 @@ public:
             info_.runtimeFormats = {fmt};
             info_.orientationTracking = info_.positionTracking = true;
             info_.lastPredictedDisplayPeriod = Period();
+            gazeEnabled_ = desc.eyeGaze;
+            if (gazeEnabled_) {
+                info_.gazeSource = "simulated";
+                info_.gazeNote = "not tracked until 'xr-sim gaze'";
+            }
         }
+        if (gazeEnabled_) log_.Info("eye gaze: source simulated (not tracked until 'xr-sim gaze <yaw> <pitch>' or 'xr-sim gaze sweep')");
         if (opt_.hiddenArea) {
             Pose none;
             View v[2];
@@ -222,6 +228,7 @@ public:
                 sim_.recenterEventRequested = false;
                 if (sim_.loseOrientation) --sim_.loseOrientation;
                 if (sim_.losePosition) --sim_.losePosition;
+                if (sim_.gazeBlink) --sim_.gazeBlink;
             }
             // The emulated tracker: scripted motion, then the head pose set with `head`.
             const Pose tracker = PoseMultiply(sim.head, HeadPose(r.id));
@@ -269,6 +276,7 @@ public:
             lastP_ = r.positionValid;
             lastId_ = r.id;
             FillFrameInfo(r, info);
+            if (gazeEnabled_) SimulatedGaze(sim, r, &info.gaze);
         }
         CountStat(&FrameStats::framesWaited);
         return Result::Ok;
@@ -428,6 +436,10 @@ public:
     //   recenter-event [nopose] [delay <frames>]  the runtime's own recenter: LOCAL moves to the current
     //                                            leveled head; event with or without poseInPreviousSpace
     //   lose orientation|position <frames>       the next frames report that part invalid (values NaN)
+    //   gaze <yaw> <pitch> | off | sweep [radius deg] [period s] | blink <frames> | status
+    //                                            the simulated eye tracker (with InitDesc::eyeGaze): a fixed gaze in
+    //                                            head space (yaw + right, pitch + up), not tracked, a circle around
+    //                                            the view axis, or a short loss of tracking
     std::string Simulate(std::string_view command) override {
         std::vector<std::string> a;
         {
@@ -448,7 +460,7 @@ public:
         };
         const char* usage =
             "err usage: xr-sim status | head <yaw deg> [pitch deg] [x y z m] | recenter-event [nopose] [delay <frames>] | lose "
-            "orientation|position <frames>";
+            "orientation|position <frames> | gaze <yaw> <pitch> | gaze off | gaze sweep [radius deg] [period s] | gaze blink <frames>";
         if (!initialized_) return "err null backend not initialised";
         if (a.empty() || a[0] == "status") {
             std::lock_guard lk(frameMutex_);
@@ -517,6 +529,54 @@ public:
             log_.Info("null backend: the next {} frames report the {} invalid", static_cast<uint32_t>(frames), a[1]);
             return std::format("ok the next {} frames report the {} invalid", static_cast<uint32_t>(frames), a[1]);
         }
+        if (a[0] == "gaze") {
+            const char* gazeUsage =
+                "err usage: xr-sim gaze <yaw deg, + right> <pitch deg, + up> | gaze off | gaze sweep [radius deg] [period s] | gaze blink <frames> | "
+                "gaze status";
+            if (!gazeEnabled_) return "err no simulated eye tracker in this session ([foveation] eye_tracking = 0 when the session started)";
+            if (a.size() == 1 || a[1] == "status") {
+                std::lock_guard lk(frameMutex_);
+                std::lock_guard sl(simMutex_);
+                const Vec3& d = lastGaze_.direction;
+                return std::format("ok gaze {} ({}), direction ({:.3f}, {:.3f}, {:.3f}) = yaw {:.1f} pitch {:.1f} deg, blink {} frames",
+                                   sim_.gazeMode == 0 ? "off" : sim_.gazeMode == 1 ? "fixed" : "sweep", lastGaze_.tracked ? "tracked" : "not tracked",
+                                   d.x, d.y, d.z, std::atan2(d.x, -d.z) * kRadToDeg, std::asin(std::clamp(d.y, -1.0f, 1.0f)) * kRadToDeg,
+                                   sim_.gazeBlink);
+            }
+            std::string reply;
+            {
+                std::lock_guard sl(simMutex_);
+                if (a[1] == "off" && a.size() == 2) {
+                    sim_.gazeMode = 0;
+                    reply = "ok gaze not tracked";
+                } else if (a[1] == "sweep" && a.size() <= 4) {
+                    double radius = 15, period = 4;
+                    if ((a.size() > 2 && (!num(a[2], &radius) || radius < 0 || radius > 60)) ||
+                        (a.size() > 3 && (!num(a[3], &period) || period < 0.1 || period > 600)))
+                        return gazeUsage;
+                    sim_.gazeMode = 2;
+                    sim_.sweepRadiusDeg = radius;
+                    sim_.sweepPeriodS = period;
+                    reply = std::format("ok gaze sweeps a circle of {:.1f} deg around the view axis every {:.2f} s", radius, period);
+                } else if (a[1] == "blink" && a.size() == 3) {
+                    double frames = 0;
+                    if (!num(a[2], &frames) || frames < 0 || frames > 1e6) return gazeUsage;
+                    sim_.gazeBlink = static_cast<uint32_t>(frames);
+                    reply = std::format("ok the next {} frames report the gaze not tracked", sim_.gazeBlink);
+                } else if (a.size() == 3) {
+                    double yaw = 0, pitch = 0;
+                    if (!num(a[1], &yaw) || !num(a[2], &pitch) || std::fabs(yaw) > 80 || std::fabs(pitch) > 80) return gazeUsage;
+                    sim_.gazeMode = 1;
+                    sim_.gazeYawDeg = yaw;
+                    sim_.gazePitchDeg = pitch;
+                    reply = std::format("ok gaze yaw {:.1f} pitch {:.1f} deg (head space)", yaw, pitch);
+                } else {
+                    return gazeUsage;
+                }
+            }
+            log_.Info("null backend: {}", reply.substr(3));
+            return reply;
+        }
         return usage;
     }
 
@@ -527,7 +587,41 @@ private:
         bool recenterPoseValid = true;
         uint32_t recenterDelayFrames = 3;
         uint32_t loseOrientation = 0, losePosition = 0;
+        // Eye gaze (with InitDesc::eyeGaze): 0 not tracked, 1 fixed direction, 2 circle.
+        int gazeMode = 0;
+        double gazeYawDeg = 0, gazePitchDeg = 0;            // mode 1; yaw positive to the right, pitch positive up
+        double sweepRadiusDeg = 15, sweepPeriodS = 4;        // mode 2
+        uint32_t gazeBlink = 0;                              // the next frames report the gaze not tracked
     };
+    bool gazeEnabled_ = false;
+    GazeSample lastGaze_{};  // GT, read by `gaze status` under frameMutex_
+
+    static Vec3 GazeDirection(double yawDeg, double pitchDeg) {
+        const double y = yawDeg * kDegToRad, p = pitchDeg * kDegToRad;
+        return Vec3{float(std::sin(y) * std::cos(p)), float(std::sin(p)), float(-std::cos(y) * std::cos(p))};
+    }
+
+    // GT, under frameMutex_: the simulated eye tracker for frame r.
+    void SimulatedGaze(const Sim& sim, const FrameRecord& r, GazeSample* out) {
+        *out = GazeSample{};
+        out->available = true;
+        out->displayTime = r.displayTime;
+        if (sim.gazeMode != 0 && sim.gazeBlink == 0) {
+            double yaw = sim.gazeYawDeg, pitch = sim.gazePitchDeg;
+            if (sim.gazeMode == 2) {
+                const double t = static_cast<double>(r.id) / opt_.refreshHz;
+                const double a = 2.0 * 3.141592653589793 * t / sim.sweepPeriodS;
+                yaw = sim.sweepRadiusDeg * std::cos(a);
+                pitch = sim.sweepRadiusDeg * std::sin(a);
+            }
+            out->tracked = true;
+            out->nominal = true;
+            out->direction = GazeDirection(yaw, pitch);
+            // Like a tracker that cannot predict: the newest sample, taken now, older than the display time.
+            out->sampleTime = QpcNowNs();
+        }
+        lastGaze_ = *out;
+    }
     std::mutex simMutex_;
     Sim sim_{};  // under simMutex_
     // GT (read by `status` under frameMutex_): the emulated LOCAL origin in tracker space.

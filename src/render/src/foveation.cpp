@@ -18,8 +18,10 @@
 #include <array>
 #include <atomic>
 #include <charconv>
+#include <chrono>
 #include <cmath>
 #include <format>
+#include <condition_variable>
 #include <mutex>
 #include <sstream>
 #include <vector>
@@ -33,6 +35,8 @@ using Microsoft::WRL::ComPtr;
 
 enum class Corners { Off, Coarse, Cull };
 enum class Passes { Scene, NoGBuffer, All };
+enum class EyeTracking { Off, On, Auto };
+const char* EyeTrackingText(EyeTracking e) { return e == EyeTracking::On ? "1" : e == EyeTracking::Auto ? "auto" : "0"; }
 
 struct Settings {
     bool enabled = true;
@@ -46,6 +50,10 @@ struct Settings {
     Corners corners = Corners::Coarse;
     Passes passes = Passes::Scene;
     std::vector<int> skipFormats{35};  // DXGI formats of render target 0 that never get the mask (35: velocity)
+    // Eye-tracked foveation: the rings follow the gaze (docs/render.md, "Eye-tracked foveation").
+    EyeTracking eyeTracking = EyeTracking::Off;
+    float gazeMarginDeg = 5.0f;   // added to the full-rate zone's radius while the gaze drives the centre
+    float gazeSmoothing = 0.5f;   // 0 = none; weight of the previous centre for small gaze movements
 };
 
 struct Preset {
@@ -138,7 +146,11 @@ std::string Describe(const Settings& s) {
     return std::format("preset {}: 1x1 inside {:.2f}, {} to {:.2f}, {} to {:.2f}, {} beyond; hidden area {}; passes {}{}", s.preset, s.radius[0],
                        RateText(s.rate[0]), s.radius[1], RateText(s.rate[1]), s.radius[2], RateText(s.rate[2]), CornersText(s.corners),
                        s.passes == Passes::All ? "all (size rule only)" : s.passes == Passes::NoGBuffer ? "scene without the G-buffer pass" : "scene",
-                       s.skipFormats.empty() ? std::string() : std::format(", skipping {} render target format(s)", s.skipFormats.size()));
+                       s.skipFormats.empty() ? std::string() : std::format(", skipping {} render target format(s)", s.skipFormats.size())) +
+           (s.eyeTracking == EyeTracking::Off
+                ? std::string()
+                : std::format("; eye tracking {} (gaze margin {:.1f} deg, smoothing {:.2f})", EyeTrackingText(s.eyeTracking), s.gazeMarginDeg,
+                              s.gazeSmoothing));
 }
 
 // ---------------------------------------------------------------- state
@@ -186,6 +198,38 @@ struct State {
     uint32_t tilesX = 0, tilesY = 0;
     double workFraction = 1.0;  // pixel shader invocations relative to full rate, inside the eye rects
     std::string surfaceText;
+    // Per tile of the layout: the view direction of its centre in each eye it overlaps (eye
+    // space, unit length), so a new ring centre needs one dot product per tile and eye.
+    struct TileInfo {
+        float dir[2][3];
+        uint8_t eyes = 0;    // bit per eye the tile overlaps
+        uint8_t hidden = 0;  // bit per eye whose hidden area mesh covers the tile entirely
+        int8_t owner = -1;   // the eye whose rect holds the tile centre (for the pixel shares)
+    };
+    std::vector<TileInfo> tileInfo;
+    std::vector<uint8_t> tiles;  // the surface's content
+    float projScaleX[2]{};       // per eye, for the ring angles
+    // Ring centre the surface was built for, per eye (eye-space unit direction and pixel
+    // position), and whether the gaze drove it.
+    float centreDir[2][3]{};
+    float centrePx[2][2]{};
+    bool centreFromGaze = false;
+    // Gaze-driven centre (context thread).
+    struct Gaze {
+        enum class Mode { Fixed, Gaze, Holding } mode = Mode::Fixed;
+        uint64_t lastFrameId = 0;  // last gaze sample taken (XR frame)
+        int trackedRun = 0;        // consecutive tracked samples while Fixed
+        int64_t lostQpc = 0;       // Holding since
+        bool haveSmoothed = false;
+        float smoothed[3]{0, 0, -1};  // head space
+        bool loggedNoSource = false;
+        // Statistics since the session start (and since the last `fov gaze status` for the rate).
+        uint64_t rebuilds = 0, rebuildsWindow = 0, switches = 0, samples = 0, snaps = 0;
+        int64_t windowStartQpc = 0;
+        double rebuildMsTotal = 0, rebuildMsMax = 0, rebuildMsLast = 0;
+        double ageMs = -1;
+        bool tracked = false;
+    } gaze;
     // Per frame.
     bool open = false;      // inside the scene window, mask allowed
     bool timing = false;    // inside the scene window, scene timer running
@@ -216,6 +260,13 @@ struct State {
 State g;
 std::mutex g_statusMutex;  // guards the copies below, for Status() from the pipe thread
 std::string g_statusLine = "not initialised";
+std::string g_gazeLine = "no stereo frame yet";  // `fov gaze status`, refreshed by the context thread
+std::atomic<bool> g_eyeTrackingRequested{false};  // [foveation] eye_tracking != 0 when the settings were read
+// `fov gaze dump`: the context thread reads the surface back and writes it as a PNG.
+std::mutex g_dumpMutex;
+std::condition_variable g_dumpCv;
+std::string g_dumpPath, g_dumpResult;  // under g_dumpMutex
+bool g_dumpRequested = false, g_dumpDone = false;
 
 Series g_cpuSeries{"foveation context hooks (CPU per frame)"};
 std::atomic<float> g_gpuFrameMs{0.0f};
@@ -475,6 +526,89 @@ void RetireSurface(ID3D11DeviceContext* ctx) {
     g.surfaceView.Reset();
 }
 
+// Ring angles of eye e (radians from the ring centre), from the preset's radii (fractions of
+// half the eye width, as tangents on the image plane: angle = atan(r / projection x scale)).
+// While the gaze drives the centre, the full-rate zone is widened by the gaze margin.
+void RingCosines(int e, bool fromGaze, float out[3]) {
+    const Settings& s = g.settings;
+    const float sx = g.projScaleX[e] > 0 ? g.projScaleX[e] : 1.0f;
+    float a[3];
+    for (int i = 0; i < 3; ++i) a[i] = std::atan(s.radius[i] / sx);
+    if (fromGaze) {
+        a[0] += s.gazeMarginDeg * 0.017453292f;
+        a[1] = std::max(a[1], a[0]);
+        a[2] = std::max(a[2], a[1]);
+    }
+    for (int i = 0; i < 3; ++i) out[i] = std::cos(std::min(a[i], 3.1f));
+}
+
+// Fills g.tiles from g.tileInfo for the current ring centres (g.centreDir) and updates the
+// pixel shares. CPU only.
+void ClassifyTiles() {
+    const Settings& s = g.settings;
+    float cosR[2][3];
+    for (int e = 0; e < 2; ++e) RingCosines(e, g.centreFromGaze, cosR[e]);
+    double count[2][5]{};
+    bool hiddenUsed = false;
+    g.tiles.assign(g.tileInfo.size(), kIndexFull);
+    for (size_t i = 0; i < g.tileInfo.size(); ++i) {
+        const State::TileInfo& t = g.tileInfo[i];
+        if (!t.eyes) continue;  // outside both eyes: never drawn
+        // A tile can overlap both eyes when the eye width is not a multiple of 16: it then
+        // takes the finer rate of the two and is hidden only if both eyes hide it.
+        uint8_t index = 0xFF;
+        for (int e = 0; e < 2; ++e) {
+            if (!(t.eyes & (1u << e))) continue;
+            uint8_t r = kIndexHidden;
+            if (!(t.hidden & (1u << e))) {
+                const float* d = t.dir[e];
+                const float* c = g.centreDir[e];
+                const float cosA = d[0] * c[0] + d[1] * c[1] + d[2] * c[2];
+                r = cosA > cosR[e][0] ? 0 : cosA > cosR[e][1] ? 1 : cosA > cosR[e][2] ? 2 : 3;
+            }
+            if (index == 0xFF || (r != kIndexHidden && (index == kIndexHidden || r < index))) index = r;
+        }
+        g.tiles[i] = index;
+        if (index == kIndexHidden) hiddenUsed = true;
+        if (t.owner >= 0) count[t.owner][index] += 256.0;
+    }
+    const int px[5] = {1, RatePixels(s.rate[0]), RatePixels(s.rate[1]), RatePixels(s.rate[2]),
+                       s.corners == Corners::Cull ? 0 : s.corners == Corners::Coarse ? 16 : RatePixels(s.rate[2])};
+    double total = 0, work = 0, share[5]{};
+    for (int e = 0; e < 2; ++e)
+        for (int i = 0; i < 5; ++i) {
+            total += count[e][i];
+            share[i] += count[e][i];
+            work += px[i] ? count[e][i] / px[i] : 0.0;
+        }
+    if (total <= 0) total = 1;
+    g.workFraction = work / total;
+    g.surfaceText = std::format("surface {}x{} tiles for {}x{}; pixels: full {:.1f} %, ring 1 {:.1f} %, ring 2 {:.1f} %, outside {:.1f} %, hidden {:.1f} %{}; "
+                                "pixel shading work {:.1f} % of full rate; ring centre {}",
+                                g.tilesX, g.tilesY, g.layoutW, g.layoutH, 100 * share[0] / total, 100 * share[1] / total, 100 * share[2] / total,
+                                100 * share[3] / total, 100 * share[4] / total, hiddenUsed ? "" : " (no hidden area mesh)", 100 * g.workFraction,
+                                g.centreFromGaze ? std::format("gaze (+{:.1f} deg full-rate margin)", s.gazeMarginDeg) : std::string("fixed (optical centre)"));
+}
+
+// Eye-space unit direction -> pixel position in eye e's rect.
+void DirToPixel(int e, const float d[3], float* px, float* py) {
+    const float z = d[2] < -1e-3f ? -d[2] : 1e-3f;
+    MapOf(g.eyes[e]).ToPixel(d[0] / z, d[1] / z, px, py);
+}
+
+// Sets the ring centres: the eyes' optical centres (view axes), or `gazeDir[e]` (eye space).
+void SetCentres(const float (*gazeDir)[3]) {
+    g.centreFromGaze = gazeDir != nullptr;
+    for (int e = 0; e < 2; ++e) {
+        const float axis[3] = {0.0f, 0.0f, -1.0f};
+        const float* d = gazeDir ? gazeDir[e] : axis;
+        std::copy(d, d + 3, g.centreDir[e]);
+        DirToPixel(e, g.centreDir[e], &g.centrePx[e][0], &g.centrePx[e][1]);
+    }
+}
+
+// Builds the layout's tile directions and hidden flags, creates the surface and fills it for
+// the current centres (g.centreDir; the caller sets them with SetCentres first).
 bool BuildSurface(ID3D11DeviceContext* ctx) {
     uint32_t right = std::max(g.eyes[0].rect.x + g.eyes[0].rect.width, g.eyes[1].rect.x + g.eyes[1].rect.width);
     uint32_t bottom = std::max(g.eyes[0].rect.y + g.eyes[0].rect.height, g.eyes[1].rect.y + g.eyes[1].rect.height);
@@ -492,48 +626,45 @@ bool BuildSurface(ID3D11DeviceContext* ctx) {
     g.layoutH = bottom;
     // Covers render targets up to 16 pixels larger than the eye rects (the engine rounds up).
     const uint32_t tilesX = (right + 16 + 15) / 16, tilesY = (bottom + 16 + 15) / 16;
-    std::vector<uint8_t> tiles(size_t(tilesX) * tilesY, kIndexFull);
     const Settings& s = g.settings;
-    // Per eye: pixel count at each index, for the work estimate.
-    double count[2][5]{};
-    bool hiddenUsed = false;
     // Per eye: tiles entirely inside its hidden area mesh.
     std::vector<uint8_t> hidden[2];
     for (int e = 0; e < 2; ++e) {
         xr::HiddenAreaMesh mesh;
         uint32_t ver = 0;
         if (s.corners != Corners::Off && XrController::Get().GetHiddenArea(e, &mesh, &ver)) {
-            hidden[e].assign(tiles.size(), kIndexFull);
+            hidden[e].assign(size_t(tilesX) * tilesY, kIndexFull);
             MarkHidden(hidden[e], tilesX, tilesY, MapOf(g.eyes[e]), mesh);
         }
+        g.projScaleX[e] = g.eyes[e].projScaleX;
     }
-    const EyeMap maps[2] = {MapOf(g.eyes[0]), MapOf(g.eyes[1])};
+    g.tilesX = tilesX;
+    g.tilesY = tilesY;
+    g.tileInfo.assign(size_t(tilesX) * tilesY, State::TileInfo{});
     for (uint32_t ty = 0; ty < tilesY; ++ty)
         for (uint32_t tx = 0; tx < tilesX; ++tx) {
-            // A tile can overlap both eyes when the eye width is not a multiple of 16: it then
-            // takes the finer rate of the two and is hidden only if both eyes hide it.
+            State::TileInfo& t = g.tileInfo[size_t(ty) * tilesX + tx];
             const float x0 = float(tx) * 16.0f, y0 = float(ty) * 16.0f;
-            uint8_t index = 0xFF;
-            int owner = -1;
             for (int e = 0; e < 2; ++e) {
                 const auto& r = g.eyes[e].rect;
                 const float rx0 = float(r.x), ry0 = float(r.y), rx1 = float(r.x + r.width), ry1 = float(r.y + r.height);
                 if (x0 + 16.0f <= rx0 || x0 >= rx1 || y0 + 16.0f <= ry0 || y0 >= ry1) continue;
-                uint8_t t = kIndexHidden;
-                if (hidden[e].empty() || hidden[e][size_t(ty) * tilesX + tx] != kIndexHidden) {
-                    // Ring from the tile centre, clamped into this eye's rect.
-                    const float cx = std::clamp(x0 + 8.0f, rx0, rx1 - 1.0f), cy = std::clamp(y0 + 8.0f, ry0, ry1 - 1.0f);
-                    const float d = maps[e].Distance(cx, cy);
-                    t = d < s.radius[0] ? 0 : d < s.radius[1] ? 1 : d < s.radius[2] ? 2 : 3;
-                }
-                if (index == 0xFF || (t != kIndexHidden && (index == kIndexHidden || t < index))) index = t;
-                if (x0 + 8.0f >= rx0 && x0 + 8.0f < rx1 && y0 + 8.0f >= ry0 && y0 + 8.0f < ry1) owner = e;
+                t.eyes |= uint8_t(1u << e);
+                if (!hidden[e].empty() && hidden[e][size_t(ty) * tilesX + tx] == kIndexHidden) t.hidden |= uint8_t(1u << e);
+                if (x0 + 8.0f >= rx0 && x0 + 8.0f < rx1 && y0 + 8.0f >= ry0 && y0 + 8.0f < ry1) t.owner = int8_t(e);
+                // Direction of the tile centre, clamped into this eye's rect: pixel -> NDC -> tangents.
+                const float cx = std::clamp(x0 + 8.0f, rx0, rx1 - 1.0f), cy = std::clamp(y0 + 8.0f, ry0, ry1 - 1.0f);
+                const FoveationEye& fe = g.eyes[e];
+                const float nx = (cx - rx0) / float(r.width) * 2.0f - 1.0f, ny = 1.0f - (cy - ry0) / float(r.height) * 2.0f;
+                const float tanX = (nx - fe.projOffsetX) / (fe.projScaleX != 0 ? fe.projScaleX : 1.0f);
+                const float tanY = (ny - fe.projOffsetY) / (fe.projScaleY != 0 ? fe.projScaleY : 1.0f);
+                const float len = std::sqrt(tanX * tanX + tanY * tanY + 1.0f);
+                t.dir[e][0] = tanX / len;
+                t.dir[e][1] = tanY / len;
+                t.dir[e][2] = -1.0f / len;
             }
-            if (index == 0xFF) continue;  // outside both eyes: never drawn
-            tiles[size_t(ty) * tilesX + tx] = index;
-            if (index == kIndexHidden) hiddenUsed = true;
-            if (owner >= 0) count[owner][index] += 256.0;
         }
+    ClassifyTiles();
     D3D11_TEXTURE2D_DESC td{};
     td.Width = tilesX;
     td.Height = tilesY;
@@ -541,9 +672,9 @@ bool BuildSurface(ID3D11DeviceContext* ctx) {
     td.ArraySize = 1;
     td.Format = DXGI_FORMAT_R8_UINT;
     td.SampleDesc.Count = 1;
-    td.Usage = D3D11_USAGE_DEFAULT;
+    td.Usage = D3D11_USAGE_DEFAULT;  // updated in place (UpdateSubresource) when the gaze moves the rings
     td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-    D3D11_SUBRESOURCE_DATA init{tiles.data(), tilesX, 0};
+    D3D11_SUBRESOURCE_DATA init{g.tiles.data(), tilesX, 0};
     ComPtr<ID3D11Texture2D> tex;
     HRESULT hr = g.device->CreateTexture2D(&td, &init, &tex);
     if (FAILED(hr)) {
@@ -565,19 +696,6 @@ bool BuildSurface(ID3D11DeviceContext* ctx) {
     RetireSurface(ctx);
     g.surface = tex;
     g.surfaceView = view;
-    g.tilesX = tilesX;
-    g.tilesY = tilesY;
-    // Relative pixel shader work inside the eye rects, and the share of each region.
-    const int px[5] = {1, RatePixels(s.rate[0]), RatePixels(s.rate[1]), RatePixels(s.rate[2]),
-                       s.corners == Corners::Cull ? 0 : s.corners == Corners::Coarse ? 16 : RatePixels(s.rate[2])};
-    double total = 0, work = 0, share[5]{};
-    for (int e = 0; e < 2; ++e)
-        for (int i = 0; i < 5; ++i) {
-            total += count[e][i];
-            share[i] += count[e][i];
-            work += px[i] ? count[e][i] / px[i] : 0.0;
-        }
-    g.workFraction = total > 0 ? work / total : 1.0;
     std::string centres;
     for (int e = 0; e < 2; ++e) {
         float cx = 0, cy = 0;
@@ -586,12 +704,22 @@ bool BuildSurface(ID3D11DeviceContext* ctx) {
                                e ? "right" : "left", g.eyes[e].rect.x, g.eyes[e].rect.y, g.eyes[e].rect.width, g.eyes[e].rect.height, cx, cy,
                                100.0 * (cx - g.eyes[e].rect.x) / g.eyes[e].rect.width, 100.0 * (cy - g.eyes[e].rect.y) / g.eyes[e].rect.height);
     }
-    g.surfaceText = std::format("surface {}x{} tiles for {}x{}; pixels: full {:.1f} %, ring 1 {:.1f} %, ring 2 {:.1f} %, outside {:.1f} %, hidden {:.1f} %{}; "
-                                "pixel shading work {:.1f} % of full rate",
-                                tilesX, tilesY, g.layoutW, g.layoutH, 100 * share[0] / total, 100 * share[1] / total, 100 * share[2] / total,
-                                100 * share[3] / total, 100 * share[4] / total, hiddenUsed ? "" : " (no hidden area mesh)", 100 * g.workFraction);
     log::info("foveation: {}; {}", g.surfaceText, centres);
     return true;
+}
+
+// The ring centres moved (gaze): refills the existing surface in place.
+void UpdateSurface(ID3D11DeviceContext* ctx) {
+    const int64_t t0 = QpcNow();
+    ClassifyTiles();
+    ctx->UpdateSubresource(g.surface.Get(), 0, nullptr, g.tiles.data(), g.tilesX, 0);
+    const double ms = QpcToMs(QpcNow() - t0);
+    auto& z = g.gaze;
+    ++z.rebuilds;
+    ++z.rebuildsWindow;
+    z.rebuildMsTotal += ms;
+    z.rebuildMsLast = ms;
+    z.rebuildMsMax = std::max(z.rebuildMsMax, ms);
 }
 
 bool EnsureInit(ID3D11Device* device, ID3D11DeviceContext* ctx) {
@@ -713,6 +841,186 @@ void ReadTrace(ID3D11DeviceContext* ctx) {
               total, inWindow, applied);
 }
 
+// ---------------------------------------------------------------- eye tracking
+
+bool PowerOfTwo(uint64_t n) { return n != 0 && (n & (n - 1)) == 0; }
+
+// Hysteresis between the gaze and the fixed centre: the gaze takes over after this many
+// consecutive tracked samples, and a gaze that is no longer tracked keeps its last centre
+// this long (blinks last 100 to 300 ms) before the fixed centre returns.
+constexpr int kEnterSamples = 3;
+constexpr double kHoldMs = 400.0;
+// A gaze step larger than this is a saccade: the centre jumps there without smoothing.
+constexpr float kSnapDeg = 2.0f;
+// The surface is refilled when a ring centre moved by more than this (half a tile).
+constexpr float kRebuildPixels = 8.0f;
+
+const char* GazeModeText(State::Gaze::Mode m) {
+    return m == State::Gaze::Mode::Gaze ? "following the gaze" : m == State::Gaze::Mode::Holding ? "holding the last gaze (not tracked)" : "fixed centre";
+}
+
+// Context thread, once per stereo scene: takes the newest gaze sample, runs the hysteresis
+// and the smoothing, and returns each eye's ring centre (eye space) when the gaze drives it.
+bool UpdateGaze(float out[2][3]) {
+    auto& z = g.gaze;
+    XrController::GazeState gs;
+    const bool have = XrController::Get().GetGaze(&gs);
+    const int64_t now = QpcNow();
+    auto switchTo = [&](State::Gaze::Mode m, const std::string& why) {
+        if (z.mode == m) return;
+        z.mode = m;
+        ++z.switches;
+        if (z.switches <= 16 || PowerOfTwo(z.switches)) log::info("foveation: eye tracking: {} ({}; {} switches)", GazeModeText(m), why, z.switches);
+    };
+    if (!have) {
+        z.tracked = false;
+        if (z.mode != State::Gaze::Mode::Fixed) switchTo(State::Gaze::Mode::Fixed, "the gaze source is gone");
+        if (!z.loggedNoSource && g.settings.eyeTracking == EyeTracking::On && XrController::Get().GetEyeSetup(nullptr)) {
+            z.loggedNoSource = true;
+            log::info("foveation: eye tracking: the XR session has no gaze source{}; the fixed centre is used",
+                      gs.note.empty() ? std::string() : " (" + gs.note + ")");
+        }
+        return false;
+    }
+    if (gs.frameId != z.lastFrameId) {
+        z.lastFrameId = gs.frameId;
+        ++z.samples;
+        z.tracked = gs.tracked;
+        z.ageMs = gs.ageMs;
+        if (gs.tracked) {
+            const xr::Vec3 d = gs.headDirection;
+            if (!z.haveSmoothed) {
+                z.smoothed[0] = d.x, z.smoothed[1] = d.y, z.smoothed[2] = d.z;
+                z.haveSmoothed = true;
+            } else {
+                const float cosA = z.smoothed[0] * d.x + z.smoothed[1] * d.y + z.smoothed[2] * d.z;
+                const float s = std::clamp(g.settings.gazeSmoothing, 0.0f, 0.95f);
+                if (cosA < std::cos(kSnapDeg * 0.017453292f) || s <= 0.0f) {
+                    if (cosA < std::cos(kSnapDeg * 0.017453292f)) ++z.snaps;
+                    z.smoothed[0] = d.x, z.smoothed[1] = d.y, z.smoothed[2] = d.z;
+                } else {
+                    float v[3] = {s * z.smoothed[0] + (1 - s) * d.x, s * z.smoothed[1] + (1 - s) * d.y, s * z.smoothed[2] + (1 - s) * d.z};
+                    const float len = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+                    if (len > 1e-4f)
+                        for (int i = 0; i < 3; ++i) z.smoothed[i] = v[i] / len;
+                }
+            }
+            if (z.mode == State::Gaze::Mode::Fixed) {
+                if (++z.trackedRun >= kEnterSamples) switchTo(State::Gaze::Mode::Gaze, std::format("source {}", gs.source));
+            } else {
+                switchTo(State::Gaze::Mode::Gaze, "tracked again");
+            }
+        } else {
+            z.trackedRun = 0;
+            if (z.mode == State::Gaze::Mode::Gaze) {
+                z.mode = State::Gaze::Mode::Holding;  // not logged: blinks are frequent
+                z.lostQpc = now;
+            } else if (z.mode == State::Gaze::Mode::Fixed) {
+                z.haveSmoothed = false;
+            }
+        }
+    }
+    if (z.mode == State::Gaze::Mode::Holding && QpcToMs(now - z.lostQpc) > kHoldMs) {
+        switchTo(State::Gaze::Mode::Fixed, std::format("not tracked for {:.0f} ms", kHoldMs));
+        z.haveSmoothed = false;
+        z.trackedRun = 0;
+    }
+    if (z.mode == State::Gaze::Mode::Fixed) return false;
+    for (int e = 0; e < 2; ++e) {
+        const xr::Vec3 v = xr::QuatRotate(gs.eyeFromHead[e], xr::Vec3{z.smoothed[0], z.smoothed[1], z.smoothed[2]});
+        const float len = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+        if (!(len > 1e-4f) || !std::isfinite(len)) return false;
+        out[e][0] = v.x / len, out[e][1] = v.y / len, out[e][2] = v.z / len;
+    }
+    return true;
+}
+
+// Context thread: the text of `fov gaze status`.
+void SetGazeLine() {
+    auto& z = g.gaze;
+    XrController::GazeState gs;
+    XrController::Get().GetGaze(&gs);
+    const int64_t now = QpcNow();
+    if (z.windowStartQpc == 0) z.windowStartQpc = now;
+    static double ratePerS = 0;
+    const double windowMs = QpcToMs(now - z.windowStartQpc);
+    if (windowMs >= 2000.0) {
+        ratePerS = double(z.rebuildsWindow) * 1000.0 / windowMs;
+        z.rebuildsWindow = 0;
+        z.windowStartQpc = now;
+    }
+    std::string centres;
+    for (int e = 0; e < 2; ++e) {
+        const auto& r = g.eyes[e].rect;
+        const float* d = g.centreDir[e];
+        centres += std::format("{}{} ({:.0f}, {:.0f}) px = {:.1f} % / {:.1f} % of the eye, {:.1f} deg right {:.1f} deg up of its axis", e ? "; right " : "left ",
+                               "", g.centrePx[e][0], g.centrePx[e][1], r.width ? 100.0 * (g.centrePx[e][0] - r.x) / r.width : 0.0,
+                               r.height ? 100.0 * (g.centrePx[e][1] - r.y) / r.height : 0.0, std::atan2(d[0], -d[2]) * 57.29578f,
+                               std::atan2(d[1], std::sqrt(d[0] * d[0] + d[2] * d[2])) * 57.29578f);
+    }
+    std::string line = std::format(
+        "eye_tracking {}; source {}{}; {} ({}tracked{}, sample {} ms older than its display time, {} samples); rings: {}; surface refills {} "
+        "({:.1f} per s over the last window, {:.3f} ms avg, {:.3f} ms max, {:.3f} ms last CPU incl. upload), {} switches, {} saccade jumps; {}",
+        EyeTrackingText(g.settings.eyeTracking), gs.source.empty() ? "none" : gs.source, gs.note.empty() ? "" : " (" + gs.note + ")", GazeModeText(z.mode),
+        z.tracked ? "" : "not ", gs.nominal ? ", nominal" : "", z.ageMs >= 0 ? std::format("{:.1f}", z.ageMs) : std::string("?"), z.samples,
+        centres, z.rebuilds, ratePerS, z.rebuilds ? z.rebuildMsTotal / double(z.rebuilds) : 0.0, z.rebuildMsMax, z.rebuildMsLast, z.switches, z.snaps,
+        g.surfaceText);
+    std::lock_guard lk(g_statusMutex);
+    g_gazeLine = std::move(line);
+}
+
+// Context thread: reads the shading-rate surface back from the GPU and writes it as a PNG,
+// one pixel per 16x16 tile: white = full rate, yellow / orange / red = rings 1 / 2 / outside,
+// dark grey = hidden area, black = no eye; a cyan cross at each eye's ring centre.
+std::string DumpSurface(ID3D11DeviceContext* ctx, const std::string& path) {
+    if (!g.surface) return "err no surface yet (no stereo frame with foveation on)";
+    D3D11_TEXTURE2D_DESC td{};
+    g.surface->GetDesc(&td);
+    td.Usage = D3D11_USAGE_STAGING;
+    td.BindFlags = 0;
+    td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Texture2D> staging;
+    if (FAILED(g.device->CreateTexture2D(&td, nullptr, &staging))) return "err staging texture";
+    ctx->CopyResource(staging.Get(), g.surface.Get());
+    D3D11_MAPPED_SUBRESOURCE m{};
+    if (FAILED(ctx->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &m))) return "err map";
+    std::vector<uint32_t> rgba(size_t(td.Width) * td.Height);
+    constexpr uint32_t kColour[5] = {0xFFFFFFFF, 0xFF00FFFF, 0xFF0080FF, 0xFF0000C0, 0xFF404040};  // ABGR in memory order RGBA
+    size_t counts[6]{};
+    for (uint32_t y = 0; y < td.Height; ++y)
+        for (uint32_t x = 0; x < td.Width; ++x) {
+            const uint8_t v = static_cast<const uint8_t*>(m.pData)[size_t(y) * m.RowPitch + x];
+            const size_t i = size_t(y) * td.Width + x;
+            const bool used = i < g.tileInfo.size() && g.tileInfo[i].eyes;
+            rgba[i] = !used ? 0xFF000000 : v < 5 ? kColour[v] : 0xFFFF00FF;
+            ++counts[used ? std::min<int>(v, 5) : 5];
+        }
+    ctx->Unmap(staging.Get(), 0);
+    for (int e = 0; e < 2; ++e) {
+        const int cx = int(g.centrePx[e][0] / 16.0f), cy = int(g.centrePx[e][1] / 16.0f);
+        for (int k = -4; k <= 4; ++k) {
+            if (cx + k >= 0 && cx + k < int(td.Width) && cy >= 0 && cy < int(td.Height)) rgba[size_t(cy) * td.Width + cx + k] = 0xFFFFFF00;
+            if (cy + k >= 0 && cy + k < int(td.Height) && cx >= 0 && cx < int(td.Width)) rgba[size_t(cy + k) * td.Width + cx] = 0xFFFFFF00;
+        }
+    }
+    D3D11_TEXTURE2D_DESC cd{};
+    cd.Width = td.Width;
+    cd.Height = td.Height;
+    cd.MipLevels = 1;
+    cd.ArraySize = 1;
+    cd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    cd.SampleDesc.Count = 1;
+    cd.Usage = D3D11_USAGE_DEFAULT;
+    D3D11_SUBRESOURCE_DATA init{rgba.data(), td.Width * 4, 0};
+    ComPtr<ID3D11Texture2D> colour;
+    if (FAILED(g.device->CreateTexture2D(&cd, &init, &colour))) return "err colour texture";
+    std::string err;
+    if (!xr::WriteTexturePng(ctx, colour.Get(), path, &err)) return "err " + err;
+    return std::format("ok {} ({}x{} tiles: full {}, ring 1 {}, ring 2 {}, outside {}, hidden {}, unused {}; centres L ({:.0f}, {:.0f}) R ({:.0f}, {:.0f}) px, {})",
+                       path, td.Width, td.Height, counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], g.centrePx[0][0], g.centrePx[0][1],
+                       g.centrePx[1][0], g.centrePx[1][1], g.centreFromGaze ? "gaze" : "fixed");
+}
+
 void SetStatusLine() {
     if (g_unsupported.load()) return;  // keeps the reason LogOff wrote
     std::lock_guard lk(g_statusMutex);
@@ -767,6 +1075,19 @@ void Configure(const Config& c) {
         auto [p, ec] = std::from_chars(f.data(), f.data() + f.size(), v);
         if (ec == std::errc() && p == f.data() + f.size()) s.skipFormats.push_back(v);
     }
+    // Eye-tracked foveation, off by default (docs/render.md, "Eye-tracked foveation").
+    const std::string et = Lower(c.get_string("foveation", "eye_tracking", "0"));
+    if (et == "1" || et == "on" || et == "true" || et == "yes")
+        s.eyeTracking = EyeTracking::On;
+    else if (et == "auto")
+        s.eyeTracking = EyeTracking::Auto;
+    else {
+        s.eyeTracking = EyeTracking::Off;
+        if (et != "0" && et != "off" && et != "false" && et != "no") log::warn("foveation: [foveation] eye_tracking = '{}' is not 0, 1 or auto; using 0", et);
+    }
+    s.gazeMarginDeg = std::clamp(static_cast<float>(c.get_float("foveation", "gaze_margin_deg", 5.0)), 0.0f, 30.0f);
+    s.gazeSmoothing = std::clamp(static_cast<float>(c.get_float("foveation", "gaze_smoothing", 0.5)), 0.0f, 0.95f);
+    g_eyeTrackingRequested = s.enabled && s.eyeTracking != EyeTracking::Off;
     {
         std::lock_guard lk(g_settingsMutex);
         g_settings = s;
@@ -805,6 +1126,20 @@ void OnPresent(const PresentInfo& p) {
     }
     if (g.tracing) FinishTrace(ctx);
     if (g.traceReadPending) ReadTrace(ctx);
+    {
+        std::unique_lock lk(g_dumpMutex);
+        if (g_dumpRequested) {
+            g_dumpRequested = false;
+            const std::string path = g_dumpPath;
+            lk.unlock();
+            std::string r = DumpSurface(ctx, path);
+            log::info("foveation: surface dump: {}", r);
+            lk.lock();
+            g_dumpResult = std::move(r);
+            g_dumpDone = true;
+            g_dumpCv.notify_all();
+        }
+    }
     for (auto& r : g.retired) ++r.presents;
     std::erase_if(g.retired, [](const State::Retired& r) { return r.presents > 8; });
     g.sceneTimer.Collect(ctx, g_sceneSeries);
@@ -849,12 +1184,30 @@ void SceneBegin(const FoveationEye eyes[2]) {
     }
     uint32_t hiddenVersion = 0;
     XrController::Get().GetHiddenArea(0, nullptr, &hiddenVersion);
+    // Eye tracking: with [foveation] eye_tracking = 0 this is one comparison per frame.
+    float gazeDir[2][3];
+    const bool useGaze = g.settings.eyeTracking != EyeTracking::Off ? UpdateGaze(gazeDir) : (g.gaze.mode = State::Gaze::Mode::Fixed, false);
     if (!g.haveLayout || !SameLayout(g.eyes, eyes) || !g.surface || hiddenVersion != g.hiddenVersion) {
         std::copy(eyes, eyes + 2, g.eyes);
         g.hiddenVersion = hiddenVersion;
+        SetCentres(useGaze ? gazeDir : nullptr);
         g.haveLayout = BuildSurface(ctx);
         if (!g.haveLayout) return;
+    } else if (useGaze || g.centreFromGaze) {
+        // Refill the surface only when a centre moved by more than half a tile (or the
+        // centre switched between the gaze and the fixed optical centre).
+        bool changed = useGaze != g.centreFromGaze;
+        for (int e = 0; e < 2 && !changed && useGaze; ++e) {
+            float px = 0, py = 0;
+            DirToPixel(e, gazeDir[e], &px, &py);
+            changed = std::fabs(px - g.centrePx[e][0]) > kRebuildPixels || std::fabs(py - g.centrePx[e][1]) > kRebuildPixels;
+        }
+        if (changed) {
+            SetCentres(useGaze ? gazeDir : nullptr);
+            UpdateSurface(ctx);
+        }
     }
+    if (g.settings.eyeTracking != EyeTracking::Off && (g.frames & 7) == 0) SetGazeLine();
     ++g.frames;
     g.open = true;
     if (g_traceRequested.exchange(false)) StartTrace(ctx);
@@ -969,6 +1322,59 @@ std::string Command(const std::string& argsIn) {
             }
             return std::string();
         });
+    if (a[0] == "gaze") {
+        if (a.size() == 1 || a[1] == "status") {
+            std::lock_guard lk(g_statusMutex);
+            return "ok " + g_gazeLine;
+        }
+        if (a[1] == "mode" && a.size() == 3)
+            return update([&](Settings& s) {
+                if (a[2] == "0" || a[2] == "off")
+                    s.eyeTracking = EyeTracking::Off;
+                else if (a[2] == "1" || a[2] == "on")
+                    s.eyeTracking = EyeTracking::On;
+                else if (a[2] == "auto")
+                    s.eyeTracking = EyeTracking::Auto;
+                else
+                    return std::string("gaze mode 0|1|auto");
+                // The eye tracker is set up when the XR session starts: a session started
+                // with eye_tracking = 0 has no gaze source until `xr-restart`.
+                g_eyeTrackingRequested = s.eyeTracking != EyeTracking::Off;
+                return std::string();
+            });
+        if (a[1] == "margin" && a.size() == 3)
+            return update([&](Settings& s) {
+                float v = 0;
+                if (!ParseFloat(a[2], &v) || v < 0 || v > 30) return std::string("gaze margin <0..30 deg>");
+                s.gazeMarginDeg = v;
+                return std::string();
+            });
+        if (a[1] == "smoothing" && a.size() == 3)
+            return update([&](Settings& s) {
+                float v = 0;
+                if (!ParseFloat(a[2], &v) || v < 0 || v > 0.95f) return std::string("gaze smoothing <0..0.95>");
+                s.gazeSmoothing = v;
+                return std::string();
+            });
+        if (a[1] == "dump" && a.size() == 3) {
+            // The path keeps its case: take it from the original arguments.
+            std::string path = argsIn;
+            const size_t at = Lower(path).find("dump");
+            path = path.substr(at + 4);
+            path.erase(0, path.find_first_not_of(" \t"));
+            path.erase(path.find_last_not_of(" \t") + 1);
+            std::unique_lock lk(g_dumpMutex);
+            g_dumpPath = path;
+            g_dumpDone = false;
+            g_dumpRequested = true;
+            if (!g_dumpCv.wait_for(lk, std::chrono::seconds(3), [] { return g_dumpDone; })) {
+                g_dumpRequested = false;
+                return "err no Present within 3 s";
+            }
+            return g_dumpResult;
+        }
+        return "err usage: fov gaze status | mode 0|1|auto | margin <deg> | smoothing <0..0.95> | dump <file.png>";
+    }
     if (a[0] == "trace") {
         g_traceRequested = true;
         return "ok the next stereo frame's render target bindings and GPU times go to ff7vr.log";
@@ -985,8 +1391,10 @@ std::string Command(const std::string& argsIn) {
         return out;
     }
     return "err usage: fov status | on | off | preset quality|balanced|performance|off | radii <r1> <r2> <r3> | rates <a> <b> <c> | "
-           "hidden off|coarse|cull | passes scene|no-gbuffer|all | skip [dxgi formats] | trace | timing";
+           "hidden off|coarse|cull | passes scene|no-gbuffer|all | skip [dxgi formats] | trace | timing | gaze status|mode|margin|smoothing|dump";
 }
+
+bool EyeTrackingRequested() { return g_eyeTrackingRequested.load(); }
 
 std::vector<std::string> TakeTimingLines() {
     std::vector<std::string> out;

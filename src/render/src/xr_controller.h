@@ -111,6 +111,20 @@ public:
     // Any thread. The runtime's hidden area of an eye (cached from the backend; false: none).
     // `version` changes whenever the mesh does; `out` may be null.
     bool GetHiddenArea(int eye, xr::HiddenAreaMesh* out, uint32_t* version);
+    // Any thread. The newest eye gaze (see EYE GAZE in xr.h), from the last waited frame.
+    struct GazeState {
+        bool available = false;  // a gaze source exists in the running session
+        bool tracked = false;
+        bool nominal = false;
+        xr::Vec3 headDirection{0.0f, 0.0f, -1.0f};  // VIEW space
+        xr::Quat eyeFromHead[2]{};  // turns a VIEW space direction into each eye's space
+        double ageMs = 0;           // display time minus sample time (how much older the sample is than the frame's display); -1 = unknown
+        uint64_t frameId = 0;
+        uint64_t samples = 0;       // frames sampled in this session
+        std::string source;         // RuntimeInfo::gazeSource
+        std::string note;           // RuntimeInfo::gazeNote
+    };
+    bool GetGaze(GazeState* out);
     bool UiDumpRequested() const { return uiDumpRequested_.load(); }
     void SubmitUiLayer(const UiLayerSource& s);
     std::string UiCommand(const std::string& args);
@@ -251,6 +265,7 @@ private:
     xr::HiddenAreaMesh hidden_[2];       // under eyeMutex_
     uint32_t hiddenBackendVersion_ = ~0u;  // waiting threads, under waitMutex_
     std::atomic<uint32_t> hiddenVersion_{0};
+    GazeState gaze_{};  // under eyeMutex_
 
     // Counters.
     std::atomic<uint64_t> presents_{0}, submittedScreen_{0}, submittedStereo_{0}, presentsWithoutFrame_{0}, submitErrors_{0};

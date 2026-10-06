@@ -90,6 +90,21 @@
 //   * the filter's state changes are logged once each, not per frame.
 // The projection layer is submitted only once usable poses exist (a held pose
 // counts: the image is shown where it was rendered).
+//
+// ============================ EYE GAZE =====================================
+// With InitDesc::eyeGaze the backend looks for an eye tracker and samples it in
+// every WaitFrame at the frame's predicted display time (FrameInfo::gaze):
+//   1. XR_EXT_eye_gaze_interaction (the standard path): an action set with one
+//      pose action bound to /user/eyes_ext/input/gaze_ext/pose through the
+//      /interaction_profiles/ext/eye_gaze_interaction profile, xrSyncActions,
+//      the action space located in VIEW space with XrEyeGazeSampleTimeEXT.
+//      Used when the system reports supportsEyeGazeInteraction.
+//   2. XR_FB_eye_tracking_social, only when (1) is not usable: both eyes' gaze
+//      from xrGetEyeGazesFB in VIEW space, averaged (Meta's own PC runtime
+//      offers only this one for a Quest Pro).
+// The Null backend simulates a gaze (Simulate "gaze ...").
+// Without InitDesc::eyeGaze no eye-tracking extension is enabled and nothing is
+// sampled.
 // ===========================================================================
 #pragma once
 
@@ -219,6 +234,8 @@ struct InitDesc {
     // Measure the GPU time of the library's own copies with timestamp queries
     // (read with TakeGpuCopyTimes). Costs a few queries per frame.
     bool gpuTiming = false;
+    // Look for an eye tracker and sample the gaze every frame (see EYE GAZE).
+    bool eyeGaze = false;
 
     NullOptions null;
 };
@@ -245,11 +262,27 @@ struct RuntimeInfo {
     SwapchainInfo eyeSwapchain[2];
     bool orientationTracking = false, positionTracking = false;
     bool depthLayerSupported = false;  // XR_KHR_composition_layer_depth enabled
+    // Eye gaze source in use (InitDesc::eyeGaze): "XR_EXT_eye_gaze_interaction",
+    // "XR_FB_eye_tracking_social", "simulated" (Null backend); "" = none.
+    std::string gazeSource;
+    std::string gazeNote;  // why there is no source, or what the runtime reported about it
     std::vector<std::string> enabledExtensions;
     std::vector<std::string> apiLayers;       // API layers the loader reports (implicit ones load automatically)
     std::vector<std::string> implicitLayers;  // implicit layer manifests in the registry, "<json> (enabled|disabled|disabled for this process)"
     uint64_t adapterLuid = 0;                 // adapter required by the runtime (LowPart | HighPart<<32)
     int64_t lastPredictedDisplayPeriod = 0;   // nanoseconds, from the last WaitFrame
+};
+
+// Eye gaze of one frame (see EYE GAZE).
+struct GazeSample {
+    bool available = false;  // a gaze source is set up in this session
+    bool tracked = false;    // the runtime reports a usable gaze for this frame
+    bool nominal = false;    // XR_EXT_eye_gaze_interaction: high-quality ("nominal") gaze (POSITION_TRACKED set)
+    // Unit gaze direction in VIEW space (the head: +X right, +Y up, -Z forward).
+    // Meaningful only when tracked.
+    Vec3 direction{0.0f, 0.0f, -1.0f};
+    int64_t sampleTime = 0;   // runtime clock time the gaze is expressed at; 0 = unknown
+    int64_t displayTime = 0;  // the frame's predicted display time it was requested for
 };
 
 struct FrameInfo {
@@ -269,6 +302,7 @@ struct FrameInfo {
     View views[2]{};                // [0] left, [1] right; tracking space after recenter
     Pose head{};                    // head (VIEW space origin) in tracking space after recenter
     SessionState state = SessionState::Uninitialized;
+    GazeSample gaze{};              // with InitDesc::eyeGaze
 };
 
 struct Rect {
@@ -453,7 +487,7 @@ public:
     virtual void ResetRecenter() = 0;
 
     // Any thread. Development aid: drives the Null backend's emulated headset
-    // (head pose, runtime recenter events, tracking loss); see the Null backend for
+    // (head pose, runtime recenter events, tracking loss, eye gaze); see the Null backend for
     // the commands. Returns "ok ..." or "err ...". Other backends do not support it.
     virtual std::string Simulate(std::string_view command) {
         (void)command;
