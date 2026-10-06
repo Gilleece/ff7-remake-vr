@@ -418,3 +418,15 @@ this game, the App's choice of model applies, not `[dlss] preset`. The App's
 "DLSS override - Super Resolution" for this game must stay at the application's choice: if
 it forces DLAA, DLSS cannot upscale and you see the game's own image (the log says why).
 Packages without `-dlss` ignore the `[dlss]` section.
+
+Since 06/10 the game renders each eye at `input_scale` of the headset's resolution (the
+size Virtual Desktop asks for) and DLSS writes the headset's full resolution
+(`output = runtime`, the default). So a sharper picture at about the cost of today's
+rendering is: raise the resolution in Virtual Desktop and lower `input_scale` so that the
+game still renders about 3072 pixels wide per eye. Measured without a headset on the
+development PC: Virtual Desktop's 4032x3648 per eye with `input_scale = 0.76` renders
+3064x2772 per eye and takes 11.9 ms per frame (the game at 3072x3264 without DLSS: 8.4 ms),
+with 10 GB of video memory instead of 12 GB the earlier way; that fits 72 Hz, not 90 Hz.
+5376x4992 with `input_scale = 0.57` takes 15.3 ms: too slow even for 72 Hz on that PC.
+`output = engine` brings back the earlier way. Also since 06/10 the right eye no longer
+shimmers when the head moves (its motion vectors were read wrongly by DLSS).

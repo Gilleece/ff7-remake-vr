@@ -934,6 +934,15 @@ buffer; `dlss dump`, `captures/dlss/r1`, static camera):
 | 120 | `FieldOfViewWideAngles`, `PrevFieldOfViewWideAngles` (radians) | `1.837 1.741 1.837 1.741` (105 x 99.8 degrees) |
 | 140 | `.y` 0 in these frames (a camera-cut flag in a flat-screen mod's reading, not verified; it stayed 0 also on the engine's own resets below) | 0 |
 
+Rows checked later (06/10, `dlss dump`/`dlss frames` with rows 0-145, `captures/dlss/p1-yaw`,
+Null backend with the head turning, eyes 3264x3072 at 72 Hz):
+
+| Row | Content | How it was checked |
+|---|---|---|
+| 0-3 | `TranslatedWorldToClip` | rows 83-86 of the next frame of the same view equal them exactly |
+| 24-27 | `ViewToClip`; row 26 `.x`, `.y` = where the view axis is in NDC | `0.1737 0.0700` left, `-0.1742 0.0705` right for Virtual Desktop's asymmetric FOV, the same as foveated rendering reads from the view (58.7 % and 41.3 % of the eye's width) |
+| 83-86 | `PrevTranslatedWorldToClip` | equal to the same view's rows 0-3 of the previous frame (difference 0 in 7 of 7 consecutive frames per eye; the other view's rows differ by 0.26), so each view's previous-frame matrices are its own |
+
 These match the order of `FViewUniformShaderParameters` in UE 4.18 for rows 52-122 (rows
 50-145 dumped with `dlss dump`, `captures/dlss/r21`, first room, still camera; the rows
 52-62 and 103-105 checked against their meaning: unit vectors, the origin and its negation,

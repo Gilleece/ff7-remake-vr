@@ -8,8 +8,13 @@ Status: two modes, upscale (DLSS scales each eye up to its full size from the re
 at headset resolution). The history is reset on camera cuts; upscale mode works with
 `[stereo] render_scale` and dynamic resolution (under the NVIDIA App's DLSS override each
 change of the size recreates the features, a hitch) and always hands the runtime the full
-eye. Everything here was measured headless (Null backend, no headset); nothing has been seen
-in a headset yet. Not handled: texture mip bias in upscale mode, mono frames. **GPU faults:**
+eye. Since 06/10 the engine renders at the input size and DLSS writes the runtime's size
+(`[dlss] output = runtime`, section "Output at the runtime's size"), and the right eye's
+shimmer under head motion is fixed (section "The right eye's shimmer"). Everything here was
+measured headless (Null backend); the first headset sessions (06/10, Virtual Desktop) found
+the right eye's shimmer and the video memory limit that these two changes address; neither
+change has been seen in a headset yet. Not handled: texture mip bias in upscale mode, mono
+frames. **GPU faults:**
 the driver resets with DLSS on had one cause, found on 06/10 and fixed: the mod drew its
 motion vectors inside a device context state of its own (`SwapDeviceContextState`) in the
 middle of the engine's frame; at the title screen that hung the GPU within seconds, with or
@@ -368,6 +373,167 @@ outside of dynamic scale range. RenderSubrect (1536x1632) must match Creation ti
 (2058x2186)") and the failed evaluation was followed by a GPU fault and a driver reset
 (System log `nvlddmkm` event 153 at that second, `captures/dlss/r21`). The mod now never
 evaluates outside the range NGX gives.
+
+### Output at the runtime's size (`[dlss] output = runtime`, the default)
+
+Until 06/10 the engine's eye target and every scene buffer had the runtime's eye size (the
+XR swapchain's, `[xr] resolution_scale` included) and `input_scale` only shrank the views
+inside them (`[stereo] render_scale`). A larger headset setting therefore cost the video
+memory of a full-size render even when DLSS rendered 58 % of it; at Virtual Desktop's
+4032x3648 per eye the card ran out of memory and stalled. With `output = runtime`:
+
+1. **The engine renders at the input size.** The stereo device sizes its eye target (and
+   with it `GSystemResolution`, so the scene buffers) at `input_scale` times the runtime's
+   eye size, rounded to a multiple of 4 (`dlss::engine_eye_size`, called where the device
+   takes the runtime's size). The views use the whole target; `[stereo] render_scale` keeps
+   its meaning (a share of that target, 1 by default) and dynamic resolution still works
+   inside it.
+2. **The last pass draws 1:1.** The game's last pass (grading and grain) writes the eye's
+   graded image into the eye target at the input size; it is copied into the texture DLSS
+   reads (no second run of the pass, no patched constants; with `r.ScreenPercentage` below
+   100 the pass scales and the earlier second run at the reduced size is used instead).
+3. **DLSS writes the runtime's size** into a texture of its own, two eyes side by side
+   (`R10G10B10A2_UNORM`, 2 x the runtime's width by its height), one feature per eye with
+   the runtime's eye size as its output.
+4. **That texture goes to the runtime.** At the end of the frame (`dlss::output_texture`,
+   before the hand-over to the XR module and the desktop mirror) the image handed over is
+   DLSS's texture with each eye's whole half as its rectangle, so the projection layer's
+   sub-image is the full runtime size. An eye DLSS did not write in that frame (start-up,
+   a failed check) is copied into its half at the engine's size and handed over with that
+   rectangle; the runtime scales it up (as with a render scale below 1).
+5. **Everything else follows the engine's target.** Foveated rendering finds the views at
+   the input size and builds its shading-rate surface for that target; the UI is on its own
+   layer and does not depend on the eye size; the desktop mirror shows DLSS's texture.
+
+`output = engine` keeps the earlier way (the target at the runtime's size, the views at
+`input_scale` of it, DLSS's result copied back into the target). If NGX cannot start, the
+device goes back to the runtime's size. `dlss output runtime|engine [input_scale]` switches
+while the game runs (the eye target is reallocated: a hitch).
+
+**Measured** (06/10, Null backend, RTX 5080 with 16 GB, unpaced (`xr.null_pace = 0`,
+`t.MaxFPS 0`), the first room of the test save, third person, still camera, foveated
+rendering `performance`, preset default (K at Quality and Balanced), `r.BloomQuality 0`;
+frame times are three 6 s windows of `stereo status`; video memory from the timing block's
+line (the game's DXGI usage and budget; the whole card from DXGI as well);
+`captures/dlss/p2-a-*`, `p2-b-rt4032`):
+
+| Runtime eye (headset setting) | Path | Engine eye | Frame ms avg (p95) | DLSS GPU ms per eye | Game's video memory (budget) | Whole card |
+|---|---|---|---|---|---|---|
+| 3072x3264 | no DLSS (the standard path) | 3072x3264 | 8.35 (9.2-9.5) | - | 9.07 GB (15.2) | 11.0 GB |
+| 4032x3648 | no DLSS | 4032x3648 | 11.0-11.2 (11.9-12.7) | - | 10.65 GB (13.7) | 12.6 GB |
+| 4032x3648 | DLSS `output = engine`, 0.76 (the old way) | 4032x3648, views 3064x2776 | 12.5 (13.4-14.1) | 2.39 / 2.31 | 12.02 GB (13.5) | 13.9 GB |
+| 4032x3648 | **DLSS `output = runtime`, 0.76** | **3064x2772** | **11.8-11.9 (12.4-12.7)** | 2.29 / 2.24 | **10.05 GB (15.2)**, DLSS's features 1.07 GB of it | 12.0 GB |
+| 5376x4992 | DLSS `output = runtime`, 0.57 | 3064x2844 | 15.3 (16.5-17.0) | 3.89 / 3.77 | 11.21 GB (13.7) | 13.1 GB |
+
+What it says:
+
+- At Virtual Desktop's 4032x3648 the new path needs 2 GB less than the old one (10.05
+  against 12.02 GB, the old one at 89 % of its budget with 1.4 GB left on the card) and less
+  than the game at 4032x3648 without DLSS, and it is a little faster than the old path (11.9
+  against 12.5 ms). Against the game at 3072x3264 without DLSS it costs 3.5 ms more per frame
+  (11.9 against 8.35): DLSS writing two eyes of 4032x3648 is 4.5 ms. Headless that is inside
+  72 Hz (13.9 ms) but not inside 90 Hz (11.1 ms).
+- At 5376x4992 the engine still renders about 3064 wide, the memory stays at 11.2 GB, but
+  DLSS writing two eyes of 27 megapixels costs 7.7 ms and the frame 15.3 ms: below 72 Hz
+  headless.
+- The slow phases of other runs (frames of 60 to 3000 ms for minutes after loading, the card
+  at 60 to 90 W) appeared once in these runs, in the first `output = runtime` run at
+  4032x3648 (`p2-a-rt4032`, the scene's own GPU time 58 ms median, with 3.7 GB of the card
+  free); the same configuration started again 8 minutes later ran at 11.9 ms from the start
+  (`p2-b-rt4032`). They are not explained here (`docs/benchmarking.md`).
+- Captures of both eyes at 4032x3648 (`captures/dlss/p2-b-rt4032/cap_a_L.png`, `_R.png`,
+  `sheet_LR.png`, `sheet_crop.png`): the whole eye, no seam between the halves, the
+  parallax right, the HUD on its layer as before; foveated rendering found the views at the
+  input size (`foveation: eye views: rect at +0x80 (3064x2772, right eye at x 3064)`, a
+  surface of 384x175 tiles for 6128x2772); every frame went out from DLSS's texture (4385
+  of 4385), no eye at the engine's size.
+- **10 minutes with motion** at 4032x3648, `input_scale` 0.76, 72 Hz
+  (`captures/dlss/soak-s1-p2-4032-runtime`: the head turning, walking, a capture every
+  minute, frame dumps every 3 minutes): no driver event, no warning or error, 91,732
+  evaluations, none failed, no failed check, every frame from DLSS's texture (45,865 of
+  45,865), frames at the 72 Hz pace (13.89 ms; longest 296 to 312 ms in the windows with a
+  frame dump), DLSS 2.31 / 2.24 ms per eye, the game's video memory 8.6 GB at the end
+  (12.3 GB on the whole card). Right / left output change around the view axis in the three
+  dumps: 1.03, 1.00, 1.02 (the motion vector fix holds in this mode too).
+
+## The right eye's shimmer (06/10)
+
+In the first headset sessions with DLSS (Virtual Desktop at 3264x3072 per eye, `input_scale`
+0.75) the left eye looked right and the right eye "not temporally solid", with DLSS only.
+Headless captures of a still camera had never shown it (the right eye was as steady as the
+left: `captures/dlss/r21`, `r11`).
+
+**How it was measured.** `dlss frames <prefix> <n> <crop>` writes, for n consecutive frames,
+each eye's DLSS input (the graded image at the input size), its motion vectors and DLSS's
+output, with the eye's rectangle, jitter, reset and all view constant rows. For consecutive
+frames of one eye the previous frame is sampled where the motion vectors point and compared
+with the current one (mean absolute difference, 0-1023 levels, over the whole eye and over a
+square of 1400 input pixels around each eye's view axis, so that both eyes are compared on
+the same part of the scene); `captures/dlss/mvcheck.py` does it. Null backend, eyes
+3264x3072 at 72 Hz, `input_scale` 0.75 (the views at 0.75 of full-size buffers, as the
+player had it), the emulated head turning (`xr.null_motion = yaw`), the street outside the
+first room.
+
+**What was ruled out** (`captures/dlss/p1-yaw`, `p1b`, `p1c`):
+
+- The engine's data per eye are right: each eye's previous-frame matrices (rows 83-86) equal
+  its own current matrices of the frame before (rows 0-3) exactly, the other eye's differ;
+  each eye has its own jitter sequence with the previous frame's jitter in `zw`; the median
+  motion vector matches the image's shift (phase correlation) in both eyes; no history reset
+  fired in any dumped frame (also not in the player's log: 4 camera cut lines in 3 minutes).
+- The inputs are equally steady: the motion-compensated change of the input is the same in
+  both eyes (right/left 0.93 to 1.10).
+- Not an interaction of the two evaluations: with the right eye the only one evaluated
+  (`dlss eyes 2`) its output was as unsteady as with both (4.85 against 4.78).
+- Not foveated rendering (the difference is there with it off) and not the view: with the
+  views swapped between the halves (`stereo swap 1`) the right HALF stayed the unsteady one.
+
+**Bisection** (`captures/dlss/p1d`, one run, `dlss copyinputs 1` + `dlss copymask`: each eye's
+inputs copied to the origin of textures of its own, output to its own texture):
+
+| DLSS reads from the eye's own textures at the origin | Output change L / R (around the axis) | R / L |
+|---|---|---|
+| nothing (shared double-wide textures, sub-rectangle bases) | 5.55 / 11.91 | 2.14 |
+| the output only | 2.87 / 11.15 | 3.89 |
+| depth (+ output) | 2.58 / 10.64 | 4.13 |
+| colour (+ output) | 4.33 / 10.58 | 2.44 |
+| **motion vectors (+ output)** | **2.59 / 2.69** | **1.04** |
+| everything | 3.20 / 3.22 | 1.01 |
+
+**Cause:** DLSS read the right eye's motion vectors wrongly from the shared double-wide
+motion vector texture at the sub-rectangle base x = eye width (`InMVSubrectBase`); the left
+eye, at base 0, was right. Colour and depth at the same base were read correctly. With a
+still head every motion vector is 0, wherever DLSS reads them, which is why the still-camera
+tests never showed it. Where exactly DLSS reads instead was not determined.
+
+**Fix** (`[dlss] mv_textures = eye`, the default): each eye's motion vectors are drawn at the
+origin of a texture of their own (the input's size; the shader loads the engine's depth and
+velocity at the eye's own pixels) and DLSS reads them at base 0. Colour, depth and the output
+stay on the shared textures with their bases. `mv_textures = shared` brings the old layout
+back for comparison. The two textures together are smaller than the shared one was.
+
+**Proof** (`captures/dlss/p1e`, one run of the fixed build in the player's configuration,
+`output = engine`, switching the layout by command; output change, whole eye and around the
+view axis, mean of 4 consecutive frame pairs):
+
+| Motion vectors | Foveated rendering | Left | Right | Right / left (axis) |
+|---|---|---|---|---|
+| each eye's own (the fix) | `performance` | 2.76 (2.58) | 4.28 (3.30) | 1.55 (1.28) |
+| shared, base x = eye width (as before) | `performance` | 2.35 (1.58) | 6.41 (6.84) | 2.73 (4.33) |
+| each eye's own again | `performance` | 2.17 (2.03) | 2.83 (2.44) | 1.31 (1.20) |
+| each eye's own | off | 1.31 (1.96) | 1.36 (1.98) | 1.03 (1.01) |
+
+The remaining difference of up to 1.3 with foveated rendering on comes and goes between
+frame sets (the inputs differ by up to 1.25 there too); with it off both eyes are equal.
+
+**10 minutes with motion** (`captures/dlss/soak-s1-p1-3264-engine`: the player's
+configuration, eyes 3264x3072 at 72 Hz, `input_scale` 0.75, `output = engine`, foveated
+rendering `performance`, the head turning, walking forward and back, a capture every
+minute and 5 frames dumped every 2 minutes): no driver event, no warning or error in the
+log, 91,498 evaluations, none failed, no failed check, one history reset per eye (the
+features' creation), frames at the 72 Hz pace (13.89 ms; the longest 218 to 230 ms in the
+windows with a frame dump). Right / left around the view axis in the four dumps: 1.01, 0.94,
+1.02, 1.02.
 
 ## GPU faults seen in the test runs
 
@@ -748,7 +914,10 @@ always uses AutoExposure"; the mod sets the auto-exposure flag.
   `build\release-dlss` and makes a package named `ff7vr-<date>-<commit>-dlss` (the default package
   is built explicitly without DLSS, and the script checks the DLL for NGX names either way).
 - `[dlss] enabled = 1` in `ff7vr.ini`; `mode = upscale` and `input_scale = 0.5` (or 0.58, 0.67)
-  are the defaults.
+  are the defaults. With `output = runtime` (the default) `input_scale` is a share of the
+  headset's resolution: to keep the cost of rendering about 3072 wide per eye and get a
+  larger, sharper eye image, raise the headset's resolution and lower `input_scale` to match
+  (Virtual Desktop's 4032x3648 with 0.76; section "Output at the runtime's size").
 - The NVIDIA App's DLSS override for this game must not force the Super Resolution mode:
   under a forced DLAA no mode accepts a smaller input and upscaling does not run (section
   "The NVIDIA App's DLSS override decides the model"). A model preset override alone is fine.
@@ -779,7 +948,9 @@ by the project's maintainers on how an MIT-licensed project and NVIDIA's terms f
 | `enabled` | `0` | `1`: DLSS replaces the game's temporal anti-aliasing while the engine renders in stereo |
 | `init` | `0` | `1`: initialise NGX and query DLSS at the first stereo frame even while `enabled = 0` (diagnostics) |
 | `mode` | `upscale` | `upscale`: DLSS scales each eye up to its full size from the rendered part (see "Upscale mode"); `dlaa`: anti-aliasing at the rendered size, in place of the game's |
-| `input_scale` | `0.5` | upscale mode: the rendered share of each eye's width and height. At start (with `enabled = 1` and `mode = upscale`) it sets `[stereo] render_scale`, which is also the upper bound of `[stereo] dynamic_resolution`; `0` leaves `render_scale` alone |
+| `input_scale` | `0.5` | upscale mode: the rendered share of each eye's width and height. With `output = runtime` the engine's eye target is this share of the runtime's eye size; with `output = engine` it sets `[stereo] render_scale` at start (also the upper bound of `[stereo] dynamic_resolution`), and `0` leaves `render_scale` alone |
+| `output` | `runtime` | upscale mode: `runtime`: the engine renders at `input_scale` of the runtime's eye size and DLSS writes the runtime's size into a texture of its own that goes to the runtime (section "Output at the runtime's size"); `engine`: the engine's buffers at the runtime's size, the views at `input_scale` of them, DLSS's result copied back (the way before 06/10) |
+| `mv_textures` | `eye` | `eye`: each eye's motion vectors at the origin of a texture of its own; `shared`: one double-wide texture read at the right eye's sub-rectangle base, which made the right eye shimmer (section "The right eye's shimmer"; only to compare) |
 | `preset` | `default` | DLSS model: `default` (NVIDIA's choice for the mode), `j`, `k`, `l`, `m`. The NVIDIA App's override for the game wins |
 | `auto_exposure` | `1` | DLSS computes the exposure itself |
 | `mv_jitter` | `2` | how the camera motion vectors treat the jitter: `2` as the engine computes them, not flagged; `1` flagged as jittered; `0` the jitter difference removed |
@@ -826,8 +997,13 @@ The fault-isolation keys (`test_eyes`, `test_zero_mv`, `test_mv_sanitize`, `test
   motion vectors overflow FP16 (the engine keeps its previous camera across the mod's
   switches); those frames reset the history.
 - **Other threads on the immediate context**: calls of `Map`, `Unmap` and
-  `UpdateSubresource` on the immediate context from any thread but the RHI thread are logged
-  (none were seen) and counted, separately if they came during an NGX call.
+  `UpdateSubresource` on the game's immediate context from any thread but the RHI thread are
+  logged and counted, separately if they came during an NGX call. None in the headless runs.
+  The player's six sessions of 06/10 with Virtual Desktop logged such calls in every
+  session: `UpdateSubresource` from the engine's render thread, and `Map`/`Unmap` from an
+  unnamed thread, some of them during NGX calls. That check did not yet compare the device,
+  so they may have been another D3D11 device's immediate context in the process (an XR
+  runtime's); since then only the game's device counts. Not resolved.
 - Video memory (local budget and use, DLSS's own share from `NGX_DLSS_GET_STATS`) is in every
   feature creation line and in the event ring.
 
@@ -835,7 +1011,7 @@ The fault-isolation keys (`test_eyes`, `test_zero_mv`, `test_mv_sanitize`, `test
 
 | Command | Effect |
 |---|---|
-| `dlss status` | NGX state, capability, feature library, the recognised pass, counters, features, GPU time per eye, jitter |
+| `dlss status` | NGX state, capability, feature library, the recognised pass, counters, features, GPU time per eye, jitter, the output mode with the runtime's and the engine's eye sizes, the latest video memory reading, the motion vector textures, and each eye's history resets by cause (a new feature, not evaluated in the previous frame, a camera cut, a request; more than 10 resets of an eye in 100 frames is also logged as a warning) |
 | `dlss on` / `dlss off` | switch while the game runs (the history is reset; off releases the features) |
 | `dlss mode <dlaa\|upscale>` | switch the mode; with `upscale`, set the size with `cvar set r.ScreenPercentage <n>` |
 | `dlss bench <out w> <out h> <in w> <in h>`, `dlss bench off` | one extra evaluation per frame of that size on blank textures, timed (cost of a mode without changing the engine) |
@@ -853,7 +1029,11 @@ The fault-isolation keys (`test_eyes`, `test_zero_mv`, `test_mv_sanitize`, `test
 | `dlss ownstate <0\|1>`, `dlss evalend <0\|1>`, `dlss params <shared\|feature>` | `[dlss] context_state`, `eval_at`, `params` while the game runs |
 | `dlss zeromv`, `mvsanitize`, `flush`, `validate`, `stats`, `copyinputs` `<0\|1>` | tests: motion vectors zero or sanitised, `Flush` after each evaluation, the checks, the input statistics, per-eye input copies |
 | `dlss stall [ms]` | fault test: at the next frame end, wait until the GPU has finished everything (what a blocking read-back such as `capture` does), then stay away `ms` milliseconds (default 40) with the GPU idle |
-| `dlss dump` | log the view uniform buffer rows 110-145 of the next two views |
+| `dlss dump [n]` | log the view uniform buffer rows 0-145 of the next n views (default 2) |
+| `dlss frames <prefix> [n] [crop]` | for n consecutive frames (default 4) write each eye's DLSS input (graded colour), motion vectors and output as raw files (centre crops of `crop` input pixels, default 1024; 4096 = the whole eye), with the rectangles, jitter, reset and view constant rows in `<prefix>_meta.txt` (section "The right eye's shimmer") |
+| `dlss output <runtime\|engine> [input_scale]` | `[dlss] output` while the game runs (the eye target is reallocated) |
+| `dlss mvtextures <eye\|shared>` | `[dlss] mv_textures` while the game runs |
+| `dlss copyinputs <0\|1>`, `dlss copymask <0-7>` | test: each eye's inputs copied to the origin of textures of its own and its output to its own texture; the mask chooses which copies DLSS reads (1 colour, 2 depth, 4 motion vectors) |
 | `dlss timing` | restart the GPU time averages |
 
 ## Licence of the NVIDIA DLSS SDK
