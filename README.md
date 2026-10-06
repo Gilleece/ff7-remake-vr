@@ -51,8 +51,10 @@ If a session was interrupted or anything looks wrong in the game folder, double-
 `restore.cmd` (harmless when nothing needs doing). Save games are not touched.
 
 Without the launcher: unzip the `-dropin.zip` into the game's `End\Binaries\Win64`
-folder and start `ff7vr-start.cmd` there (a start from Steam crashes for now); see
-`GUIDE.md`, "Installing without the launcher".
+folder (beside `ff7remake_.exe`) and start the game from Steam, or with
+`ff7vr-start.cmd` there. The log is `ff7vr.log` in that folder; to remove the mod,
+delete the files the zip added. Details (ReShade/Luma, DLSS): `GUIDE.md`,
+"Installing without the launcher".
 
 ## Controls
 
@@ -108,8 +110,9 @@ package folder.
 - Markers over enemies are 3 to 6 degrees off on the default HUD panel size
   (`[ui] size = 1.57` lines them up).
 - The game window becomes 1280x720 while 3D runs, until the game exits.
-- ReShade/Luma does not work together with the mod; the launcher sets it aside for
-  each session.
+- With ReShade/Luma loaded the game runs in 3D, but the right eye shows only a strip
+  of the scene; the launcher sets it aside for each session (rename its `dxgi.dll`
+  for a drop-in install).
 - Battle detection has never been seen in a real battle; switch by hand with Home if
   needed.
 - Pre-rendered movies are very likely wrong (`[stereo] movie_screen = 1` is worth a

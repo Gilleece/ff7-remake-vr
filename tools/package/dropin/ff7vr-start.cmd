@@ -1,7 +1,7 @@
 @echo off
 rem Starts FINAL FANTASY VII REMAKE INTERGRADE with the VR mod installed in this folder.
-rem It starts the game executable directly, as the launcher does: a start through Steam
-rem currently crashes with the Steam overlay (see ff7vr-docs\GUIDE.md). Steam must be running.
+rem It starts the game executable directly with -d3d11. Starting the game from Steam
+rem works as well (see ff7vr-docs\GUIDE.md). Steam must be running.
 rem Extra arguments are passed on to the game.
 setlocal
 set SteamAppId=1462040

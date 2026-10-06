@@ -65,10 +65,10 @@ Options, from a command prompt in the package folder:
 
 ```
 start-vr.cmd -KeepInstalled     leave the mod installed after the game exits (Luma stays set aside).
-                                restore.cmd removes it again. A start through Steam then
-                                crashes (see "Installing without the launcher")
-start-vr.cmd -KeepLuma          do not set ReShade/Luma aside. Does not work yet: with ReShade/Luma
-                                loaded the mod does not reach the headset and the game runs flat
+                                restore.cmd removes it again. The game can then also be
+                                started from Steam (see "Installing without the launcher")
+start-vr.cmd -KeepLuma          do not set ReShade/Luma aside. The game runs in 3D with it, but
+                                the right eye shows only a strip of the scene for now
 start-vr.cmd -ExtraArgs "..."   extra arguments for the game
 start-vr.cmd -NoPause           close the window at once at the end, also after an error
 powershell -NoProfile -ExecutionPolicy Bypass -File ff7vr-launcher.ps1 status
@@ -121,44 +121,43 @@ OpenXR runtime is never changed.
 The mod can also stay in the game folder for good, without the launcher. Every
 package build comes with `ff7vr-<date>-<commit>-dropin.zip` for this.
 
-To install:
+**Install:** unzip the drop-in zip into the folder where `ff7remake_.exe` is: the
+game's folder, then `End\Binaries\Win64` (in Steam: right-click the game, Manage,
+Browse local files). It adds `xinput1_3.dll` (the mod), `ff7vr.ini` (the settings),
+`ff7vr-start.cmd` and a folder `ff7vr-docs` with this guide. If an `xinput1_3.dll`
+is there already, another mod uses that name: do not overwrite it.
 
-1. Open the game's folder (in Steam: right-click the game, Manage, Browse local
-   files) and go into `End\Binaries\Win64`, where `ff7remake_.exe` is.
-2. If there is a `dxgi.dll` (ReShade/Luma), rename it to `dxgi.dll.vr-disabled`.
-   With ReShade/Luma loaded the mod does not reach the headset and the game runs
-   flat. Give it its name back to play flat with Luma.
-3. Unzip the drop-in zip into that folder. It adds `xinput1_3.dll`, `ff7vr.ini`,
-   `ff7vr-start.cmd` and a folder `ff7vr-docs` with this guide. If an
-   `xinput1_3.dll` is there already, another mod uses that name: do not overwrite it.
-4. The settings are in `ff7vr.ini` in that folder.
+**Play:** start the game from Steam as usual, or double-click `ff7vr-start.cmd` in
+that folder (Steam must be running). Either way the mod loads by itself.
 
-To play, start Steam, then double-click `ff7vr-start.cmd` in that folder. Like the
-launcher, it starts the game executable directly.
+- Direct3D 11: the mod needs it, and the game uses Direct3D 12 unless told otherwise.
+  Nothing to set: when the command line has no graphics option, the mod adds
+  `-d3d11` itself (the log says `d3d11: added -d3d11 to the command line`;
+  `[loader] force_d3d11`). `ff7vr-start.cmd` passes it, and `-d3d11` in the game's
+  Steam launch options does no harm. If the launch options ask for another one
+  (`-dx12`, `-d3d12`, `-vulkan`), the mod leaves them alone, the game runs flat, and
+  the log has a warning.
+- ReShade/Luma (a `dxgi.dll` in the same folder): the game starts and runs in 3D with
+  it, but at the moment **the right eye shows only a strip of the scene** while it is
+  loaded. For VR, rename `dxgi.dll` to `dxgi.dll.vr-disabled`; give it its name back
+  to play flat with Luma. Without ReShade/Luma there is nothing to do.
+- A `-dlss` drop-in needs an NVIDIA RTX graphics card and NVIDIA's DLSS model file,
+  which is not part of the package: `nvngx_dlss.dll` beside `ff7remake_.exe`, or the
+  model the NVIDIA App's DLSS override provides (see "DLSS" below). `[dlss] enabled`
+  in `ff7vr.ini` switches it on.
 
-**Starting the game from Steam does not work yet.** With the mod installed, a start
-through Steam crashes as soon as the game shows its first picture: the Steam overlay,
-which Steam loads into the game only when Steam starts it, and the mod's Direct3D
-hooks end up calling each other without end. Whether switching the Steam overlay off
-for this game avoids it has not been tried.
-
-Direct3D 11: the mod needs it, and the game uses Direct3D 12 unless told otherwise.
-`ff7vr-start.cmd` passes `-d3d11`. Started in any other way without a graphics option
-on its command line, the game gets `-d3d11` from the mod itself (`[loader]
-force_d3d11 = 1`, the default; the log says `d3d11: added -d3d11 to the command
-line`). If the launch options ask for another one (`-dx12`, `-d3d12`, `-vulkan`), the
-mod leaves them alone and the log has a warning.
-
-The log is `ff7vr.log` in `End\Binaries\Win64`. The logs and crash dumps of the five
+**Log:** `ff7vr.log` in `End\Binaries\Win64`. The logs and crash dumps of the five
 sessions before it are kept in `ff7vr-logs\` there (`[log] keep_sessions`); older ones
 are deleted.
 
-To remove the mod, delete from `End\Binaries\Win64`: `xinput1_3.dll`, `ff7vr.ini`,
+**Remove:** delete from `End\Binaries\Win64`: `xinput1_3.dll`, `ff7vr.ini`,
 `ff7vr-start.cmd`, `ff7vr.log`, the folders `ff7vr-docs` and `ff7vr-logs`, and any
-`ff7vr-crash-*.dmp` or `ff7vr-captures` folder; then rename `dxgi.dll.vr-disabled`
-back to `dxgi.dll` if you set it aside. Do not use the launcher while the mod is
-installed this way: it refuses to start while an `xinput1_3.dll` it did not put
-there is in the folder.
+`ff7vr-crash-*.dmp` file or `ff7vr-captures` folder; rename `dxgi.dll.vr-disabled`
+back to `dxgi.dll` if you set it aside. Nothing else on the PC is changed.
+
+The launcher package (`start-vr.cmd`, above) is the alternative that leaves nothing
+in the game folder between sessions. Do not use both: the launcher refuses to start
+while an `xinput1_3.dll` it did not put there is in the folder.
 
 ## What you should see
 
