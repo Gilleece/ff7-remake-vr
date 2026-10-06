@@ -45,14 +45,26 @@ constexpr size_t kCreateDeferredContext = 27;
 HookCallbacks g_cb;
 int64_t g_qpcFreq = 1;
 
-// One swap chain class (normally only DXGI's own).
+// One swap chain class (normally only DXGI's own). The hooks are inline hooks on the bodies
+// of the functions the class's vtable points to, not replaced vtable slots: Steam's overlay
+// hooks Present again whenever the slot no longer points to the function it hooked, and
+// keeps one "original" for both of its hooks, so a replaced slot sent its Present through
+// itself until the stack overflowed (docs/render.md, "Coexisting with other Present hooks").
+// With the slots untouched, every hook that patches the function body chains with ours in
+// either order, and hooks that replace the slot call the body and reach ours that way.
 struct VtableHooks {
     void** vtable = nullptr;
-    hook::VTableHook present, present1, resize, resize1;
+    void* presentTarget = nullptr;  // the functions hooked (the slots' values when hooked)
+    void* present1Target = nullptr;
+    void* resizeTarget = nullptr;
+    void* resize1Target = nullptr;
+    hook::InlineHook present, present1, resize, resize1;
 };
 std::mutex g_vtMutex;
 std::array<std::unique_ptr<VtableHooks>, 4> g_vt;
 std::atomic<int> g_vtCount{0};
+enum class Slot { Present, Present1, Resize, Resize1 };
+void* FindOriginal(void* self, Slot s);
 
 hook::InlineHook g_createSwapChain, g_createSwapChainForHwnd, g_createDeferred, g_createDevice, g_createDeviceAndSwapChain;
 
@@ -177,6 +189,42 @@ void LogSwapchainFacts(IDXGISwapChain* sc, const DXGI_SWAP_CHAIN_DESC& d, ID3D11
                               d.Windowed ? "windowed" : "fullscreen", adapter, luid, windowTid);
 }
 
+// Where a code address leads: module+offset, its first bytes, and the target of a jump it
+// starts with (what an inline hook writes), followed up to four jumps deep.
+bool ReadBytes(const void* p, void* out, size_t n) {
+    __try {
+        memcpy(out, p, n);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+std::string DescribeCode(const void* p) {
+    std::string s;
+    for (int depth = 0; p && depth < 4; ++depth) {
+        if (depth) s += " -> ";
+        s += module::describe(reinterpret_cast<uintptr_t>(p));
+        uint8_t b[14]{};
+        if (!ReadBytes(p, b, sizeof(b))) return s + " (unreadable)";
+        s += " [";
+        for (int i = 0; i < 6; ++i) s += std::format("{:02x}", b[i]);
+        s += "]";
+        const uint8_t* c = static_cast<const uint8_t*>(p);
+        const void* next = nullptr;
+        if (b[0] == 0xE9) {
+            next = c + 5 + *reinterpret_cast<const int32_t*>(b + 1);
+        } else if (b[0] == 0xFF && b[1] == 0x25) {
+            const void* slot = c + 6 + *reinterpret_cast<const int32_t*>(b + 2);
+            if (!ReadBytes(slot, &next, sizeof(next))) next = nullptr;
+        } else if (b[0] == 0x48 && b[1] == 0xB8 && b[10] == 0xFF && b[11] == 0xE0) {
+            next = *reinterpret_cast<void* const*>(b + 2);
+        }
+        p = next;
+    }
+    return s;
+}
+
 // Called on every Present before the real one. Returns the main-swapchain flag and fills `t`.
 bool TrackPresent(IDXGISwapChain* sc, UINT sync, UINT flags, int64_t now, DXGI_SWAP_CHAIN_DESC* outDesc, bool* firstTime) {
     DXGI_SWAP_CHAIN_DESC d{};
@@ -251,7 +299,13 @@ void OnPresent(IDXGISwapChain* sc, UINT sync, UINT flags, int64_t t0) {
     if (FAILED(sc->GetDevice(IID_PPV_ARGS(&dev)))) return;  // not a D3D11 swap chain
     ComPtr<ID3D11Texture2D> bb;
     sc->GetBuffer(0, IID_PPV_ARGS(&bb));
-    if (first) LogSwapchainFacts(sc, d, dev.Get(), bb.Get());
+    if (first) {
+        LogSwapchainFacts(sc, d, dev.Get(), bb.Get());
+        // Who else hooks Present: the slot the game calls and the body ours patched.
+        void** vt = *reinterpret_cast<void***>(sc);
+        log::info("d3d11:   Present chain: vtable {} slot -> {}; our original -> {}", module::describe(reinterpret_cast<uintptr_t>(vt)),
+                  DescribeCode(vt[kPresent]), DescribeCode(FindOriginal(sc, Slot::Present)));
+    }
     if (!bb || !g_cb.onPresent) return;
     ComPtr<ID3D11DeviceContext> ctx;
     dev->GetImmediateContext(&ctx);
@@ -282,16 +336,41 @@ void SafeOnPresent(IDXGISwapChain* sc, UINT sync, UINT flags, int64_t t0) {
     }
 }
 
-VtableHooks* FindVtable(void* self) {
+hook::InlineHook& HookOf(VtableHooks& h, Slot s) {
+    switch (s) {
+        case Slot::Present: return h.present;
+        case Slot::Present1: return h.present1;
+        case Slot::Resize: return h.resize;
+        default: return h.resize1;
+    }
+}
+size_t IndexOf(Slot s) {
+    switch (s) {
+        case Slot::Present: return kPresent;
+        case Slot::Present1: return kPresent1;
+        case Slot::Resize: return kResizeBuffers;
+        default: return kResizeBuffers1;
+    }
+}
+
+// The trampoline of the hook that this call came through: the hook on the function the
+// object's slot points to; if the slot points elsewhere (someone replaced it), the object's
+// class's hook, then any installed hook of that slot.
+void* FindOriginal(void* self, Slot s) {
     void** vt = *reinterpret_cast<void***>(self);
+    void* fn = vt[IndexOf(s)];
     const int n = g_vtCount.load(std::memory_order_acquire);
     for (int i = 0; i < n; ++i)
-        if (g_vt[i] && g_vt[i]->vtable == vt) return g_vt[i].get();
-    return n > 0 ? g_vt[0].get() : nullptr;  // an object we never saw: use the first class's originals
+        if (HookOf(*g_vt[i], s).installed() && HookOf(*g_vt[i], s).target() == fn) return HookOf(*g_vt[i], s).original<void*>();
+    for (int i = 0; i < n; ++i)
+        if (g_vt[i]->vtable == vt && HookOf(*g_vt[i], s).installed()) return HookOf(*g_vt[i], s).original<void*>();
+    for (int i = 0; i < n; ++i)
+        if (HookOf(*g_vt[i], s).installed()) return HookOf(*g_vt[i], s).original<void*>();
+    return nullptr;
 }
 
 HRESULT STDMETHODCALLTYPE PresentDetour(IDXGISwapChain* sc, UINT sync, UINT flags) {
-    const auto orig = FindVtable(sc)->present.original<PresentFn>();
+    const auto orig = reinterpret_cast<PresentFn>(FindOriginal(sc, Slot::Present));
     if (t_depth > 0 || (flags & DXGI_PRESENT_TEST)) return orig(sc, sync, flags);
     ++t_depth;
     const int64_t t0 = QpcNow();
@@ -308,7 +387,7 @@ HRESULT STDMETHODCALLTYPE PresentDetour(IDXGISwapChain* sc, UINT sync, UINT flag
 }
 
 HRESULT STDMETHODCALLTYPE Present1Detour(IDXGISwapChain1* sc, UINT sync, UINT flags, const DXGI_PRESENT_PARAMETERS* params) {
-    const auto orig = FindVtable(sc)->present1.original<Present1Fn>();
+    const auto orig = reinterpret_cast<Present1Fn>(FindOriginal(sc, Slot::Present1));
     if (t_depth > 0 || (flags & DXGI_PRESENT_TEST)) return orig(sc, sync, flags, params);
     ++t_depth;
     const int64_t t0 = QpcNow();
@@ -337,7 +416,7 @@ void BeforeResize(IDXGISwapChain* sc, UINT count, UINT w, UINT h, DXGI_FORMAT fm
 }
 
 HRESULT STDMETHODCALLTYPE ResizeBuffersDetour(IDXGISwapChain* sc, UINT count, UINT w, UINT h, DXGI_FORMAT fmt, UINT flags) {
-    const auto orig = FindVtable(sc)->resize.original<ResizeBuffersFn>();
+    const auto orig = reinterpret_cast<ResizeBuffersFn>(FindOriginal(sc, Slot::Resize));
     if (t_depth > 0) return orig(sc, count, w, h, fmt, flags);
     ++t_depth;
     BeforeResize(sc, count, w, h, fmt);
@@ -349,7 +428,7 @@ HRESULT STDMETHODCALLTYPE ResizeBuffersDetour(IDXGISwapChain* sc, UINT count, UI
 
 HRESULT STDMETHODCALLTYPE ResizeBuffers1Detour(IDXGISwapChain3* sc, UINT count, UINT w, UINT h, DXGI_FORMAT fmt, UINT flags,
                                                const UINT* masks, IUnknown* const* queues) {
-    const auto orig = FindVtable(sc)->resize1.original<ResizeBuffers1Fn>();
+    const auto orig = reinterpret_cast<ResizeBuffers1Fn>(FindOriginal(sc, Slot::Resize1));
     if (t_depth > 0) return orig(sc, count, w, h, fmt, flags, masks, queues);
     ++t_depth;
     BeforeResize(sc, count, w, h, fmt);
@@ -373,17 +452,31 @@ void HookSwapchainClass(IDXGISwapChain* sc) {
     }
     auto h = std::make_unique<VtableHooks>();
     h->vtable = vt;
-    if (!h->present.create(vt, kPresent, &PresentDetour)) return;
-    h->resize.create(vt, kResizeBuffers, &ResizeBuffersDetour);
+    // A function another class's hooks already cover is not hooked twice.
+    const auto covered = [&](void* fn, Slot s) {
+        for (int i = 0; i < n; ++i)
+            if (HookOf(*g_vt[i], s).installed() && HookOf(*g_vt[i], s).target() == fn) return true;
+        return false;
+    };
+    const auto hookSlot = [&](Slot s, void* detour, void** target) {
+        void* fn = vt[IndexOf(s)];
+        *target = fn;
+        if (!covered(fn, s)) HookOf(*h, s).create(fn, detour);
+    };
+    hookSlot(Slot::Present, reinterpret_cast<void*>(&PresentDetour), &h->presentTarget);
+    hookSlot(Slot::Resize, reinterpret_cast<void*>(&ResizeBuffersDetour), &h->resizeTarget);
     // Present1 / ResizeBuffers1 exist when the class implements the newer interfaces through the same vtable.
     ComPtr<IDXGISwapChain1> sc1;
     if (SUCCEEDED(sc->QueryInterface(IID_PPV_ARGS(&sc1))) && *reinterpret_cast<void***>(sc1.Get()) == vt)
-        h->present1.create(vt, kPresent1, &Present1Detour);
+        hookSlot(Slot::Present1, reinterpret_cast<void*>(&Present1Detour), &h->present1Target);
     ComPtr<IDXGISwapChain3> sc3;
     if (SUCCEEDED(sc->QueryInterface(IID_PPV_ARGS(&sc3))) && *reinterpret_cast<void***>(sc3.Get()) == vt)
-        h->resize1.create(vt, kResizeBuffers1, &ResizeBuffers1Detour);
-    log::info("d3d11: hooked swap chain class (vtable {}): Present{}, ResizeBuffers{}", module::describe(reinterpret_cast<uintptr_t>(vt)),
-              h->present1.installed() ? ", Present1" : "", h->resize1.installed() ? ", ResizeBuffers1" : "");
+        hookSlot(Slot::Resize1, reinterpret_cast<void*>(&ResizeBuffers1Detour), &h->resize1Target);
+    log::info("d3d11: swap chain class (vtable {}): hooked the bodies of Present {}{}, ResizeBuffers {}{}",
+              module::describe(reinterpret_cast<uintptr_t>(vt)), DescribeCode(h->presentTarget), h->present1.installed() ? ", Present1" : "",
+              DescribeCode(h->resizeTarget), h->resize1.installed() ? ", ResizeBuffers1" : "");
+    if (!h->present.installed() && !covered(h->presentTarget, Slot::Present))
+        log::warn("d3d11: Present of swap chain class {} is not hooked", module::describe(reinterpret_cast<uintptr_t>(vt)));
     g_vt[n] = std::move(h);
     g_vtCount.store(n + 1, std::memory_order_release);
 }
