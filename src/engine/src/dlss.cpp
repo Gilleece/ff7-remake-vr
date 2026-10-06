@@ -26,9 +26,11 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <format>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -78,6 +80,11 @@ struct Settings {
     std::atomic<int> recreate_requests{0};
     std::atomic<int> dump_requests{0};
     std::atomic<bool> log_ngx{true};
+    bool log_verbose = false;  // [dlss] log_verbose: NGX's most detailed log level (read at NGX start)
+    // Fault isolation tests (dev commands)
+    std::atomic<bool> skip_eval{false};  // upscale mode: everything but the evaluation; the game's own pass upscales
+    std::atomic<int> stall_requests{0};  // one full GPU wait at the next frame end, like a blocking read-back
+    std::atomic<int> stall_ms{40};       // then the thread sleeps this long (the GPU stays idle)
     // Synthetic cost measurement: one extra DLSS evaluation per frame on blank textures of a
     // chosen input and output size (the image is discarded).
     std::atomic<bool> bench{false};
@@ -133,7 +140,14 @@ void store_rows(ID3D11Buffer* b, const void* data) {
     if (!copy_rows(r.v, data)) return;
     r.serial = ++g_ub_serial;
     std::lock_guard lock(g_ub_mutex);
-    if (g_ub.size() > 512) g_ub.clear();
+    if (g_ub.size() > 1024) {
+        // Every 4096-byte constant buffer the engine writes is kept, so the map grows; drop the
+        // entries not written recently (the views' buffers are written every frame). Clearing
+        // the whole map instead made the next pass of both eyes miss its rows (one frame of
+        // the game's anti-aliasing every few minutes).
+        const std::uint64_t keep_from = r.serial > 512 ? r.serial - 512 : 0;
+        std::erase_if(g_ub, [&](const auto& e) { return e.second.serial < keep_from; });
+    }
     g_ub[b] = r;
 }
 
@@ -402,7 +416,7 @@ void with_info(F&& f) {
 std::atomic<int> g_ngx_log_lines{0};
 void NVSDK_CONV ngx_log(const char* message, NVSDK_NGX_Logging_Level, NVSDK_NGX_Feature) {
     if (!g_set.log_ngx.load(std::memory_order_relaxed) || !message) return;
-    if (g_ngx_log_lines.fetch_add(1) > 400) return;
+    if (g_ngx_log_lines.fetch_add(1) > (g_set.log_verbose ? 4000 : 400)) return;
     std::string m(message);
     while (!m.empty() && (m.back() == '\n' || m.back() == '\r')) m.pop_back();
     log::info("ngx: {}", m);
@@ -463,7 +477,7 @@ bool init_ngx(ID3D11Device* dev) {
     info.PathListInfo.Path = path_ptrs.empty() ? nullptr : path_ptrs.data();
     info.PathListInfo.Length = static_cast<unsigned>(path_ptrs.size());
     info.LoggingInfo.LoggingCallback = &ngx_log;
-    info.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_ON;
+    info.LoggingInfo.MinimumLoggingLevel = g_set.log_verbose ? NVSDK_NGX_LOGGING_LEVEL_VERBOSE : NVSDK_NGX_LOGGING_LEVEL_ON;
     info.LoggingInfo.DisableOtherLoggingSinks = true;
     // NGX keeps its own data (logs, cache) here; a per-user temporary folder, so nothing is
     // written next to the game.
@@ -522,9 +536,80 @@ bool init_ngx(ID3D11Device* dev) {
     return true;
 }
 
-void release_feature(Feature& f) {
-    if (f.handle) NVSDK_NGX_D3D11_ReleaseFeature(f.handle);
+// ------------------------------------------------------------------ deferred release (RHI thread)
+// A feature, and every texture an evaluation reads or writes, is released only after the GPU
+// has finished the commands that use it. The SDK guide (section 5.5, ReleaseFeature): "A
+// feature handle should only be released once the command lists that were used in Evaluate
+// calls are no longer in flight", because the commands can still reference the feature's
+// internal state and resources; NGX also keeps a released feature's memory for the next
+// creation, so releasing while an evaluation runs hands memory still in use to the new
+// feature. Releasing at once is what happened at every size change, preset change and switch
+// off until now (a GPU fault came 20 ms after one such release, docs/dlss.md "GPU faults").
+// Things retired during a frame wait for an event query issued at that frame's end, after
+// every command that used them, and for at least kRetireFrames more frames.
+constexpr std::uint64_t kRetireFrames = 3;
+constexpr std::uint64_t kRetireForceFrames = 900;  // released anyway if the query never answers
+struct RetireBatch {
+    std::vector<NVSDK_NGX_Handle*> features;
+    std::vector<ComPtr<IUnknown>> objects;
+    ComPtr<ID3D11Query> fence;
+    std::uint64_t frame = 0;
+};
+RetireBatch g_retire_open;               // collected during the current frame
+std::deque<RetireBatch> g_retire_queue;  // waiting for their fence
+std::atomic<std::uint64_t> g_retired_features{0}, g_released_features{0}, g_retire_forced{0}, g_retire_waiting{0};
+std::atomic<std::uint64_t> g_stalls{0};
+
+void retire_feature(Feature& f) {
+    if (f.handle) {
+        g_retire_open.features.push_back(f.handle);
+        ++g_retired_features;
+    }
     f = Feature{};
+}
+
+// Keeps a reference until the GPU is past this frame (textures replaced by new ones, and the
+// engine's textures an evaluation of this frame reads).
+void retire_object(IUnknown* p) {
+    if (p) g_retire_open.objects.emplace_back(p);
+}
+template <class T>
+void retire(ComPtr<T>& p) {
+    retire_object(p.Get());
+    p.Reset();
+}
+
+// Frame end: fence what was retired this frame, release what the GPU is done with.
+void retire_frame_end(ID3D11Device* dev, ID3D11DeviceContext* ctx, std::uint64_t frame) {
+    if (!g_retire_open.features.empty() || !g_retire_open.objects.empty()) {
+        RetireBatch b = std::move(g_retire_open);
+        g_retire_open = RetireBatch{};
+        D3D11_QUERY_DESC qd{D3D11_QUERY_EVENT, 0};
+        if (SUCCEEDED(dev->CreateQuery(&qd, &b.fence))) ctx->End(b.fence.Get());
+        b.frame = frame;
+        g_retire_queue.push_back(std::move(b));
+    }
+    while (!g_retire_queue.empty()) {
+        RetireBatch& b = g_retire_queue.front();
+        BOOL done = FALSE;
+        const bool signalled =
+            b.fence && ctx->GetData(b.fence.Get(), &done, sizeof(done), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK && done;
+        const bool forced = frame >= b.frame + kRetireForceFrames;
+        if (!(signalled && frame >= b.frame + kRetireFrames) && !forced) break;
+        if (!signalled) {
+            ++g_retire_forced;
+            log::warn("dlss: {} features and {} objects retired at frame {} released without their GPU fence", b.features.size(), b.objects.size(),
+                      b.frame);
+        }
+        for (NVSDK_NGX_Handle* h : b.features) {
+            NVSDK_NGX_D3D11_ReleaseFeature(h);
+            ++g_released_features;
+        }
+        g_retire_queue.pop_front();
+    }
+    std::uint64_t waiting = g_retire_open.features.size();
+    for (const RetireBatch& b : g_retire_queue) waiting += b.features.size();
+    g_retire_waiting = waiting;
 }
 
 int wanted_flags(bool hdr = true) {
@@ -580,7 +665,7 @@ bool ensure_feature(ID3D11DeviceContext* ctx, int eye, UINT w, UINT h, bool& cre
     const int flags = wanted_flags(hdr);
     created = false;
     if (f.handle && f.w == w && f.h == h && f.ow == ow && f.oh == oh && f.preset == preset && f.flags == flags && f.dynamic == dynamic) return true;
-    release_feature(f);
+    retire_feature(f);
     NVSDK_NGX_Parameter_SetUI(R.params, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA, preset);
     NVSDK_NGX_Parameter_SetUI(R.params, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality, preset);
     NVSDK_NGX_Parameter_SetUI(R.params, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced, preset);
@@ -705,8 +790,8 @@ bool ensure_shaders(ID3D11Device* dev) {
 bool ensure_textures(ID3D11Device* dev, const D3D11_TEXTURE2D_DESC& color, DXGI_FORMAT out_format) {
     Rhi& R = *g_rhi;
     if (!R.mv || R.mv_desc.Width != color.Width || R.mv_desc.Height != color.Height) {
-        R.mv.Reset();
-        R.mv_rtv.Reset();
+        retire(R.mv);
+        retire(R.mv_rtv);
         D3D11_TEXTURE2D_DESC d{};
         d.Width = color.Width;
         d.Height = color.Height;
@@ -724,7 +809,7 @@ bool ensure_textures(ID3D11Device* dev, const D3D11_TEXTURE2D_DESC& color, DXGI_
         log::info("dlss: motion vector texture {}x{} R16G16_FLOAT", d.Width, d.Height);
     }
     if (!R.out || R.out_desc.Width != color.Width || R.out_desc.Height != color.Height || R.out_desc.Format != out_format) {
-        R.out.Reset();
+        retire(R.out);
         D3D11_TEXTURE2D_DESC d{};
         d.Width = color.Width;
         d.Height = color.Height;
@@ -1104,6 +1189,8 @@ bool run_dlss(ID3D11DeviceContext* ctx, PassInputs& in, int eye, std::string& wh
         ep.InFrameTimeDeltaInMsec = R.frame_dt_ms;
         const NVSDK_NGX_Result r = NGX_D3D11_EVALUATE_DLSS_EXT(ctx, f.handle, R.params, &ep);
         ctx->ClearState();
+        retire_object(in.color.Get());  // the engine's textures, read by the evaluation
+        retire_object(in.depth.Get());
         if (NVSDK_NGX_SUCCEED(r)) {
             const D3D11_BOX box{x, y, 0, x + w, y + h, 1};
             ctx->CopySubresourceRegion(in.target.Get(), in.target_view.Texture2D.MipSlice, x, y, 0, R.out.Get(), 0, &box);
@@ -1164,7 +1251,7 @@ D3D11_TEXTURE2D_DESC g_graded_desc{};
 ComPtr<ID3D11Texture2D> g_up_out;  // DLSS output, like the eye texture
 D3D11_TEXTURE2D_DESC g_up_out_desc{};
 ID3D11PixelShader* g_final_ps = nullptr;  // compared only
-std::atomic<std::uint64_t> g_up_count{0}, g_up_fail{0};
+std::atomic<std::uint64_t> g_up_count{0}, g_up_fail{0}, g_up_skipped{0};
 // The last pass's pixel shader constants (cb0, 1024 bytes): rows 30/31 the input rectangle
 // and size, rows 34/35 the output rectangle (min x, min y, max x, max y) and size (w, h,
 // 1/w, 1/h); the pixel shader maps SV_Position through rows 34/35 (docs/re/engine.md
@@ -1329,8 +1416,8 @@ bool try_final(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_t
     // 1. The last pass once more, into a texture at the reduced size: same shaders and inputs,
     //    a viewport the size of the eye's reduced rectangle.
     if (!g_graded || g_graded_desc.Width != id.Width || g_graded_desc.Height != id.Height || g_graded_desc.Format != td.Format) {
-        g_graded.Reset();
-        g_graded_rtv.Reset();
+        retire(g_graded);
+        retire(g_graded_rtv);
         g_graded = make_tex(R.dev, id.Width, id.Height, td.Format, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
         if (!g_graded || FAILED(R.dev->CreateRenderTargetView(g_graded.Get(), nullptr, &g_graded_rtv))) {
             g_graded.Reset();
@@ -1340,7 +1427,7 @@ bool try_final(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_t
         log::info("dlss: graded texture {}x{} format {}", id.Width, id.Height, static_cast<int>(td.Format));
     }
     if (!g_up_out || g_up_out_desc.Width != td.Width || g_up_out_desc.Height != td.Height) {
-        g_up_out.Reset();
+        retire(g_up_out);
         UINT support = 0;
         R.dev->CheckFormatSupport(DXGI_FORMAT_R10G10B10A2_UNORM, &support);
         if (!(support & D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW)) {
@@ -1369,8 +1456,8 @@ bool try_final(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_t
             g_cb_copy->GetDesc(&d);
             return d.ByteWidth != cbd.ByteWidth;
         }()) {
-        g_cb_copy.Reset();
-        g_cb_patch.Reset();
+        retire(g_cb_copy);
+        retire(g_cb_patch);
         D3D11_BUFFER_DESC d{};
         d.ByteWidth = cbd.ByteWidth;
         d.Usage = D3D11_USAGE_DEFAULT;
@@ -1423,6 +1510,14 @@ bool try_final(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_t
     ctx->OMSetRenderTargets(8, restore, saved_dsv.Get());
     ctx->RSSetViewports(nvp, &vp);
     ctx->RSSetScissorRects(nsc, nsc ? saved_scissor : nullptr);
+    if (g_set.skip_eval.load(std::memory_order_relaxed)) {
+        // Test (`dlss skip 1`): no NGX call; the game's own pass scales the image up.
+        s.frame = 0;
+        retire(s.depth);
+        ++g_up_skipped;
+        original(ctx, count, start, base);
+        return true;
+    }
     // 2. DLSS from the reduced rectangle into the eye's rectangle.
     ComPtr<ID3D11DeviceContext1> ctx1;
     if (FAILED(ctx->QueryInterface(IID_PPV_ARGS(&ctx1)))) return false;
@@ -1512,7 +1607,7 @@ bool try_final(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_t
     ctx1->SwapDeviceContextState(game_state, nullptr);
     if (game_state) game_state->Release();
     s.frame = 0;  // one use per frame
-    s.depth.Reset();
+    retire(s.depth);  // the engine's depth texture, read by this frame's evaluation
     // If DLSS failed, the eye's rectangle still holds the previous frame; draw the game's pass.
     if (!ok) original(ctx, count, start, base);
     return true;
@@ -1541,7 +1636,7 @@ void run_bench(ID3D11DeviceContext* ctx) {
     const UINT iw = g_set.bench_in_w.load(), ih = g_set.bench_in_h.load(), ow = g_set.bench_out_w.load(), oh = g_set.bench_out_h.load();
     if (!iw || !ih || !ow || !oh || iw > ow || ih > oh || !ensure_shaders(R.dev)) return;
     if (!R.bench_out || R.bench_out_w != ow || R.bench_out_h != oh || R.bench.w != iw || R.bench.h != ih) {
-        release_feature(R.bench);
+        retire_feature(R.bench);
         R.bench_color = make_tex(R.dev, iw, ih, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_BIND_SHADER_RESOURCE);
         R.bench_depth = make_tex(R.dev, iw, ih, DXGI_FORMAT_R32_FLOAT, D3D11_BIND_SHADER_RESOURCE);
         R.bench_mv = make_tex(R.dev, iw, ih, DXGI_FORMAT_R16G16_FLOAT, D3D11_BIND_SHADER_RESOURCE);
@@ -1632,6 +1727,7 @@ void start(const Config& cfg, const std::filesystem::path& dll_dir) {
     g_set.cut_distance = static_cast<float>(cfg.get_float("dlss", "cut_distance", 100.0));
     g_set.cut_angle = static_cast<float>(cfg.get_float("dlss", "cut_angle", 30.0));
     g_set.log_ngx = cfg.get_bool("dlss", "log_ngx", true);
+    g_set.log_verbose = cfg.get_bool("dlss", "log_verbose", false);
     const std::string extra = cfg.get_string("dlss", "dll_dir", "");
     if (!extra.empty()) g_extra_dll_dir = log::widen(extra);
     const std::string mode = cfg.get_string("dlss", "mode", "upscale");
@@ -1673,32 +1769,76 @@ void frame(ID3D11Texture2D* any_texture) {
         i.seen_this_frame = 0;
     });
     if (g_set.reset_requests.load() > 0) g_set.reset_requests.fetch_sub(1);
-    if (!wants_hooks() || !any_texture) return;
+    // Once NGX runs, every frame end is needed to release what was retired, also while off.
+    if ((!wants_hooks() && R.ngx_state != 1) || !any_texture) return;
     ID3D11Device* dev = nullptr;
     any_texture->GetDevice(&dev);
     if (!dev) return;
+    static bool removed_logged = false;
+    if (!removed_logged) {
+        const HRESULT rr = dev->GetDeviceRemovedReason();
+        if (rr != S_OK) {
+            removed_logged = true;
+            log::error("dlss: the D3D11 device was removed, reason 0x{:08x} ({}); DLSS {}, {} features waiting for release", static_cast<unsigned>(rr),
+                       rr == DXGI_ERROR_DEVICE_HUNG     ? "hung: this process's commands"
+                       : rr == DXGI_ERROR_DEVICE_RESET  ? "reset: another process's commands"
+                       : rr == DXGI_ERROR_DEVICE_REMOVED ? "removed"
+                       : rr == DXGI_ERROR_DRIVER_INTERNAL_ERROR ? "driver internal error"
+                                                                : "other",
+                       g_set.enabled.load() ? "on" : "off", g_retire_waiting.load());
+        }
+    }
     ID3D11DeviceContext* ctx = nullptr;
     dev->GetImmediateContext(&ctx);
     if (ctx) {
         install_ub_hooks(dev, ctx);
-        if (R.ngx_state == 0) init_ngx(dev);
+        if (R.ngx_state == 0 && wants_hooks()) init_ngx(dev);
         // Features hold several hundred MB of video memory each: release them while DLSS is off.
         if (!g_set.enabled.load() && (R.feat[0].handle || R.feat[1].handle)) {
-            release_feature(R.feat[0]);
-            release_feature(R.feat[1]);
+            retire_feature(R.feat[0]);
+            retire_feature(R.feat[1]);
             with_info([](Info& i) { i.features[0] = i.features[1] = "released (off)"; });
             log::info("dlss: features released (off)");
         }
         if (g_set.recreate_requests.exchange(0) > 0) {
-            release_feature(R.feat[0]);
-            release_feature(R.feat[1]);
-            release_feature(R.bench);
+            retire_feature(R.feat[0]);
+            retire_feature(R.feat[1]);
+            retire_feature(R.bench);
             with_info([](Info& i) { i.features[0] = i.features[1] = "released"; });
         }
         collect_timing(ctx);
         cuttest_collect(ctx, R.frame);
         if (g_set.bench.load() && R.ngx_state == 1) run_bench(ctx);
-        else if (R.bench.handle) release_feature(R.bench);
+        else if (R.bench.handle) retire_feature(R.bench);
+        retire_frame_end(dev, ctx, R.frame);
+        if (g_set.stall_requests.load() > 0) {
+            // Test (`dlss stall`): what a blocking read-back does to the frame, without one: the
+            // thread waits until the GPU has finished everything, then stays away a while.
+            g_set.stall_requests.fetch_sub(1);
+            const auto t0 = std::chrono::steady_clock::now();
+            ComPtr<ID3D11Query> q;
+            D3D11_QUERY_DESC qd{D3D11_QUERY_EVENT, 0};
+            bool done_ok = false;
+            if (SUCCEEDED(dev->CreateQuery(&qd, &q))) {
+                ctx->End(q.Get());
+                BOOL done = FALSE;
+                for (;;) {
+                    const HRESULT hr = ctx->GetData(q.Get(), &done, sizeof(done), 0);
+                    if (hr == S_OK) {
+                        done_ok = true;
+                        break;
+                    }
+                    if (hr != S_FALSE || std::chrono::steady_clock::now() - t0 > std::chrono::seconds(3)) break;
+                    std::this_thread::yield();
+                }
+            }
+            const double wait = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            const int idle = g_set.stall_ms.load();
+            if (idle > 0) Sleep(static_cast<DWORD>(idle));
+            const std::uint64_t n = ++g_stalls;
+            if (n <= 5 || (n & (n - 1)) == 0)
+                log::info("dlss: stall test {}: GPU idle after {:.2f} ms{}, then {} ms away", n, wait, done_ok ? "" : " (no answer)", idle);
+        }
         ctx->Release();
     }
     dev->Release();
@@ -1731,7 +1871,13 @@ bool on_draw_indexed(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base,
         ++(ok ? i.replaced : i.fallback);
         if (!ok) i.last_error = why;
     });
-    if (!ok && g_fallback_log.fetch_add(1) < 10) log::warn("dlss: eye {}: the game's anti-aliasing runs instead: {}", eye, why);
+    if (!ok && g_fallback_log.fetch_add(1) < 10) {
+        // The view constants are captured from the first recognised pass on, so that pass
+        // itself always falls back (expected at start-up, not a warning).
+        const bool startup = g_ub_captures_map.load() + g_ub_captures_update.load() + g_ub_captures_create.load() == 0;
+        if (startup) log::info("dlss: eye {}: the game's anti-aliasing runs this frame: {} (start-up: capture of the view constants begins with this pass)", eye, why);
+        else log::warn("dlss: eye {}: the game's anti-aliasing runs instead: {}", eye, why);
+    }
     return ok;
 }
 
@@ -1834,6 +1980,16 @@ std::string command(const std::string& args) {
         g_set.reset_requests = 2;
         return "ok history reset at the next frame";
     }
+    if (sub == "skip" && a.size() == 2) {
+        g_set.skip_eval = a[1] == "1";
+        log::info("dlss: evaluation {} (dev command)", g_set.skip_eval.load() ? "skipped, the game's pass upscales" : "on");
+        return std::format("ok upscale evaluation {}", g_set.skip_eval.load() ? "skipped (motion vectors and the graded copy still run)" : "on");
+    }
+    if (sub == "stall") {
+        if (a.size() == 2) g_set.stall_ms = std::clamp(std::atoi(a[1].c_str()), 0, 500);
+        g_set.stall_requests.fetch_add(1);
+        return std::format("ok one full GPU wait at the next frame end, then {} ms away", g_set.stall_ms.load());
+    }
     if (sub == "recreate") {
         g_set.recreate_requests = 1;
         return "ok features released, recreated at the next frame";
@@ -1866,7 +2022,7 @@ std::string command(const std::string& args) {
     if (sub != "status")
         return "err dlss status|on|off|init|mode <dlaa|upscale>|preset <default|j|k|l|m>|autoexp <0|1>|mvjitter <0|1|2>|jitter <sx> <sy>|cutreset <0|1>|"
                "cutflag <0|1>|cutlimits <cm> <deg>|cuttest <prefix> <reset 0|1> <zero_mv 0|1>|hdr <0|1>|sharpness <v>|preexp <v>|nograin <0|1>|reset|"
-               "recreate|dump|timing|bench ...";
+               "recreate|skip <0|1>|stall [ms]|dump|timing|bench ...";
     std::string s;
     with_info([&](Info& i) {
         auto avg = [&](int e, const double* sum) { return i.ms_n[e] ? sum[e] / static_cast<double>(i.ms_n[e]) : 0.0; };
@@ -1881,8 +2037,10 @@ std::string command(const std::string& args) {
             i.features[1].empty() ? "-" : i.features[1], avg(0, i.ms_sum), avg(1, i.ms_sum), avg(0, i.mv_ms_sum), avg(1, i.mv_ms_sum), i.ms_n[0], i.ms_n[1],
             i.jitter_px[0][0], i.jitter_px[0][1], i.jitter_px[1][0], i.jitter_px[1][1], g_ub_size.load(), g_ub_captures_map.load(),
             g_ub_captures_update.load(), g_ub_captures_create.load(), i.optimal.empty() ? "" : " | optimal:" + i.optimal);
-        s += std::format(" | mode {} | upscaled {} upscale failures {} | {}", g_set.mode.load() ? "upscale" : "dlaa", g_up_count.load(), g_up_fail.load(),
-                         i.up_sizes.empty() ? "-" : i.up_sizes);
+        s += std::format(" | mode {} | upscaled {} upscale failures {} skipped {} | {}", g_set.mode.load() ? "upscale" : "dlaa", g_up_count.load(),
+                         g_up_fail.load(), g_up_skipped.load(), i.up_sizes.empty() ? "-" : i.up_sizes);
+        s += std::format(" | deferred release: features retired {} released {} waiting {} released without fence {} | stall tests {}",
+                         g_retired_features.load(), g_released_features.load(), g_retire_waiting.load(), g_retire_forced.load(), g_stalls.load());
         s += std::format(" | camera cuts: reset {} ({} resets) engine {} distance {} angle {} flag {} (row 140 set in {} views; limits {} cm {} deg) last: {} | "
                          "cut test: {} | tests: hdr input {} sharpness {} pre-exposure {} no grain {}",
                          g_set.cut_reset.load() ? "on" : "off", g_cut_resets.load(), g_cut_count[0].load(), g_cut_count[2].load(), g_cut_count[3].load(),
