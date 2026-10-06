@@ -89,6 +89,20 @@ preset L, because the driver override forced it (next section).
   of the room (camera translating) and in the street: no smearing or ghosting seen in the
   captures (`r4/sheet_walk.png`, `r4/sheet_street.png`); mean brightness the same (27.8
   against 28.2).
+- **Stability on a still scene** (jitter shimmer): four captures in a row per setting, third
+  person, mean change between consecutive captures in two regions without animated objects
+  (the counter; the wall and vent), `captures/dlss/r11`:
+
+  | Setting | Counter | Wall and vent |
+  |---|---|---|
+  | game's anti-aliasing | 0.36 (0.57 in a second burst) | 0.33 (0.54) |
+  | DLAA, `mv_jitter = 2` (default) | 0.36 | 0.36 |
+  | DLAA, `mv_jitter = 0` (jitter difference removed) | 0.76 | 0.90 |
+  | DLAA, `mv_jitter = 1` (flagged as jittered) | 0.70 | 0.82 |
+  | upscale from 50 % | 0.10 | 0.09 |
+
+  So the camera motion the engine's `ClipToPrevClip` gives is already free of jitter for
+  DLSS's purposes (the default), and the other two settings make the image shimmer.
 - **History:** after `stereo off` / `stereo on` with DLSS on, the first frames are clean
   (`r3/sheet_after_on.png`; the features are reset when an eye was not evaluated in the
   previous frame). Switching DLSS off releases the features.
