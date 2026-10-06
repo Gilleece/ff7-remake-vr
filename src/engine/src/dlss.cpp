@@ -399,6 +399,7 @@ struct Feature {
     NVSDK_NGX_Parameter* params = nullptr;
     bool own_params = false;
     bool subrects = true;  // created with output sub-rectangles (off with [dlss] test_copy_inputs)
+    int quality = -1;      // the NGX mode (NVSDK_NGX_PerfQuality_Value) it was created for
     UINT w = 0, h = 0, ow = 0, oh = 0;
     unsigned preset = 0;
     int flags = 0;
@@ -863,10 +864,9 @@ struct DynRange {
     UINT min_w = 0, min_h = 0, max_w = 0, max_h = 0;
 };
 DynRange dynamic_range(UINT ow, UINT oh, NVSDK_NGX_PerfQuality_Value q) {
-    static UINT key_w = 0, key_h = 0;
-    static int key_q = -1;
-    static DynRange cached;
-    if (key_w == ow && key_h == oh && key_q == static_cast<int>(q)) return cached;
+    static std::unordered_map<std::uint64_t, DynRange> cache;  // RHI thread
+    const std::uint64_t key = (static_cast<std::uint64_t>(ow) << 40) | (static_cast<std::uint64_t>(oh) << 16) | static_cast<std::uint64_t>(q);
+    if (auto it = cache.find(key); it != cache.end()) return it->second;
     DynRange d;
     unsigned optw = 0, opth = 0, maxw = 0, maxh = 0, minw = 0, minh = 0;
     float sharp = 0;
@@ -874,16 +874,13 @@ DynRange dynamic_range(UINT ow, UINT oh, NVSDK_NGX_PerfQuality_Value q) {
     if (NVSDK_NGX_SUCCEED(r)) d = DynRange{true, minw, minh, maxw, maxh};
     log::info("dlss: input range for output {}x{} mode {}: {} (optimal {}x{}, min {}x{}, max {}x{})", ow, oh, static_cast<int>(q), result_text(r), optw,
               opth, minw, minh, maxw, maxh);
-    key_w = ow;
-    key_h = oh;
-    key_q = static_cast<int>(q);
-    cached = d;
+    cache[key] = d;
     return d;
 }
 
 // One feature per eye: input w x h, output ow x oh (equal for DLAA), HDR or display-referred input.
 bool ensure_feature(ID3D11DeviceContext* ctx, int eye, UINT w, UINT h, bool& created, UINT ow = 0, UINT oh = 0, bool hdr = true,
-                    bool dynamic = false, UINT min_w = 0, UINT min_h = 0) {
+                    bool dynamic = false, UINT min_w = 0, UINT min_h = 0, int quality = -1) {
     Rhi& R = *g_rhi;
     Feature& f = R.feat[eye];
     if (!ow) ow = w;
@@ -893,8 +890,9 @@ bool ensure_feature(ID3D11DeviceContext* ctx, int eye, UINT w, UINT h, bool& cre
     created = false;
     const bool own = g_set.own_params.load();
     const bool subrects = !(g_set.copy_inputs.load() && g_set.mode.load() == 1);  // the copies exist in upscale mode only
+    const NVSDK_NGX_PerfQuality_Value q = quality >= 0 ? static_cast<NVSDK_NGX_PerfQuality_Value>(quality) : quality_for(w, ow);
     if (f.handle && f.w == w && f.h == h && f.ow == ow && f.oh == oh && f.preset == preset && f.flags == flags && f.dynamic == dynamic &&
-        f.own_params == own && f.subrects == subrects)
+        f.own_params == own && f.subrects == subrects && f.quality == static_cast<int>(q))
         return true;
     retire_feature(f);
     NVSDK_NGX_Parameter* params = R.params;
@@ -917,7 +915,7 @@ bool ensure_feature(ID3D11DeviceContext* ctx, int eye, UINT w, UINT h, bool& cre
     cp.Feature.InHeight = h;
     cp.Feature.InTargetWidth = ow;
     cp.Feature.InTargetHeight = oh;
-    cp.Feature.InPerfQualityValue = quality_for(w, ow);
+    cp.Feature.InPerfQualityValue = q;
     cp.InFeatureCreateFlags = flags;
     cp.InEnableOutputSubrects = subrects;
     const auto t0 = std::chrono::steady_clock::now();
@@ -944,6 +942,7 @@ bool ensure_feature(ID3D11DeviceContext* ctx, int eye, UINT w, UINT h, bool& cre
     f.params = params;
     f.own_params = own;
     f.subrects = subrects;
+    f.quality = static_cast<int>(q);
     f.w = w;
     f.h = h;
     f.ow = ow;
@@ -2317,6 +2316,20 @@ bool evaluate_upscale(ID3D11DeviceContext* ctx, int eye, Stash& s, UINT half, UI
     ComPtr<ID3D11DeviceContext1> ctx1;
     if (FAILED(ctx->QueryInterface(IID_PPV_ARGS(&ctx1)))) return false;
     const bool in_game_state = !g_set.own_state.load(std::memory_order_relaxed);
+    if (in_game_state) {
+        // NGX reads the engine's depth texture; in the game's state it must not be bound for
+        // writing (the runtime would unbind NGX's view of it). Logged once.
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            ID3D11DepthStencilView* dsv = nullptr;
+            ctx->OMGetRenderTargets(0, nullptr, &dsv);
+            D3D11_DEPTH_STENCIL_VIEW_DESC dd{};
+            if (dsv) dsv->GetDesc(&dd);
+            log::info("dlss: at the evaluation the game's state has {}", dsv ? std::format("a depth-stencil view bound (flags 0x{:x})", dd.Flags) : std::string("no depth-stencil view bound"));
+            if (dsv) dsv->Release();
+        }
+    }
     ID3DDeviceContextState* game_state = nullptr;
     if (!in_game_state) ctx1->SwapDeviceContextState(R.state.Get(), &game_state);
     bool ok = false, created = false;
@@ -2335,16 +2348,48 @@ bool evaluate_upscale(ID3D11DeviceContext* ctx, int eye, Stash& s, UINT half, UI
     const UINT max_w = std::min(ow, std::max(s.w, static_cast<UINT>(std::ceil(static_cast<double>(scaled(half)) * id_w / td_w)) + 2));
     const UINT max_h = std::min(oh, std::max(s.h, static_cast<UINT>(std::ceil(static_cast<double>(scaled(td_h)) * id_h / td_h)) + 2));
     // NGX allows a smaller input than the creation size only within the range its optimal
-    // settings give for the mode (dynamic resolution, guide 3.2.2). With the NVIDIA App's
-    // override forcing DLAA the range is about 99-100 % of the output, a reduced creation
-    // size is outside it, and every evaluation must use exactly the creation size: then
-    // the feature is created at the current input size (a change recreates it).
-    const DynRange dr = dynamic_range(ow, oh, quality_for(max_w, ow));
-    const bool dyn = dr.ok && dr.min_w < dr.max_w && dr.min_h < dr.max_h && max_w >= dr.min_w && max_w <= dr.max_w && max_h >= dr.min_h &&
-                     max_h <= dr.max_h && s.w >= dr.min_w && s.h >= dr.min_h;
-    const UINT cw = dyn ? max_w : s.w, ch = dyn ? max_h : s.h;
+    // settings give for the mode (dynamic resolution, guide 3.2.2): where the range of the
+    // chosen mode holds both the largest and the current input, the feature is created for the
+    // largest and evaluated at the current one; otherwise it is created at the current input
+    // size (a change recreates it).
+    // The feature is created only for a mode whose reported range contains its creation size
+    // (the guide: the optimal settings are to be used as given): the mode of the input's share
+    // of the output first, then the others. If no mode accepts it, there is no evaluation and
+    // the game's pass runs (logged). With the NVIDIA App's override forcing DLAA every mode
+    // reports about 99-100 % of the output, so an input below that is refused.
+    const NVSDK_NGX_PerfQuality_Value modes[] = {quality_for(max_w, ow), NVSDK_NGX_PerfQuality_Value_MaxQuality, NVSDK_NGX_PerfQuality_Value_Balanced,
+                                                 NVSDK_NGX_PerfQuality_Value_MaxPerf, NVSDK_NGX_PerfQuality_Value_UltraPerformance,
+                                                 NVSDK_NGX_PerfQuality_Value_DLAA};
+    DynRange dr;
+    bool dyn = false, found = false, any_range = false;
+    NVSDK_NGX_PerfQuality_Value mode = modes[0];
+    UINT cw = s.w, ch = s.h;
+    for (const NVSDK_NGX_PerfQuality_Value m : modes) {
+        const DynRange d = dynamic_range(ow, oh, m);
+        if (!d.ok) continue;
+        any_range = true;
+        auto inside = [&](UINT iw, UINT ih) { return iw >= d.min_w && iw <= d.max_w && ih >= d.min_h && ih <= d.max_h; };
+        if (d.min_w < d.max_w && d.min_h < d.max_h && inside(max_w, max_h) && inside(s.w, s.h)) {
+            dr = d, dyn = true, found = true, mode = m, cw = max_w, ch = max_h;
+            break;
+        }
+        if (inside(s.w, s.h)) {
+            dr = d, dyn = false, found = true, mode = m, cw = s.w, ch = s.h;
+            break;
+        }
+    }
+    if (!any_range) found = true;  // NGX gave no range at all: create for the input as it is
+    if (!found) {
+        static std::uint64_t refused = 0;
+        ++refused;
+        event(std::format("eye {}: input {}x{} outside every input range NGX reports for the output {}x{}; not evaluated", eye, s.w, s.h, ow, oh));
+        if ((refused & (refused - 1)) == 0)
+            log::warn("dlss: eye {}: the input {}x{} is outside every input range NGX reports for the output {}x{} ({} times); the game's pass runs. "
+                      "If the NVIDIA App's DLSS override for this game forces DLAA, set its Super Resolution override back to the application's choice",
+                      eye, s.w, s.h, ow, oh, refused);
+    }
     Feature& f = R.feat[eye];
-    if (ensure_feature(ctx, eye, cw, ch, created, ow, oh, g_set.up_hdr.load(), dyn, dr.min_w, dr.min_h) &&
+    if (found && ensure_feature(ctx, eye, cw, ch, created, ow, oh, g_set.up_hdr.load(), dyn, dr.min_w, dr.min_h, static_cast<int>(mode)) &&
         s.w <= f.w && s.h <= f.h && s.w >= f.min_w && s.h >= f.min_h) {
         Timing* t = begin_timing(ctx, eye);
         if (t) ctx->End(t->t1);
