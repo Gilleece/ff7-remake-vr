@@ -111,9 +111,9 @@ package folder.
 - Markers over enemies are 3 to 6 degrees off on the default HUD panel size
   (`[ui] size = 1.57` lines them up).
 - The game window becomes 1280x720 while 3D runs, until the game exits.
-- With ReShade/Luma loaded the game runs in 3D, but the right eye shows only a strip
-  of the scene; the launcher sets it aside for each session (rename its `dxgi.dll`
-  for a drop-in install).
+- ReShade/Luma loaded together with the mod is new: the mod corrects Luma's
+  tonemapping for the right eye and turns Luma's own DLSS off for the headset image,
+  checked without a headset only. The launcher still sets Luma aside per session.
 - Battle detection has never been seen in a real battle; switch by hand with Home if
   needed.
 - Pre-rendered movies are very likely wrong (`[stereo] movie_screen = 1` is worth a

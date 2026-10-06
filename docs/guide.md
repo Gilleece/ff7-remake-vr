@@ -67,8 +67,9 @@ Options, from a command prompt in the package folder:
 start-vr.cmd -KeepInstalled     leave the mod installed after the game exits (Luma stays set aside).
                                 restore.cmd removes it again. The game can then also be
                                 started from Steam (see "Installing without the launcher")
-start-vr.cmd -KeepLuma          do not set ReShade/Luma aside. The game runs in 3D with it, but
-                                the right eye shows only a strip of the scene for now
+start-vr.cmd -KeepLuma          do not set ReShade/Luma aside: the game runs in 3D with it (the mod
+                                corrects Luma's tonemapping for the right eye and turns Luma's own
+                                DLSS off for the headset image; checked without a headset so far)
 start-vr.cmd -ExtraArgs "..."   extra arguments for the game
 start-vr.cmd -NoPause           close the window at once at the end, also after an error
 powershell -NoProfile -ExecutionPolicy Bypass -File ff7vr-launcher.ps1 status
@@ -137,10 +138,12 @@ that folder (Steam must be running). Either way the mod loads by itself.
   Steam launch options does no harm. If the launch options ask for another one
   (`-dx12`, `-d3d12`, `-vulkan`), the mod leaves them alone, the game runs flat, and
   the log has a warning.
-- ReShade/Luma (a `dxgi.dll` in the same folder): the game starts and runs in 3D with
-  it, but at the moment **the right eye shows only a strip of the scene** while it is
-  loaded. For VR, rename `dxgi.dll` to `dxgi.dll.vr-disabled`; give it its name back
-  to play flat with Luma. Without ReShade/Luma there is nothing to do.
+- ReShade and Luma can stay in place: nothing to do. While VR renders, the mod
+  corrects Luma's tonemapping for the right eye and turns Luma's own DLSS off for the
+  headset image (Luma treats the two eyes as one half-size frame). Luma's DLSS still
+  works in flat play; for DLSS in VR, use the mod's `[dlss]` settings. Checked on the
+  simulated headset only so far; if the right eye looks wrong with Luma loaded, rename
+  `dxgi.dll` to `dxgi.dll.vr-disabled` for VR and say so.
 - A `-dlss` drop-in needs an NVIDIA RTX graphics card and NVIDIA's DLSS model file,
   which is not part of the package: `nvngx_dlss.dll` beside `ff7remake_.exe`, or the
   model the NVIDIA App's DLSS override provides (see "DLSS" below). `[dlss] enabled`
