@@ -47,4 +47,11 @@ void set_ao_enabled(bool on);
 bool ao_enabled();
 std::string ao_status();
 
+// With Luma (a ReShade add-on) loaded, the right view's tonemapping draw is run with its input
+// 0 shifted to the origin, because Luma's replacement shader reads it relative to the origin
+// (bloom_fix.cpp, tonemap_shift). Mode 0 off, 1 on, 2 auto (default: while Luma's add-on is
+// loaded). [stereo] tonemap_shift, dev command "tonemapshift [0|1|2]".
+void set_tonemap_shift(int mode);
+std::string tonemap_shift_status();
+
 }  // namespace ff7vr::engine::bloom_fix

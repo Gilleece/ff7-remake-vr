@@ -703,6 +703,16 @@ void configure_render_scale(const Config& cfg) {
                           else if (!args.empty() && args != "status") return std::string("err usage: ssr [status] | on | off | fix 0|1 | poison 0-3");
                           return "ok " + fixes::ssr_status();
                       });
+    {
+        const std::string m = cfg.get_string("stereo", "tonemap_shift", "auto");
+        bloom_fix::set_tonemap_shift(m == "0" || m == "off" ? 0 : m == "1" || m == "on" ? 1 : 2);
+    }
+    dev_commands::add("tonemapshift", "tonemapshift [0|1|2]: right view's tonemapping input shifted to the origin for Luma (2 = auto: while Luma is loaded)",
+                      [](std::string_view args) {
+                          if (args == "0" || args == "1" || args == "2") bloom_fix::set_tonemap_shift(args[0] - '0');
+                          else if (!args.empty()) return std::string("err usage: tonemapshift [0|1|2]");
+                          return "ok " + bloom_fix::tonemap_shift_status();
+                      });
 }
 
 Settings& settings() { return g_settings; }

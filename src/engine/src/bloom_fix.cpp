@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstring>
 #include <format>
 
@@ -263,8 +264,82 @@ bool ao_fix(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_trac
     return done;
 }
 
+// With Luma (a ReShade add-on that replaces the game's tonemapping shader) loaded, the right
+// view's tonemapping pass writes the left view's image: Luma's shader reads its input relative
+// to the origin (docs/render.md, "ReShade and Luma"). This runs that draw with its input 0
+// shifted like the bloom fix. Recognised by shape: a full-screen draw at a viewport starting
+// at the middle of an R16G16B16A16 target, input 0 of
+// the target's size and input 1 between a quarter and a half of the target's width and
+// height (the bloom result, half the view). The game's own shader reads at the view's rectangle, so this must only run with
+// Luma: mode auto (default) applies it while Luma's add-on module is loaded.
+enum ShiftMode { kShiftOff = 0, kShiftOn = 1, kShiftAuto = 2 };
+std::atomic<int> g_tonemap_mode{kShiftAuto};
+std::atomic<bool> g_luma_loaded{false};
+unsigned g_luma_check = 0;  // RHI thread: frames until the next module check
+std::atomic<bool> g_tonemap_shift{false};
+std::atomic<std::uint64_t> g_tonemap_shifted{0};
+
+void update_tonemap_shift() {  // RHI thread, once per stereo frame
+    if (g_luma_check-- == 0) {
+        g_luma_check = 600;
+        const bool luma = GetModuleHandleW(L"Luma-Final Fantasy VII Remake.addon") != nullptr;
+        if (luma != g_luma_loaded.exchange(luma))
+            log::info("tonemap input shift: Luma add-on {}", luma ? "loaded (the shift applies in mode auto)" : "not loaded");
+    }
+    const int m = g_tonemap_mode.load(std::memory_order_relaxed);
+    g_tonemap_shift = m == kShiftOn || (m == kShiftAuto && g_luma_loaded.load(std::memory_order_relaxed));
+}
+
+bool tonemap_shift(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_trace::DrawIndexedFn original) {
+    D3D11_VIEWPORT vp{};
+    UINT nvp = 1;
+    ctx->RSGetViewports(&nvp, &vp);
+    if (nvp == 0 || vp.TopLeftX < 1.0f || vp.TopLeftY != 0.0f) return false;
+    const auto size_of = [](ID3D11View* v, UINT* w, UINT* h, DXGI_FORMAT* f) {
+        ID3D11Resource* r = nullptr;
+        v->GetResource(&r);
+        D3D11_RESOURCE_DIMENSION dim{};
+        if (r) r->GetType(&dim);
+        bool ok = r && dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D;
+        if (ok) {
+            D3D11_TEXTURE2D_DESC d{};
+            static_cast<ID3D11Texture2D*>(r)->GetDesc(&d);
+            *w = d.Width;
+            *h = d.Height;
+            *f = d.Format;
+        }
+        if (r) r->Release();
+        return ok;
+    };
+    ID3D11RenderTargetView* rtv = nullptr;
+    ctx->OMGetRenderTargets(1, &rtv, nullptr);
+    UINT tw = 0, th = 0;
+    DXGI_FORMAT tf{};
+    const bool rt_ok = rtv && size_of(rtv, &tw, &th, &tf);
+    if (rtv) rtv->Release();
+    if (!rt_ok || (tf != DXGI_FORMAT_R16G16B16A16_FLOAT && tf != DXGI_FORMAT_R16G16B16A16_TYPELESS) ||
+        std::abs(static_cast<float>(tw) - 2.0f * vp.TopLeftX) > 8.0f)  // the right view starts at the middle
+        return false;
+    ID3D11ShaderResourceView* srvs[2]{};
+    ctx->PSGetShaderResources(0, 2, srvs);
+    UINT w0 = 0, h0 = 0, w1 = 0, h1 = 0;
+    DXGI_FORMAT f0{}, f1{};
+    const bool shape = srvs[0] && srvs[1] && size_of(srvs[0], &w0, &h0, &f0) && size_of(srvs[1], &w1, &h1, &f1) && w0 == tw && h0 == th &&
+                       w1 * 2 <= tw + 4 && h1 * 2 <= th + 4 && w1 * 4 >= tw && h1 * 4 >= th;  // the bloom result: about half the view
+    bool done = false;
+    if (shape)
+        done = draw_with_shifted_input(ctx, srvs[0], static_cast<std::int32_t>(vp.TopLeftX), 0, static_cast<std::int32_t>(vp.Width),
+                                       static_cast<std::int32_t>(vp.Height), count, start, base, original);
+    for (auto* s : srvs)
+        if (s) s->Release();
+    if (done) ++g_tonemap_shifted;
+    return done;
+}
+
 bool on_draw_indexed(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_trace::DrawIndexedFn original) {
     fixes::ssr_before_draw(ctx);
+    if (count == 3 && g_tonemap_shift.load(std::memory_order_relaxed) && device::active() && tonemap_shift(ctx, count, start, base, original))
+        return true;
 #if FF7VR_ENGINE_WITH_DLSS
     if (!g_armed.active && dlss::on_draw_indexed(ctx, count, start, base, original)) return true;
 #endif
@@ -317,6 +392,7 @@ void frame(ID3D11Texture2D* any_texture) {
     g_armed.active = false;
     g_last = LastFullscreen{};
     fixes::ssr_frame();
+    update_tonemap_shift();
     bool hooks = g_enabled.load(std::memory_order_relaxed) || g_ao_enabled.load(std::memory_order_relaxed) || fixes::ssr_wants_hooks();
 #if FF7VR_ENGINE_WITH_DLSS
     dlss::frame(any_texture);
@@ -329,6 +405,16 @@ std::string status() {
     return std::format("bloom fix {}: reduce passes {} queued {} queue failures {} applied {} missed {}", g_enabled.load() ? "on" : "off",
                        g_count.passes.load(), g_count.queued.load(), g_count.queue_failed.load(), g_count.applied.load(),
                        g_count.missed.load());
+}
+
+void set_tonemap_shift(int mode) {
+    g_tonemap_mode = std::clamp(mode, 0, 2);
+    g_luma_check = 0;
+}
+std::string tonemap_shift_status() {
+    static const char* names[] = {"off", "on", "auto"};
+    return std::format("tonemap input shift {} ({}; Luma add-on {}): applied {}", names[g_tonemap_mode.load()],
+                       g_tonemap_shift.load() ? "active" : "inactive", g_luma_loaded.load() ? "loaded" : "not loaded", g_tonemap_shifted.load());
 }
 
 std::string ao_status() {
