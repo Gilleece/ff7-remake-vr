@@ -231,7 +231,8 @@ public:
                 if (sim_.gazeBlink) --sim_.gazeBlink;
             }
             // The emulated tracker: scripted motion, then the head pose set with `head`.
-            const Pose tracker = PoseMultiply(sim.head, HeadPose(r.id));
+            const NullMotion motion = sim.motion >= 0 ? static_cast<NullMotion>(sim.motion) : opt_.motion;
+            const Pose tracker = PoseMultiply(sim.head, HeadPose(r.id, motion));
             if (sim.recenterEventRequested) {
                 // Like a runtime's own recenter: the current leveled head becomes the new
                 // LOCAL origin, from a change time a few frames ahead (midway between two
@@ -460,7 +461,8 @@ public:
         };
         const char* usage =
             "err usage: xr-sim status | head <yaw deg> [pitch deg] [x y z m] | recenter-event [nopose] [delay <frames>] | lose "
-            "orientation|position <frames> | gaze <yaw> <pitch> | gaze off | gaze sweep [radius deg] [period s] | gaze blink <frames>";
+            "orientation|position <frames> | gaze <yaw> <pitch> | gaze off | gaze sweep [radius deg] [period s] | gaze blink <frames> | "
+            "motion static|yaw|sway|yawsway|ini";
         if (!initialized_) return "err null backend not initialised";
         if (a.empty() || a[0] == "status") {
             std::lock_guard lk(frameMutex_);
@@ -496,6 +498,21 @@ public:
             log_.Info("null backend: emulated head yaw {:.1f} deg, pitch {:.1f} deg, position ({:.3f}, {:.3f}, {:.3f}) m", yaw, pitch, p.position.x,
                       p.position.y, p.position.z);
             return std::format("ok head yaw {:.1f} pitch {:.1f} position {:.3f} {:.3f} {:.3f}", yaw, pitch, p.position.x, p.position.y, p.position.z);
+        }
+        if (a[0] == "motion" && a.size() == 2) {
+            int m = -1;
+            if (a[1] == "static") m = int(NullMotion::Static);
+            else if (a[1] == "yaw") m = int(NullMotion::YawSweep);
+            else if (a[1] == "sway") m = int(NullMotion::Sway);
+            else if (a[1] == "yawsway") m = int(NullMotion::YawAndSway);
+            else if (a[1] != "ini") return "err usage: xr-sim motion static|yaw|sway|yawsway|ini";
+            {
+                std::lock_guard sl(simMutex_);
+                sim_.motion = m;
+            }
+            const NullMotion now = m >= 0 ? static_cast<NullMotion>(m) : opt_.motion;
+            log_.Info("null backend: scripted head motion now {}", MotionName(now));
+            return std::format("ok motion {}", MotionName(now));
         }
         if (a[0] == "recenter-event") {
             bool poseValid = true;
@@ -592,6 +609,7 @@ private:
         double gazeYawDeg = 0, gazePitchDeg = 0;            // mode 1; yaw positive to the right, pitch positive up
         double sweepRadiusDeg = 15, sweepPeriodS = 4;        // mode 2
         uint32_t gazeBlink = 0;                              // the next frames report the gaze not tracked
+        int motion = -1;                                     // `motion`: replaces [xr] null_motion (-1 = the ini's)
     };
     bool gazeEnabled_ = false;
     GazeSample lastGaze_{};  // GT, read by `gaze status` under frameMutex_
@@ -651,11 +669,11 @@ private:
     }
 
     // Deterministic head pose for a frame: a function of frameId only.
-    Pose HeadPose(uint64_t frameId) const {
+    Pose HeadPose(uint64_t frameId, NullMotion motion) const {
         const float t = static_cast<float>(static_cast<double>(frameId) / opt_.refreshHz);
         Pose p;
-        const bool yaw = opt_.motion == NullMotion::YawSweep || opt_.motion == NullMotion::YawAndSway;
-        const bool sway = opt_.motion == NullMotion::Sway || opt_.motion == NullMotion::YawAndSway;
+        const bool yaw = motion == NullMotion::YawSweep || motion == NullMotion::YawAndSway;
+        const bool sway = motion == NullMotion::Sway || motion == NullMotion::YawAndSway;
         if (yaw) p.orientation = QuatFromAxisAngle(Vec3{0, 1, 0}, 30.0f * kDegToRad * std::sin(kTwoPi * t / 8.0f));
         if (sway) {
             p.position.x = 0.03f * std::sin(kTwoPi * t / 4.0f);
