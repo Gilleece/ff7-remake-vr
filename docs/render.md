@@ -492,6 +492,7 @@ timing:   runtime calls per ended frame (CPU, presenting thread): acquire+wait i
 | gpu copy | D3D11 timestamp queries around each copy or blit into an XR swapchain image, summed per frame |
 | gpu submit total | timestamps around the whole submission on the immediate context: the copies plus whatever the runtime records on the context inside its calls |
 | runtime calls | CPU time inside `xrAcquireSwapchainImage` + `xrWaitSwapchainImage`, `xrReleaseSwapchainImage`, `xrBeginFrame` and `xrEndFrame`, per ended frame |
+| video memory | not a series, one reading per report: `game X of budget Y MB` (`IDXGIAdapter3::QueryVideoMemoryInfo`, the card's segment), `card A of B MB in use by all processes` (performance counter `GPU Adapter Memory`), `game in system memory N MB` (counter `GPU Process Memory ... Shared Usage`, which includes allocations Windows moved out of the card; DXGI's own non-local figure does not). A `WARN video memory: ...` follows, at most once a minute, when the card is 94 % full, the game is at 95 % of its budget, or the game's system-memory share grew by 300 MB with the card at least 90 % full. The same reading on demand: dev command `vram`. Why it matters: `docs/benchmarking.md`, "Video memory and slow phases" |
 
 Each report covers only its own period and gives avg, p50, p95, p99 and max
 with the sample count. GPU results are read back a few frames later without

@@ -24,7 +24,8 @@ param(
     [int]$IntervalSeconds = 1,
     [int]$Seconds = 0,             # 0 = until stopped
     [double]$MinEnginePercent = 0.5,
-    [double]$MinProcessMb = 32
+    [double]$MinProcessMb = 32,
+    [int]$ChunkSamples = 10
 )
 
 $ErrorActionPreference = 'Stop'
@@ -51,9 +52,15 @@ function Get-Name([int]$procId) {
     return $names[$procId]
 }
 
-$max = if ($Seconds -gt 0) { [Math]::Max(1, [int]($Seconds / $IntervalSeconds)) } else { [int]::MaxValue }
+# Get-Counter expands the (*) instances once per call, so processes started later would be
+# missed: it runs in chunks of $ChunkSamples samples and expands them again for each chunk.
+$total = if ($Seconds -gt 0) { [Math]::Max(1, [int]($Seconds / $IntervalSeconds)) } else { [int]::MaxValue }
+$done = 0
 try {
-    Get-Counter -Counter $counters -SampleInterval $IntervalSeconds -MaxSamples $max -ErrorAction SilentlyContinue | ForEach-Object {
+  while ($done -lt $total) {
+    $n = [Math]::Min($ChunkSamples, $total - $done)
+    $done += $n
+    Get-Counter -Counter $counters -SampleInterval $IntervalSeconds -MaxSamples $n -ErrorAction SilentlyContinue | ForEach-Object {
         $t = $_.Timestamp.ToString('HH:mm:ss.fff')
         $mem = @{}
         foreach ($s in $_.CounterSamples) {
@@ -87,6 +94,7 @@ try {
         }
         $w.Flush()
     }
+  }
 } finally {
     $w.Dispose()
 }

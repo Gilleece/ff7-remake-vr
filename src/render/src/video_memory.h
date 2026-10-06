@@ -24,19 +24,21 @@ struct Info {
     double localBudgetMb = 0, localUsageMb = 0, localReservedMb = 0;
     double nonLocalBudgetMb = 0, nonLocalUsageMb = 0;
     double dedicatedMb = 0;  // DXGI_ADAPTER_DESC::DedicatedVideoMemory
-    double cardUsageMb = -1;  // all processes on this adapter; -1 when the counter is not available
+    double cardUsageMb = -1;      // all processes on this adapter; -1 when the counter is not available
+    double processSharedMb = -1;  // this process in shared system memory, including allocations moved out of the card; -1 if unknown
 };
 
 // Queries the adapter of `device` (the adapter is looked up once per device). Thread-safe.
 Info Query(ID3D11Device* device);
 
-// "video memory: game X of budget Y MB (Z %); card ...; game in shared system memory N MB";
+// "video memory: game X of budget Y MB (Z %); card ...; game in system memory N MB";
 // "" when the query failed.
 std::string Line(const Info& i);
 
 // Logs the timing-block line, and a warning (at most once a minute) when the card
-// is 97 % full, the game is at 95 % of its budget, or the game's shared-memory
-// usage has grown by 384 MB or more over its lowest value.
+// is 94 % full, the game is at 95 % of its budget, or the game's shared-memory
+// usage has grown by 300 MB or more over its lowest value while the card is at
+// least 90 % full.
 void LogReport(ID3D11Device* device);
 
 }  // namespace ff7vr::render::video_memory
