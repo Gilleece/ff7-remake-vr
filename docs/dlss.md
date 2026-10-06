@@ -280,8 +280,9 @@ always uses AutoExposure"; the mod sets the auto-exposure flag.
 A public release with DLSS would need: the NGX static library linked into the released DLL
 (object code, allowed by the licence's grant 1.c), either NVIDIA's `nvngx_dlss.dll` shipped
 next to it under NVIDIA's terms or a note that the player supplies one, the attribution and
-NVIDIA marks of supplement 7.1(b), the DLL's third-party notices (guide 9.6), and the owner's
-decision on how an MIT-licensed project and NVIDIA's terms fit together (below).
+NVIDIA marks of supplement 7.1(b), the DLL's third-party notices (guide 9.6), and a decision
+by the project's maintainers on how an MIT-licensed project and NVIDIA's terms fit together
+(below).
 
 ## Settings (`[dlss]` in `ff7vr.ini`)
 
@@ -356,7 +357,7 @@ and DLLs must not be committed (they would become source-distributed under MIT, 
 own source that calls the SDK is not "source code provided by NVIDIA" (the calls follow the
 SDK's documented helper functions; no SDK source was copied into it). Whether a binary
 release that links the NGX library and ships `nvngx_dlss.dll` is compatible with releasing
-the mod under MIT is a question for the project owner (4.e names "redistributable at no
+the mod under MIT is a question for the project's maintainers (4.e names "redistributable at no
 charge" as an example of a licence condition it forbids for the SDK itself; the SDK parts
 would have to be under NVIDIA's terms in such a release, not MIT). A release would also
 need the attribution of 7.1(b) and the DLL's third-party notices.
