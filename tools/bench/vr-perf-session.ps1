@@ -45,8 +45,12 @@ $set = @('xr.backend=null', 'dev.pipe=1', "xr.eye_width=$EyeWidth", "xr.eye_heig
 $launchArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "$repo\tools\dev\launch.ps1", '-Ini', "$repo\tools\package\ff7vr.ini",
     '-Until', 'gameplay', '-KeepRunning', '-LockWaitSeconds', '1200', '-Set', ($set -join ';'))
 if ($BuildDir) { $launchArgs += @('-BuildDir', $BuildDir) }
+# Exit code 3 of launch.ps1: no lock, or a game it did not start is running (someone else's run).
+# That game must not be stopped here.
+$ours = $true
 try {
     & powershell @launchArgs
+    if ($LASTEXITCODE -eq 3) { $ours = $false }
     if ($LASTEXITCODE -ne 0) { throw "launch failed ($LASTEXITCODE)" }
     P 'cvar set t.MaxFPS 0' | Out-Null
     Start-Sleep 4
@@ -55,7 +59,9 @@ try {
 } finally {
     Save-PerfResults "$out\results.json"
     $script:PerfResults | Format-Table -AutoSize | Out-String -Width 200 | Tee-Object -FilePath "$out\results.txt"
-    if (-not $NoStop) {
+    if (-not $ours) {
+        Write-Host 'The game was not started by this session: left running, nothing restored.'
+    } elseif (-not $NoStop) {
         & powershell -NoProfile -ExecutionPolicy Bypass -File "$repo\tools\dev\stop.ps1"
         $runs = Get-ChildItem "$repo\captures\runs" -Directory | Sort-Object LastWriteTime | Select-Object -Last 1
         if ($runs -and (Test-Path "$($runs.FullName)\ff7vr.log")) { Copy-Item "$($runs.FullName)\ff7vr.log" "$out\ff7vr.log" }
