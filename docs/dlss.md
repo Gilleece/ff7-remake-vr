@@ -3,8 +3,10 @@
 NVIDIA DLSS in place of the game's temporal anti-aliasing, per eye, in the stereo rendering
 of the engine module. Optional at build time and off by default at run time.
 
-Status: see "What works" below. Everything here was measured headless (Null backend, no
-headset).
+Status: a working prototype in two modes, DLAA (anti-aliasing at the eye size) and upscale
+(DLSS scales each eye up from a lower screen percentage). Everything here was measured
+headless (Null backend, no headset); nothing has been seen in a headset yet. Not handled:
+camera cuts, texture mip bias in upscale mode, mono frames.
 
 ## Building it
 
@@ -58,6 +60,12 @@ view rows, a failed evaluation), the game's own draw runs instead and `dlss stat
 
 NGX is initialised at the first stereo frame on the RHI thread (`NVSDK_NGX_D3D11_Init_with_ProjectID`,
 custom engine type), which blocks that thread for about 1 to 1.6 s once.
+
+Credit: which draw is the anti-aliasing pass, its input slots, the rows of the view buffer
+and the jitter scale were first read in the FF7 Remake module of the Luma framework (a
+flat-screen DLSS mod for this game, github.com/Filoppi/Luma-Framework, by Filippo Tarpini
+and contributors) and then checked in this game in stereo (`docs/re/engine.md` section 12).
+No code was taken from it; the motion vector conversion is Unreal Engine 4's standard one.
 
 ## What works (measured headless)
 
@@ -143,6 +151,10 @@ Measured at eyes 3072x3264 (first room, third person, still camera; `captures/dl
 | DLSS upscale, 58 % | 1782x1893 | 11.80 to 11.93 ms | 3.14 ms |
 | DLSS upscale, 50 % | 1536x1632 | 9.81 to 9.92 ms | 2.50 ms |
 
+At eyes 3600x3600 (same spot, `captures/dlss/r5`, `r10`): game 100 % 12.58 ms; DLSS upscale
+from 50 % (1800x1800) 12.22 ms, 58 % (2088x2088) 14.69 ms, 67 % (2412x2412) 17.78 ms; DLSS
+3.30, 4.06 and 5.00 ms per eye.
+
 Picture (`r8/sheet_up_a.png`, `sheet_up_c.png`, `r9/sheet_up_all.png`,
 `r9/sheet_up50_R.png`): DLSS from 50 % is close to the native 100 % image in texture detail
 and edges and far sharper than the game's own 50 % (blurred, stair-stepped grille edges);
@@ -202,11 +214,38 @@ library of 310.5.0 or later (the game folder's 310.6.0 and the driver's 310.9.0 
 qualify). Exposure: the guide says the exposure texture is used only by J and K, "Preset L
 always uses AutoExposure"; the mod sets the auto-exposure flag.
 
-## What the player needs
+## Interactions
 
-- An NVIDIA RTX GPU and a driver with NGX (any current GeForce driver).
-- `nvngx_dlss.dll` where NGX finds it: next to the game's exe (`End\Binaries\Win64`), or in
-  the folder named by `[dlss] dll_dir`.
+| With | Result | How it was checked |
+|---|---|---|
+| Foveated rendering (variable rate shading) | works; it shades the scene before the anti-aliasing pass, DLSS resolves the periphery like the game's pass does | `fov off` / `fov on` with DLSS on, `r3/sheet_fov.png` |
+| Bloom and ambient occlusion fixes | still applied once per stereo frame at 100 % | `stereo bloomfix`, `stereo aofix` counters with DLSS on |
+| Bloom and ambient occlusion fixes below 100 % | **not applied at 58 and 67 % with eyes 3072 wide** (pre-existing, also without DLSS): the right view's rectangle reaches 1-3 pixels past the scaled buffer, the fixes' size check fails (`missed 4759`, `failed 4844` in `r9`), and the right eye gets the left eye's bloom and occlusion ghost (seen in `r8/sheet_up_R.png`, game path and DLSS alike). At 50 % and at eyes 3600x3600 they apply (`missed 0`) | counters, captures |
+| Light sort-key fix, UI layer | unaffected (the UI is drawn into its own layer; the light fix is in the scene) | captures show the HUD layer and lit scenes as before |
+| Stereo off and on | the features keep their size; an eye not evaluated in the previous frame is reset; first frames clean | `r3/sheet_after_on.png` |
+| Camera cuts | not handled yet (the history is not reset on a cut; row 140 of the view buffer is a candidate flag, unverified) | - |
+| The game's dynamic resolution | a change of the view size recreates the feature (a hitch of 15-100 ms); the view size never changed in any run, also not at 26 ms frames | feature creation lines in the logs |
+| Mono frames (menus, virtual screen) | nothing happens (the pass is only replaced while the engine renders in stereo) | - |
+
+## What a player needs to try it
+
+- An NVIDIA RTX GPU and a current driver (NGX ships with the driver).
+- A mod DLL built with `-DFF7VR_DLSS=ON` (not in the default build or the packages).
+- `[dlss] enabled = 1` in `ff7vr.ini`, and for upscaling `mode = upscale` plus
+  `[stereo_cvars] r.ScreenPercentage = 50` (or 58, 67).
+- A DLSS model: if the NVIDIA App's override is set for the game, the driver's own copy is
+  used and nothing else is needed; otherwise `nvngx_dlss.dll` (310.5.0 or later for presets
+  L/M) next to the game's exe or in `[dlss] dll_dir`. The game folder may already have one
+  from a flat-screen DLSS mod.
+- Expect DLAA to cost about 8 ms per eye at 3072x3264 with preset L: too slow for 72 Hz on
+  an RTX 5080. Upscale mode from 50 % costs about what the game's own 100 % costs, with a
+  picture close to it.
+
+A public release with DLSS would need: the NGX static library linked into the released DLL
+(object code, allowed by the licence's grant 1.c), either NVIDIA's `nvngx_dlss.dll` shipped
+next to it under NVIDIA's terms or a note that the player supplies one, the attribution and
+NVIDIA marks of supplement 7.1(b), the DLL's third-party notices (guide 9.6), and the owner's
+decision on how an MIT-licensed project and NVIDIA's terms fit together (below).
 
 ## Settings (`[dlss]` in `ff7vr.ini`)
 
@@ -214,7 +253,7 @@ always uses AutoExposure"; the mod sets the auto-exposure flag.
 |---|---|---|
 | `enabled` | `0` | `1`: DLSS replaces the game's temporal anti-aliasing while the engine renders in stereo |
 | `init` | `0` | `1`: initialise NGX and query DLSS at the first stereo frame even while `enabled = 0` (diagnostics) |
-| `mode` | `dlaa` | only `dlaa` (anti-aliasing at the eye size); upscaling modes are not implemented |
+| `mode` | `dlaa` | `dlaa`: anti-aliasing at the eye size, in place of the game's; `upscale`: DLSS scales the eye up from the size set by `r.ScreenPercentage` (see "Upscale mode") |
 | `preset` | `default` | DLSS model: `default` (NVIDIA's choice for the mode), `j`, `k`, `l`, `m` |
 | `auto_exposure` | `1` | DLSS computes the exposure itself |
 | `mv_jitter` | `2` | how the camera motion vectors treat the jitter: `2` as the engine computes them, not flagged; `1` flagged as jittered; `0` the jitter difference removed |
@@ -227,7 +266,9 @@ always uses AutoExposure"; the mod sets the auto-exposure flag.
 | Command | Effect |
 |---|---|
 | `dlss status` | NGX state, capability, feature library, the recognised pass, counters, features, GPU time per eye, jitter |
-| `dlss on` / `dlss off` | switch while the game runs (the history is reset) |
+| `dlss on` / `dlss off` | switch while the game runs (the history is reset; off releases the features) |
+| `dlss mode <dlaa\|upscale>` | switch the mode; with `upscale`, set the size with `cvar set r.ScreenPercentage <n>` |
+| `dlss bench <out w> <out h> <in w> <in h>`, `dlss bench off` | one extra evaluation per frame of that size on blank textures, timed (cost of a mode without changing the engine) |
 | `dlss init` | initialise NGX now (at the next stereo frame) |
 | `dlss preset <default\|j\|k\|l\|m>` | change the model (features are recreated) |
 | `dlss autoexp <0\|1>`, `dlss mvjitter <0\|1\|2>`, `dlss jitter <sx> <sy>`, `dlss cutreset <0\|1>` | tests |
