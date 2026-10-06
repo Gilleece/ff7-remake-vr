@@ -120,6 +120,16 @@ struct Settings {
     // copied back into the target.
     std::atomic<bool> output_runtime{true};
     std::atomic<float> engine_scale{0.5f};  // input_scale with output = runtime
+    // [dlss] firefly: NGX's UseFireflySwatter hint at feature creation (isolated very bright
+    // pixels are suppressed)
+    std::atomic<bool> firefly{false};
+    // [dlss] texture_bias (upscale mode): a mip bias added to the game's anisotropic samplers
+    // while DLSS upscales, so textures are sampled for the output size (DLSS guide 3.5).
+    // 0 off; 1 auto: log2 of the input's share of the output plus tex_bias_value; 2 the fixed
+    // value tex_bias_value.
+    std::atomic<int> tex_bias_mode{0};
+    std::atomic<float> tex_bias_value{0.0f};
+    std::atomic<bool> tex_bias_trilinear{false};  // also samplers with trilinear filtering (not only anisotropic)
 };
 Settings g_set;
 std::atomic<std::uint64_t> g_runtime_eye{0};  // the runtime's eye size (w << 32 | h), from engine_eye_size
@@ -204,7 +214,7 @@ using UpdateFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Resource*,
 using CreateBufferFn = HRESULT(STDMETHODCALLTYPE*)(ID3D11Device*, const D3D11_BUFFER_DESC*, const D3D11_SUBRESOURCE_DATA*, ID3D11Buffer**);
 
 struct UbHooks {
-    hook::InlineHook map, unmap, update, create_buffer;
+    hook::InlineHook map, unmap, update, create_buffer, ps_samplers;
 };
 UbHooks* g_ub_hooks = new UbHooks();  // never destroyed
 std::atomic<int> g_ub_hooks_state{0};  // 0 not yet, 1 installed, -1 failed
@@ -310,6 +320,140 @@ HRESULT STDMETHODCALLTYPE create_buffer_detour(ID3D11Device* d, const D3D11_BUFF
     return hr;
 }
 
+// ------------------------------------------------------------------ texture mip bias (RHI thread)
+// While DLSS upscales, the scene is rendered at a share of the output size, and the engine
+// picks texture mips for that smaller size: textures look softer than at the output size.
+// The DLSS guide (3.5) asks for a negative mip bias of log2(input / output). The game's
+// materials sample through sampler states it created long before, mostly anisotropic ones;
+// r.MipMapLODBias does not reach them. So at PSSetSamplers on the game's immediate context,
+// on the RHI thread, each anisotropic sampler is replaced by a copy of itself with the bias
+// added (made once per sampler and bias, kept in a map). Point, bilinear and trilinear
+// samplers (post-processing, the UI, shadow maps) stay as they are.
+using PSSetSamplersFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, ID3D11SamplerState* const*);
+
+struct TexBias {
+    std::atomic<float> now{0.0f};    // the bias for the samplers bound now (0: none); set at each stereo frame end
+    std::atomic<float> share{0.0f};  // the input's share of the output width at the latest upscale evaluation
+    std::atomic<ID3D11DeviceContext*> ctx{nullptr};  // the game's immediate context
+    // RHI thread only
+    float built_for = 0.0f;
+    struct Entry {
+        ComPtr<ID3D11SamplerState> orig;    // held, so that its address is not reused while it is in the map
+        ComPtr<ID3D11SamplerState> biased;  // null: bound as it is
+    };
+    std::unordered_map<ID3D11SamplerState*, Entry> map;
+    std::atomic<std::uint64_t> binds{0}, replaced{0}, made{0}, failed{0}, clears{0};
+    std::atomic<std::uint64_t> kinds[4]{};  // samplers seen: anisotropic, trilinear, other with mips, comparison
+};
+TexBias g_tex;
+
+ID3D11SamplerState* biased_sampler(ID3D11DeviceContext* c, ID3D11SamplerState* s, float bias) {
+    if (!s) return s;
+    TexBias& T = g_tex;
+    if (T.built_for != bias || T.map.size() > 2048) {
+        T.map.clear();
+        T.built_for = bias;
+        ++T.clears;
+    }
+    auto it = T.map.find(s);
+    if (it != T.map.end()) return it->second.biased ? it->second.biased.Get() : s;
+    TexBias::Entry e;
+    e.orig = s;
+    D3D11_SAMPLER_DESC d{};
+    s->GetDesc(&d);
+    const bool comparison = d.Filter >= D3D11_FILTER_COMPARISON_MIN_MAG_MIP_POINT && d.Filter <= D3D11_FILTER_COMPARISON_ANISOTROPIC;
+    const bool aniso = d.Filter == D3D11_FILTER_ANISOTROPIC;
+    const bool trilinear = d.Filter == D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    ++T.kinds[comparison ? 3 : aniso ? 0 : trilinear ? 1 : 2];
+    if ((aniso || (trilinear && g_set.tex_bias_trilinear.load(std::memory_order_relaxed))) && d.MaxLOD > d.MinLOD) {
+        d.MipLODBias = std::clamp(d.MipLODBias + bias, D3D11_MIP_LOD_BIAS_MIN, D3D11_MIP_LOD_BIAS_MAX);
+        ID3D11Device* dev = nullptr;
+        c->GetDevice(&dev);
+        if (dev) {
+            if (SUCCEEDED(dev->CreateSamplerState(&d, &e.biased))) ++T.made;
+            else ++T.failed;
+            dev->Release();
+        }
+    }
+    ID3D11SamplerState* out = e.biased ? e.biased.Get() : s;
+    if (e.biased && e.biased.Get() != s && !T.map.contains(e.biased.Get())) {
+        // D3D11 returns the same object for the same description: should the game bind a
+        // sampler that is one of these copies, it stays as it is.
+        TexBias::Entry self;
+        self.orig = e.biased;
+        T.map.emplace(e.biased.Get(), std::move(self));
+    }
+    T.map.emplace(s, std::move(e));
+    return out;
+}
+
+void STDMETHODCALLTYPE ps_set_samplers_detour(ID3D11DeviceContext* c, UINT start, UINT n, ID3D11SamplerState* const* s) {
+    const auto original = g_ub_hooks->ps_samplers.original<PSSetSamplersFn>();
+    const float bias = g_tex.now.load(std::memory_order_relaxed);
+    if (bias == 0.0f || !s || n == 0 || n > D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT || c != g_tex.ctx.load(std::memory_order_relaxed) ||
+        GetCurrentThreadId() != g_rhi_tid.load(std::memory_order_relaxed) || !device::active())
+        return original(c, start, n, s);
+    ID3D11SamplerState* repl[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT];
+    bool any = false;
+    for (UINT i = 0; i < n; ++i) {
+        repl[i] = biased_sampler(c, s[i], bias);
+        any |= repl[i] != s[i];
+    }
+    ++g_tex.binds;
+    if (any) ++g_tex.replaced;
+    original(c, start, n, any ? repl : s);
+}
+
+// At each stereo frame end: the bias for the next frame. Only while DLSS upscaled the frame
+// that ended; quantised to 1/32 so that dynamic resolution does not remake the copies.
+void update_tex_bias(bool upscaled) {
+    float b = 0.0f;
+    const int mode = g_set.tex_bias_mode.load(std::memory_order_relaxed);
+    const float share = g_tex.share.load(std::memory_order_relaxed);
+    if (upscaled && mode != 0 && share > 0.05f && share < 0.999f) {
+        b = mode == 2 ? g_set.tex_bias_value.load(std::memory_order_relaxed) : std::log2(share) + g_set.tex_bias_value.load(std::memory_order_relaxed);
+        b = std::round(b * 32.0f) / 32.0f;
+        b = std::clamp(b, -4.0f, 0.0f);
+    }
+    g_tex.now.store(b, std::memory_order_relaxed);
+}
+
+// "off" or "0"; "auto" (log2 of the input's share), "auto-1" or "auto+0.5" (with an offset);
+// a negative number (a fixed bias).
+bool parse_tex_bias(std::string v) {
+    for (char& c : v) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    v.erase(std::remove(v.begin(), v.end(), ' '), v.end());
+    if (v == "off" || v == "0" || v.empty()) {
+        g_set.tex_bias_mode = 0;
+        return true;
+    }
+    if (v.starts_with("auto")) {
+        const std::string rest = v.substr(4);
+        g_set.tex_bias_mode = 1;
+        g_set.tex_bias_value = rest.empty() ? 0.0f : static_cast<float>(std::atof(rest.c_str()));
+        return true;
+    }
+    char* end = nullptr;
+    const double d = std::strtod(v.c_str(), &end);
+    if (!end || *end != 0) return false;
+    g_set.tex_bias_mode = 2;
+    g_set.tex_bias_value = static_cast<float>(std::clamp(d, -4.0, 0.0));
+    return true;
+}
+
+std::string tex_bias_text() {
+    const int m = g_set.tex_bias_mode.load();
+    std::string s = m == 0   ? std::string("off")
+                    : m == 1 ? std::format("auto (log2 of the input's share{:+.2f})", g_set.tex_bias_value.load())
+                             : std::format("fixed {:.2f}", g_set.tex_bias_value.load());
+    s += std::format(", {} samplers; now {:.3f} (input share {:.3f}); binds {} replaced {}, copies made {} failed {}, map cleared {}; samplers seen: "
+                     "anisotropic {} trilinear {} other {} comparison {}",
+                     g_set.tex_bias_trilinear.load() ? "anisotropic and trilinear" : "anisotropic", g_tex.now.load(), g_tex.share.load(), g_tex.binds.load(),
+                     g_tex.replaced.load(), g_tex.made.load(), g_tex.failed.load(), g_tex.clears.load(), g_tex.kinds[0].load(), g_tex.kinds[1].load(),
+                     g_tex.kinds[2].load(), g_tex.kinds[3].load());
+    return s;
+}
+
 // Context slots (d3d11.h order): Map 14, Unmap 15, UpdateSubresource 48. Device: CreateBuffer 3.
 bool install_ub_hooks(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     int st = g_ub_hooks_state.load();
@@ -327,6 +471,10 @@ bool install_ub_hooks(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     }
     g_ub_hooks_state = ok ? 1 : -1;
     log::info("dlss: view uniform buffer capture hooks {}", ok ? "installed (Map/Unmap, UpdateSubresource, CreateBuffer)" : "FAILED");
+    // Context slot 10: PSSetSamplers (texture mip bias while DLSS upscales).
+    g_tex.ctx.store(ctx, std::memory_order_relaxed);
+    const bool samplers = h.ps_samplers.create(cvt[10], &ps_set_samplers_detour);
+    log::info("dlss: sampler hook for the texture mip bias {}", samplers ? "installed (PSSetSamplers)" : "FAILED (no texture mip bias)");
     return ok;
 }
 
@@ -488,6 +636,7 @@ struct Feature {
     UINT w = 0, h = 0, ow = 0, oh = 0;
     unsigned preset = 0;
     int flags = 0;
+    bool firefly = false;  // created with the UseFireflySwatter hint
     std::uint64_t last_eval_frame = 0;
     // Input rectangles an evaluation may use: min..creation size when NGX allows dynamic
     // scaling for this feature, otherwise exactly the creation size. An evaluation outside
@@ -983,8 +1132,9 @@ bool ensure_feature(ID3D11DeviceContext* ctx, int eye, UINT w, UINT h, bool& cre
     const bool own = g_set.own_params.load();
     const bool subrects = !(g_set.copy_inputs.load() && g_set.mode.load() == 1);  // the copies exist in upscale mode only
     const NVSDK_NGX_PerfQuality_Value q = quality >= 0 ? static_cast<NVSDK_NGX_PerfQuality_Value>(quality) : quality_for(w, ow);
+    const bool firefly = g_set.firefly.load();
     if (f.handle && f.w == w && f.h == h && f.ow == ow && f.oh == oh && f.preset == preset && f.flags == flags && f.dynamic == dynamic &&
-        f.own_params == own && f.subrects == subrects && f.quality == static_cast<int>(q))
+        f.own_params == own && f.subrects == subrects && f.quality == static_cast<int>(q) && f.firefly == firefly)
         return true;
     retire_feature(f);
     NVSDK_NGX_Parameter* params = R.params;
@@ -1002,6 +1152,9 @@ bool ensure_feature(ID3D11DeviceContext* ctx, int eye, UINT w, UINT h, bool& cre
     NVSDK_NGX_Parameter_SetUI(params, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance, preset);
     NVSDK_NGX_Parameter_SetUI(params, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance, preset);
     NVSDK_NGX_Parameter_SetUI(params, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraQuality, preset);
+    // Set either way: the shared parameter map keeps what an earlier creation set.
+    NVSDK_NGX_Parameter_SetI(params, NVSDK_NGX_Parameter_Hint_UseFireflySwatter, firefly ? 1 : 0);
+    NVSDK_NGX_Parameter_SetI(params, NVSDK_NGX_EParameter_Hint_UseFireflySwatter, firefly ? 1 : 0);
     NVSDK_NGX_DLSS_Create_Params cp{};
     cp.Feature.InWidth = w;
     cp.Feature.InHeight = h;
@@ -1015,8 +1168,8 @@ bool ensure_feature(ID3D11DeviceContext* ctx, int eye, UINT w, UINT h, bool& cre
     const NVSDK_NGX_Result r = NGX_D3D11_CREATE_DLSS_EXT(ctx, &f.handle, params, &cp);
     g_in_ngx = false;
     const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-    std::string text = std::format("eye {} {}x{} -> {}x{} quality value {} preset {} flags 0x{:x} input {} parameters {}: create {} in {:.1f} ms | {}", eye,
-                                   w, h, ow, oh, static_cast<int>(cp.Feature.InPerfQualityValue), preset_name(preset), flags,
+    std::string text = std::format("eye {} {}x{} -> {}x{} quality value {} preset {} flags 0x{:x} firefly {} input {} parameters {}: create {} in {:.1f} ms | {}",
+                                   eye, w, h, ow, oh, static_cast<int>(cp.Feature.InPerfQualityValue), preset_name(preset), flags, firefly ? 1 : 0,
                                    dynamic ? std::format("{}x{} to {}x{} (dynamic)", min_w, min_h, w, h) : std::string("this size only"),
                                    own ? "own" : "shared", result_text(r), ms, vram_text(R.dev));
     log::info("dlss: feature {}", text);
@@ -1041,6 +1194,7 @@ bool ensure_feature(ID3D11DeviceContext* ctx, int eye, UINT w, UINT h, bool& cre
     f.oh = oh;
     f.preset = preset;
     f.flags = flags;
+    f.firefly = firefly;
     f.dynamic = dynamic;
     f.min_w = dynamic ? min_w : w;
     f.min_h = dynamic ? min_h : h;
@@ -2525,7 +2679,21 @@ bool try_final(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_t
         g_rt_out.oh = out_h;
     }
     if (one_to_one) {
+        // Test (`dlss nograin 1`): the pass's noise texture array (t0) unbound for this draw.
+        ComPtr<ID3D11ShaderResourceView> saved_t0;
+        const bool no_grain = g_set.no_grain.load();
+        if (no_grain) {
+            ID3D11ShaderResourceView* t0 = nullptr;
+            ctx->PSGetShaderResources(0, 1, &t0);
+            saved_t0.Attach(t0);
+            ID3D11ShaderResourceView* none = nullptr;
+            ctx->PSSetShaderResources(0, 1, &none);
+        }
         original(ctx, count, start, base);
+        if (no_grain) {
+            ID3D11ShaderResourceView* t0 = saved_t0.Get();
+            ctx->PSSetShaderResources(0, 1, &t0);
+        }
         const D3D11_BOX box{static_cast<UINT>(vp.TopLeftX), static_cast<UINT>(vp.TopLeftY), 0, static_cast<UINT>(vp.TopLeftX) + s.w,
                             static_cast<UINT>(vp.TopLeftY) + s.h, 1};
         ctx->CopySubresourceRegion(g_graded.Get(), 0, s.x, s.y, 0, target.Get(), 0, &box);
@@ -2836,6 +3004,7 @@ bool evaluate_upscale(ID3D11DeviceContext* ctx, int eye, Stash& s, UINT half, UI
             g_in_ngx = true;
             r = NGX_D3D11_EVALUATE_DLSS_EXT(ctx, f.handle, f.params, &ep);
             g_in_ngx = false;
+            if (NVSDK_NGX_SUCCEED(r) && f.ow) g_tex.share.store(static_cast<float>(s.w) / static_cast<float>(f.ow), std::memory_order_relaxed);
             if (!in_game_state) ctx->ClearState();
             if (g_set.flush_after.load(std::memory_order_relaxed)) ctx->Flush();
             event(std::format("eval eye {} result {}", eye, result_text(r)));
@@ -3194,6 +3363,15 @@ void start(const Config& cfg, const std::filesystem::path& dll_dir) {
     g_set.validate = cfg.get_bool("dlss", "validate", true);
     g_set.input_stats = cfg.get_bool("dlss", "input_stats", false);
     g_set.own_params = cfg.get_string("dlss", "params", "shared") == "feature";
+    g_set.firefly = cfg.get_bool("dlss", "firefly", false);
+    {
+        const std::string tb = cfg.get_string("dlss", "texture_bias", "off");
+        if (!parse_tex_bias(tb)) {
+            log::warn("dlss: texture_bias '{}' not understood (auto, auto-1, off or a negative number); off", tb);
+            parse_tex_bias("off");
+        }
+        g_set.tex_bias_trilinear = cfg.get_bool("dlss", "texture_bias_trilinear", false);
+    }
     // Fault isolation tests, from the first frame (docs/dlss.md, "Dev commands")
     g_set.test_eyes = static_cast<int>(cfg.get_int("dlss", "test_eyes", 0));
     g_set.zero_mv = cfg.get_bool("dlss", "test_zero_mv", false);
@@ -3274,6 +3452,7 @@ void start(const Config& cfg, const std::filesystem::path& dll_dir) {
     log::info("dlss: built in; {} (mode {}, preset {}, auto exposure {}, motion vector jitter mode {}{})",
               g_set.enabled.load() ? "ON" : "off ([dlss] enabled = 0)", g_set.mode.load() ? "upscale" : "dlaa", preset_name(g_set.preset.load()),
               g_set.auto_exposure.load() ? "on" : "off", g_set.mv_jitter.load(), extra.empty() ? "" : ", extra library folder " + extra);
+    log::info("dlss: firefly hint {}; texture mip bias {}", g_set.firefly.load() ? 1 : 0, tex_bias_text());
     log::info("dlss: evaluations at {}; motion vectors and NGX in {}", g_set.eval_at_end.load() ? "the frame end ([dlss] eval_at = frame_end)" : "each eye's last pass",
               g_set.own_state.load() ? "our own device context state ([dlss] context_state = own)" : "the game's pipeline state");
     log::info("dlss: checks {}, input statistics {}, parameter maps {}; tests: eyes {} zero mv {} mv sanitize {} flush {} own context state {} skip {} copy inputs {}",
@@ -3355,6 +3534,9 @@ void frame(ID3D11Texture2D* any_texture) {
         }
     }
     if (R.ngx_state == 1) event(std::format("frame end (anti-aliasing passes 0x{:x})", g_taa_frame == R.frame ? g_taa_mask : 0u));
+    // The texture mip bias of the next frame: while this frame was upscaled.
+    update_tex_bias(g_set.enabled.load(std::memory_order_relaxed) && g_set.mode.load(std::memory_order_relaxed) == 1 && R.ngx_state == 1 &&
+                    (R.feat[0].last_eval_frame == R.frame || R.feat[1].last_eval_frame == R.frame));
     ++R.frame;
     g_rhi_tid.store(GetCurrentThreadId(), std::memory_order_relaxed);
     const auto now = std::chrono::steady_clock::now();
@@ -3556,6 +3738,17 @@ std::string command(const std::string& args) {
         log::info("dlss: preset {} (dev command)", preset_name(p));
         return std::format("ok preset {} (features are recreated)", preset_name(p));
     }
+    if (sub == "firefly" && a.size() == 2) {
+        g_set.firefly = a[1] == "1";
+        log::info("dlss: firefly hint {} (dev command)", g_set.firefly.load() ? 1 : 0);
+        return std::format("ok UseFireflySwatter hint {} (features are recreated)", g_set.firefly.load() ? 1 : 0);
+    }
+    if (sub == "texbias" && a.size() >= 2) {
+        if (!parse_tex_bias(a[1])) return "err dlss texbias <auto|auto-1|off|<bias>> [trilinear 0|1]";
+        if (a.size() >= 3) g_set.tex_bias_trilinear = a[2] == "1";
+        log::info("dlss: texture mip bias {} (dev command)", tex_bias_text());
+        return "ok texture mip bias " + tex_bias_text();
+    }
     if (sub == "autoexp" && a.size() == 2) {
         g_set.auto_exposure = a[1] == "1";
         return std::format("ok auto exposure {}", g_set.auto_exposure.load() ? "on" : "off");
@@ -3613,7 +3806,7 @@ std::string command(const std::string& args) {
     }
     if (sub == "nograin" && a.size() == 2) {
         g_set.no_grain = a[1] == "1";
-        return std::format("ok last pass noise texture {}", g_set.no_grain.load() ? "unbound at the reduced size" : "as the game binds it");
+        return std::format("ok last pass noise texture {}", g_set.no_grain.load() ? "unbound for DLSS's input" : "as the game binds it");
     }
     if (sub == "reset") {
         g_set.reset_requests = 2;
@@ -3749,6 +3942,7 @@ std::string command(const std::string& args) {
     s += std::format(" | depth texture changes {} | immediate context calls from other threads {} ({} during NGX calls)", g_depth_changes.load(),
                      g_foreign_calls.load(), g_foreign_during_ngx.load());
     s += std::format(" | motion vector textures: {}", g_set.mv_per_eye.load() ? "each eye's own" : "shared (sub-rectangle bases)");
+    s += std::format(" | firefly hint {} | texture mip bias: {}", g_set.firefly.load() ? 1 : 0, tex_bias_text());
     s += " | history resets: " + resets_text();
     s += std::format(" | frame dump: {} to go, {} images written", g_framedump.remaining.load(), g_framedump.written.load());
     {
