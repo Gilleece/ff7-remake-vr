@@ -962,6 +962,67 @@ Passes that write data later passes read per pixel:
   (`passes = no-gbuffer`) gave back 0.2 of the 1.34 ms saved by the balanced
   preset and did not remove the visible stair-steps on bright edges, which come
   from the lighting passes as much as from the base pass.
+- the **subsurface recombine** stays at full rate (next section).
+
+### Skin edges: the subsurface recombine
+
+Under 2x2 shading the edge between skin and dark cloth (the top of Tifa's
+stockings in the first room, the edge of a skirt over a thigh) showed a thin,
+broken line of grey-white pixels, one pixel wide, in both eyes. 2x1 does the
+same on vertical edges (the side of a thigh against the skirt, fingertips) and
+leaves horizontal ones alone. Full rate does not have it. It was seen only on
+skin (subsurface materials); the other edges checked (hair against the bright
+doorway, the floor, cloth against cloth) have no such line.
+
+Found by keeping single render target bindings of the scene window at full rate
+(`fov exclude <first> <last>`, binding numbers as `b<n>` in `fov trace`) with
+everything else at 2x2, and cropping the same edge in each capture. The line
+disappears only when one of two bindings is excluded: in the one-frame GPU
+trace (`gpu trace`, first room) they are the passes after the subsurface blurs
+(three draws on half-size `R16G16B16A16_FLOAT` targets per eye): a full-screen
+pass into a scene-size intermediate target and the per-eye passes that write
+scene colour back from it with the blurred result, the G-buffer and the scene
+colour as inputs, no depth bound. Neither the G-buffer pass (`passes =
+no-gbuffer` keeps the line) nor the light passes before them (bindings
+`b81`-`b92` excluded: line still there) are involved.
+
+Mechanism (inferred from the above, the shaders were not disassembled): the
+lighting passes store skin's diffuse light without its base colour, in a
+checkerboard pattern of diffuse and specular pixels, and the recombine
+multiplies the blurred diffuse light by the base colour per pixel and
+reassembles the checkerboard. With one shading sample per 2x2 block, the
+recombine evaluates a block straddling the edge at a single position and writes
+the result to all four pixels, so the dark cloth pixels next to skin receive
+skin's light without the colour applied (grey-white), and the checkerboard is
+read at the wrong parity. Both passes of the recombine chain have to be coarse
+for the line to show.
+
+The fix: a frame-local rule in the shading-rate hooks. Once the lights have
+bound the screen shadow mask (`B8G8R8A8_UNORM` at the scene targets' size) and a
+half-size `R16G16B16A16_FLOAT` target has been bound after that (the subsurface
+blur), every scene-size `R16G16B16A16_FLOAT` binding without depth runs at full
+rate, up to the end of the scene window. Translucency binds depth and keeps the
+mask. In the first room this selects exactly the two bindings found above
+(`fov trace` notes them `subsurface recombine at full rate`); in views without
+characters (the alley) no subsurface blur runs and nothing changes.
+
+Cost (scene GPU time, p50 of 8 s windows, 2 x 3072x3264, `quality` preset, two
+rounds each, Null backend unpaced): first room 7.963 / 7.955 ms with the rule
+against 7.932 / 7.925 ms without (+0.03 ms; `fov off` 9.435 ms); the same room
+with the head turned 150 degrees 7.842 / 7.841 against 7.863 / 7.854 (no
+measurable difference); the alley 6.59 / 6.62 against 6.61 / 6.52 (the rule
+does not fire there; the spread is the noise of these windows, about 0.1 ms).
+So the saving of the `quality` preset (1.5 ms in that room) is kept and the rule
+is on by default. `[foveation] subsurface_full_rate = 0` or `fov subsurface 0`
+switches it off.
+
+Checked with the rings at the gaze (`xr-sim gaze sweep 20 3`, radii 0.30 / 0.45
+/ 0.55 so the legs pass through the coarse rings): no line in four captures
+with the rule, the line in the two of three captures without it where the legs
+were in a coarse ring. Hair over skin and hair against the bright background
+looks mottled at 2x2 with or without the rule (alpha-dithered hair under coarse
+shading, a different mechanism); at the `quality` radii faces are inside the
+full-rate zone.
 
 ### Settings
 
@@ -974,6 +1035,7 @@ Passes that write data later passes read per pixel:
 | `[foveation] hidden_area` | `coarse` | tiles inside the runtime's hidden area mesh: `coarse` (4x4), `cull` (not drawn at all), `off` (treated like the outer ring) |
 | `[foveation] passes` | `scene` | `scene`: matching targets inside the scene window; `no-gbuffer`: the same without the G-buffer pass (3 or more targets); `all`: matching targets from the scene's start until Present, including post-processing (for comparison only) |
 | `[foveation] skip_formats` | `35` | DXGI formats of render target 0 that never get the mask (35 = `R16G16_UNORM`, the velocity buffer) |
+| `[foveation] subsurface_full_rate` | `1` | `1`: the subsurface recombine passes run at full rate ([Skin edges](#skin-edges-the-subsurface-recombine)); `0`: they take the mask (grey-white line on skin edges under 2x2) |
 | `[debug] foveation_unsupported` | `0` | `1`: behave as on a GPU without variable rate shading (tests the fallback) |
 | `[foveation] eye_tracking` | `0` | `1` or `auto`: the rings follow the eye gaze when the headset has an eye tracker ([Eye-tracked foveation](#eye-tracked-foveation)); `0`: fixed at the optical centres. Read when the XR session starts |
 | `[foveation] gaze_margin_deg` | `5` | degrees added to the full-rate zone's radius while the gaze drives it (covers the gaze sample's age and tracker error) |
@@ -1058,7 +1120,9 @@ BENCH_TABLE_PLACEHOLDER
 | `fov status` | settings, state, stereo frames and bindings so far, the surface's ring shares and the optical centres |
 | `fov on` / `fov off` | switch the mask; after `fov off` the scene's GPU time keeps being measured, so on and off compare in one session |
 | `fov preset <name>`, `fov radii <a> <b> <c>`, `fov rates <a> <b> <c>`, `fov hidden off\|coarse\|cull`, `fov passes scene\|no-gbuffer\|all`, `fov skip [formats]` | change the settings at run time (the surface is rebuilt at the next stereo frame) |
-| `fov trace` | log every render target binding of the next stereo frame, from the scene's start to Present, with GPU times |
+| `fov subsurface 0\|1` | the subsurface recombine at full rate (1) or with the mask (0) |
+| `fov exclude <first> [<last>]`, `fov exclude off` | keep the scene window's render target bindings `first` to `last` (counted from the scene's start, `b<n>` in `fov trace`) at full rate; for finding which pass causes an artefact |
+| `fov trace` | log every render target binding of the next stereo frame, from the scene's start to Present, with GPU times and binding numbers |
 | `fov timing` | log and reply the scene GPU time, the GPU time after the scene and the hooks' CPU time since the last report |
 | `fov gaze status` | eye tracking: setting, gaze source, following the gaze / holding / fixed, tracked, sample age, each eye's ring centre (pixels, share of the eye, degrees from its axis), surface refills (count, rate, CPU cost), switches, losses bridged, the ring shares |
 | `fov gaze mode 0\|1\|auto`, `fov gaze margin <deg>`, `fov gaze smoothing <0..0.95>` | change the eye-tracking settings at run time (a session started with `eye_tracking = 0` has no gaze source until `xr-restart`) |
