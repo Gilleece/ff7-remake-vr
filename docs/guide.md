@@ -170,8 +170,8 @@ there is in the folder.
 - **In the headset, title screen, menus and loading screens:** the game on a flat
   virtual screen, 1.8 m wide, 2 m in front of you at eye height.
 - **In the headset, in the world:** the 3D scene around you, **in first person**:
-  you see through Cloud's eyes, his body and sword are hidden. Home (or View/Back +
-  right stick click on the pad) switches to third person, behind the character at
+  you see through Cloud's eyes, his body and sword are hidden. Home (on the pad: both
+  stick clicks together) switches to third person, behind the character at
   shoulder height. The horizon stays level: the game camera turns you left and
   right, but looking up and down is done with your head. Leaning moves the view.
 - **In a battle** the view should switch to third person by itself and back to first
@@ -189,10 +189,22 @@ there is in the folder.
 
 ## More on the controls
 
+| Keyboard | Gamepad | Effect |
+|---|---|---|
+| Home | both stick clicks together (L3+R3), or hold View/Back + right stick click | first / third person |
+| End | hold View/Back + left stick click | recenter |
+| Insert | hold View/Back + Menu/Start | 3D off / on (reconnects a lost headset) |
+| Page Down / Page Up | hold View/Back + D-pad down / up | HUD panel nearer / farther |
+
 On the gamepad the game does not see the mod's combinations. View/Back pressed on its
 own still reaches the game, but only when you release it (so the map does not open on
-the way to a combination). All keys can be changed in `ff7vr.ini` (`[controls]`,
-`[first_person] toggle_key`).
+the way to a combination). For L3+R3 both clicks must go down within 150 ms of each
+other; the pair switches once however long you hold it. A single stick click still
+reaches the game (the game uses them, for example R3 for the camera and lock-on), but
+up to 150 ms late, because the mod waits that long for the second click; a quick tap
+is handed over as a short press when you release it. `[controls] fp_toggle_chord`
+changes the buttons (empty = off) and `fp_toggle_chord_ms` the window. All keys can be
+changed in `ff7vr.ini` (`[controls]`, `[first_person] toggle_key`).
 
 3D starts in first person outside battles. First person puts the view between the
 character's eyes, hides the character and the sword, and blends over in about a
@@ -237,7 +249,7 @@ session it is `ff7vr.log` in the game's `End\Binaries\Win64` folder).
    recenter, and note what you like for `[ui] distance` / `size`.
 8. **First person** (the start): the view at Cloud's eye height, facing where the
    camera faced, no part of Cloud or his sword in view. Walk and turn: comfortable?
-9. **Third person** with Home or View/Back + right stick click: behind Cloud at
+9. **Third person** with Home or both stick clicks (L3+R3): behind Cloud at
    shoulder height. Move the right stick or mouse up and down: your height should
    stay the same while the view orbits. Walk with your back to a wall and orbit: the
    eyes should stay out of the wall. Switch back and forth a few times: Cloud and his
@@ -276,8 +288,8 @@ session it is `ff7vr.log` in the game's `End\Binaries\Win64` folder).
   Setting `[stereo] movie_screen = 1` is worth a try if movies look broken.
 - **A connected gamepad.** The gamepad combinations were tested only with simulated
   button states (no pad was connected; the game reads the pad only while one is),
-  so what the game does with the View/Back press handed over on release is not
-  known. The keys (Home, End, Insert, Page Down/Up) were tested in the game.
+  so what the game does with the View/Back press handed over on release, and with a
+  single stick click handed over up to 150 ms late, is not known. The keys (Home, End, Insert, Page Down/Up) were tested in the game.
 - **The headset's own recenter** (holding the Meta button) on a real headset. It is
   handled and was tested with a simulated headset, as was the mod's own recenter (End).
 - **Lost tracking** (covering the headset's cameras, a dark room): the mod holds the
@@ -314,7 +326,7 @@ session it is `ff7vr.log` in the game's `End\Binaries\Win64` folder).
   ran flat on the monitor and the mod never reached the headset. The launcher
   sets ReShade/Luma aside for every session and puts it back afterwards.
 - **Battle detection unverified.** If battles stay in first person, switch with Home
-  or View/Back + right stick click, and send the log. If it misfires outside battles,
+  or both stick clicks (L3+R3), and send the log. If it misfires outside battles,
   set `battle_signal =` (empty) and `default = 0`.
 - **First person:** the whole character is hidden, probably its shadow too; the view
   stays level and does not follow the head's animation; climbing, squeezing through

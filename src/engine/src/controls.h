@@ -8,6 +8,11 @@
 // buttons of a combination are removed from the state the game receives; with
 // `pad_hold_view` View itself is held back while it is down and handed to the game as a
 // short press when it is released without a combination.
+// Gamepad chord (`fp_toggle_chord`, default both stick clicks): the buttons pressed together
+// within `fp_toggle_chord_ms` switch first/third person once and are hidden from the game
+// until all of them are released. The first button of a possible chord is held back for at
+// most that window: if the chord does not form, the game gets the press (late by the
+// window at most, or replayed as a short press when it was released within it).
 //
 // Recenter and the UI distance go through the render module's registered commands
 // (`recenter`, `ui distance`) on a worker thread, so the game thread never waits for the
@@ -31,6 +36,10 @@ struct Settings {
     std::atomic<float> ui_step{0.25f};      // [controls] ui_step (m)
     std::atomic<float> ui_min{0.75f};       // [controls] ui_min (m)
     std::atomic<float> ui_max{8.0f};        // [controls] ui_max (m)
+    // [controls] fp_toggle_chord: XInput buttons pressed together that switch first/third
+    // person (default L3+R3, 0 = off); fp_toggle_chord_ms: how close together they must go down.
+    std::atomic<unsigned short> fp_chord{0x0040 | 0x0080};
+    std::atomic<int> fp_chord_ms{150};
 };
 Settings& settings();
 void read_config(const Config& cfg);
@@ -42,7 +51,8 @@ void tick();
 void filter_pad(unsigned long user, unsigned short* buttons);
 std::uint64_t pad_polls();
 
-// `controls status | pad <hex buttons> | recenter | stereo | nearer | farther`
+// `controls status | pad <hex buttons> | padlog 0|1 | chord <buttons|off> [ms] | recenter |
+// stereo | nearer | farther`
 std::string command(const std::string& args);
 
 }  // namespace ff7vr::engine::controls

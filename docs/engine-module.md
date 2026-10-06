@@ -303,7 +303,7 @@ every press toggles once.
 
 | Action | Keyboard (default) | Gamepad (hold View/Back, then press) | What it does |
 |---|---|---|---|
-| first / third person | Home (`[first_person] toggle_key`) | right stick click | switches the camera mode (see "First person") |
+| first / third person | Home (`[first_person] toggle_key`) | right stick click; or, without View, both stick clicks together (`[controls] fp_toggle_chord`) | switches the camera mode (see "First person") |
 | recenter | End (`[controls] recenter_key`) | left stick click | the direction the head faces now becomes forward, and the head's position the origin, for the view and for the floating panels: the UI panel and the virtual screen are placed in front of the head again |
 | stereo off / on | Insert (`[controls] stereo_key`) | Menu/Start | stereo off: the game is shown on the virtual screen (the same fallback as for menus and loading screens); on again: back to 3D. The game window keeps its size and mode either way. While no XR session runs (the runtime asked the game to let go of the headset, for example after SteamVR or the streaming app was closed and opened again; the render module then waits for `xr-restart`), the same key reconnects instead (`xr-restart`) and keeps stereo on |
 | UI panel nearer | Page Down (`[controls] ui_nearer_key`) | D-pad down | the HUD/menu panel `ui_step` (0.25 m) nearer, down to `ui_min` (0.75 m); its size in metres stays, so it looks larger |
@@ -377,6 +377,44 @@ hidden buttons, is inferred from the filter's output.
 | `ui_step`, `ui_min`, `ui_max` | `0.25`, `0.75`, `8` | metres per press and the limits |
 | `pad` | `1` | the gamepad combinations for recenter, stereo and the panel |
 | `pad_hold_view` | `1` | View alone reaches the game on release (see above) |
+| `fp_toggle_chord` | `L3+R3` | buttons pressed together that toggle first/third person (see below); empty = off. Names: `L3 R3 A B X Y LB RB Back Start Up Down Left Right` (also `LS RS View Menu L1 R1 DPadUp ...`) |
+| `fp_toggle_chord_ms` | `150` | how close together the chord's buttons must go down |
+
+### The first/third person chord
+
+`fp_toggle_chord` (default both stick clicks) is a second gamepad toggle next to View +
+right stick click, in `controls::filter_pad` before the View logic (skipped while View
+is down or a View combination is latched; a chord under way finishes). States: idle;
+pending (some of the chord's buttons down: they are held back from the game); fired
+(all down within `fp_toggle_chord_ms` of the first: one toggle, the chord's buttons
+hidden until all are released, so holding never repeats); passed (the window ran out:
+the buttons reach the game as they are, from then on). A press released while pending
+is handed to the game afterwards as a 120 ms press. Cost for a single stick click: it
+reaches the game up to the window late. The toggle goes through
+`player::request_pad_toggle` (the same as View + R3) and is logged as
+`controls: first/third person (gamepad chord): toggle requested`.
+
+Dev pipe: `controls status` shows the chord, its counters (fired, passed late, replayed
+short) and the last state in and out of the filter; `controls padlog 1` logs every
+change (`controls: pad in 0x0040 -> game 0x0000`); `controls chord <buttons|off> [ms]`
+changes it live.
+
+Tested in the game without a pad (`captures/chord`, Null backend, first room of the
+Sector 7 slums save): button states fed through the filter every 15 ms over the pipe
+(`controls pad`), forwarded state per change:
+- L3 tapped 80 ms: game `0x0000` while down, then `0x0040` for 124 ms, then `0x0000`
+  (replayed short); no toggle.
+- R3 held 500 ms: `0x0000` for the first 156 ms, then `0x0080` until released; no toggle.
+- L3, R3 50 ms later, both held 1.5 s, R3 released first, L3 300 ms later: `0x0000`
+  throughout; one toggle (`player: toggled to third person`, camera mode first person
+  (head bone) -> blend -> third person (level boom)); `c01_before` shows first person
+  without the body, `c02_after_chord1` third person with Cloud.
+- both in the same poll, held 600 ms: `0x0000`, one toggle back to first person
+  (`c03_after_chord2`).
+- R3 300 ms after L3: L3 reaches the game after 150 ms, then `0x00c0`; no toggle.
+- View, then View + R3: `0x0000`, toggles as before (`c04_after_view_r3`).
+The game itself never polled XInput in this run (`ping`: `xinput_calls=0`, also with
+`[dev] virtual_pad = 1`), so what the game does with a late stick click is untested.
 
 ## ini keys (`[stereo]` in `ff7vr.ini`)
 

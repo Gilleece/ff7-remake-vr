@@ -58,14 +58,15 @@ folder and start `ff7vr-start.cmd` there (a start from Steam crashes for now); s
 
 The game's own controls are unchanged. The mod adds these; the keys work while the
 game window has the focus, and on the gamepad you **hold View/Back and press** the
-second button (the game does not see these combinations):
+second button, or click both sticks together (the game does not see these
+combinations):
 
-| Keyboard | Gamepad (hold View/Back +) | Effect |
+| Keyboard | Gamepad | Effect |
 |---|---|---|
-| **Home** | right stick click | switch between first and third person |
-| **End** | left stick click | **recenter**: the direction you face now becomes forward, and the HUD panel and the virtual screen move in front of you |
-| **Insert** | Menu/Start | 3D off (the game on the virtual screen) and on again. If the headset has lost the game (for example after Virtual Desktop or SteamVR was closed and opened again), the same key reconnects it |
-| **Page Down** / **Page Up** | D-pad down / up | HUD/menu panel 0.25 m nearer / farther |
+| **Home** | **both stick clicks together (L3+R3)**, or hold View/Back + right stick click | switch between first and third person |
+| **End** | hold View/Back + left stick click | **recenter**: the direction you face now becomes forward, and the HUD panel and the virtual screen move in front of you |
+| **Insert** | hold View/Back + Menu/Start | 3D off (the game on the virtual screen) and on again. If the headset has lost the game (for example after Virtual Desktop or SteamVR was closed and opened again), the same key reconnects it |
+| **Page Down** / **Page Up** | hold View/Back + D-pad down / up | HUD/menu panel 0.25 m nearer / farther |
 
 ## Settings worth knowing
 
@@ -89,6 +90,7 @@ package folder.
 | `[first_person] battle_signal` | see the ini | how a battle is detected. Empty (`battle_signal =`) if battles stay in first person or exploration switches to third person by itself |
 | `[first_person] toggle_key`, `[controls] ..._key` | Home, End, Insert, Page Down/Up | the keys of "Controls", as Windows virtual-key codes (0 = none) |
 | `[controls] pad` | `1` | `0` = no gamepad combinations for recenter, 3D on/off and the panel distance |
+| `[controls] fp_toggle_chord` | `L3+R3` | the gamepad buttons pressed together that switch first/third person; empty = off. A single stick click still reaches the game, at most 150 ms (`fp_toggle_chord_ms`) late |
 | `[camera] boom` | `level` | `game` = in third person, follow the game camera's height as it tilts (the eyes rise and sink) |
 | `[stereo] decoupled_pitch` | `1` | `0` = apply the game camera's tilt to the view too (the horizon tilts) |
 | `[screen] distance`, `width` | `2.0`, `1.8` | the virtual screen, in metres |
