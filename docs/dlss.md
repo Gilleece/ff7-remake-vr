@@ -103,6 +103,10 @@ preset L, because the driver override forced it (next section).
 
   So the camera motion the engine's `ClipToPrevClip` gives is already free of jitter for
   DLSS's purposes (the default), and the other two settings make the image shimmer.
+- **Head turning** (Null backend `xr.null_motion = yaw`, `captures/dlss/r13/sheet_yaw_lamp.png`):
+  the hanging lamp and the ceiling planks while the head turns, with the game's
+  anti-aliasing, DLAA and upscale from 50 %: no doubled bulb, no smearing, the planks stay
+  sharper with DLSS.
 - **History:** after `stereo off` / `stereo on` with DLSS on, the first frames are clean
   (`r3/sheet_after_on.png`; the features are reset when an eye was not evaluated in the
   previous frame). Switching DLSS off releases the features.
