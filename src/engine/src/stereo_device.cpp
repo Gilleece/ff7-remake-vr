@@ -554,7 +554,7 @@ struct DynState {
     float scale = 1.0f;
     std::uint64_t last_samples = 0;
     int skip = 0;       // GPU samples to ignore after a change (they arrive a few frames late)
-    double sum = 0;
+    float window[16]{};
     int n = 0;
     std::uint64_t last_change_tick = 0;
 };
@@ -562,20 +562,22 @@ DynState g_dyn;  // game thread
 std::atomic<float> g_dyn_scale{1.0f}, g_dyn_avg{0.0f}, g_dyn_budget{0.0f};
 std::atomic<std::uint64_t> g_dyn_changes{0};
 
-constexpr int kDynWindow = 10;         // frames averaged per decision
+constexpr int kDynWindow = 10;         // frames per decision (their median: single slow frames do not move the scale)
+constexpr int kDynSkipAfterChange = 20;  // frames ignored after a change: the engine reallocates view-sized buffers, a few slow frames
 constexpr float kDynStep = 0.02f;      // scale granularity
 constexpr float kDynUpHeadroom = 0.90f;
 constexpr std::uint64_t kDynUpHold = 60;  // frames after a change before the scale may rise
+
+void finish_render_scale(float s);
 
 void update_render_scale(bool stereo) {
     const float max_s = std::clamp(g_settings.render_scale.load(), 0.3f, 1.0f);
     const float min_s = std::clamp(g_settings.dynres_min.load(), 0.3f, max_s);
     float s = g_dyn.scale;
-    if (!g_settings.dynres.load()) {
-        s = max_s;
-        g_dyn.n = 0;
-        g_dyn.sum = 0;
-    } else if (stereo) {
+    // The GPU time is averaged also while the scale is fixed, for `dynres` status (diagnostics in a headset session).
+    const bool dynamic = g_settings.dynres.load();
+    if (!dynamic) s = max_s;
+    if (stereo) {
         float ms = 0, hz = 0;
         std::uint64_t samples = 0;
         StereoHost* h = g_host.load();
@@ -583,17 +585,17 @@ void update_render_scale(bool stereo) {
             g_dyn.last_samples = samples;
             if (g_dyn.skip > 0) {
                 --g_dyn.skip;
-            } else {
-                g_dyn.sum += ms;
-                ++g_dyn.n;
+            } else if (g_dyn.n < kDynWindow) {
+                g_dyn.window[g_dyn.n++] = ms;
             }
             if (g_dyn.n >= kDynWindow) {
                 const float budget = std::clamp(g_settings.dynres_target.load(), 0.3f, 1.2f) * 1000.0f / hz;
-                const float avg = static_cast<float>(g_dyn.sum / g_dyn.n);
-                g_dyn.sum = 0;
+                std::sort(g_dyn.window, g_dyn.window + g_dyn.n);
+                const float avg = g_dyn.window[g_dyn.n / 2];  // median
                 g_dyn.n = 0;
                 g_dyn_avg = avg;
                 g_dyn_budget = budget;
+                if (!dynamic) return finish_render_scale(s);
                 // GPU time grows roughly with the pixel count, so with the square of the scale.
                 const float fit = s * std::sqrt(budget / std::max(avg, 0.1f));
                 float next = s;
@@ -605,19 +607,22 @@ void update_render_scale(bool stereo) {
                 next = std::clamp(next, min_s, max_s);
                 if (std::fabs(next - s) >= kDynStep * 0.5f) {
                     try {
-                        log::info("dynres: scale {:.2f} -> {:.2f} (GPU {:.2f} ms over {} frames, budget {:.2f} ms)", s, next, avg,
+                        log::info("dynres: scale {:.2f} -> {:.2f} (GPU median {:.2f} ms of {} frames, budget {:.2f} ms)", s, next, avg,
                                   kDynWindow, budget);
                     } catch (...) {
                     }
                     s = next;
                     g_dyn.last_change_tick = g.ticks;
-                    g_dyn.skip = 4;
+                    g_dyn.skip = kDynSkipAfterChange;
                     ++g_dyn_changes;
                 }
             }
         }
     }
-    s = std::clamp(s, std::min(min_s, max_s), max_s);
+    finish_render_scale(std::clamp(s, std::min(min_s, max_s), max_s));
+}
+
+void finish_render_scale(float s) {
     g_dyn.scale = s;
     g_dyn_scale = s;
     if (s >= 0.999f || !g.eye_w || !g.eye_h) {
@@ -634,7 +639,7 @@ void update_render_scale(bool stereo) {
 
 std::string dynres_status() {
     return std::format("ok dynres {} scale {:.2f} (render_scale {:.2f}, min {:.2f}, target {:.2f} of the frame period) rect {}x{} of {}x{}; "
-                       "last GPU {:.2f} ms budget {:.2f} ms; changes {}",
+                       "GPU median {:.2f} ms (last 10 measured frames) budget {:.2f} ms; changes {}",
                        g_settings.dynres.load() ? "on" : "off", g_dyn_scale.load(), g_settings.render_scale.load(),
                        g_settings.dynres_min.load(), g_settings.dynres_target.load(), g.rect_w ? g.rect_w : g.eye_w,
                        g.rect_h ? g.rect_h : g.eye_h, g.eye_w, g.eye_h, g_dyn_avg.load(), g_dyn_budget.load(), g_dyn_changes.load());

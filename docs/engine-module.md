@@ -557,7 +557,10 @@ person, light and occlusion fixes) with `r.BloomQuality 0`, Null backend without
 
 Headroom of "after" against the display period: at 72 Hz (13.9 ms) 4.7 to 6.5 ms at
 3072x3264 and 2.7 to 4.8 ms at 3600x3600 standing; at 90 Hz (11.1 ms) 1.9 to 3.8 ms and
--0.1 to 2.0 ms. Turning raises the 95th percentile by 3 to 4 ms. These are GPU frame times
+-0.1 to 2.0 ms. Turning raises the 95th percentile by 3 to 4 ms; about half of that is GPU
+time (2 x 3600x3600: GPU p95 of scene plus post-processing 13.1-13.9 ms while turning against
+11.4 standing) and the rest frames whose CPU side is late (frame p95 14.6-15.8 ms; not traced
+further). These are GPU frame times
 of the game alone: Virtual Desktop's compositor and encoder take GPU time on top, which cannot
 be measured without the headset (the player's session at 3072x3264 / 72 Hz ran at 64 to 72
 fps before these changes).
@@ -931,11 +934,15 @@ of the scene):
 | 0.80 | 8.63 ms | 7.70 ms | 2880x2880 |
 | 0.75 | 8.05 ms | 7.23 ms | 2704x2704 |
 
-Dynamic resolution at a target of 0.85 x 13.9 ms (72 Hz) = 11.8 ms in the street: the scale
-settled at 0.96 (GPU 11.2 ms); at 0.75 x 13.9 = 10.4 ms it went to 0.86 standing and moved
-between 0.75 and 0.98 while turning, following the GPU time of each 10-frame window (turning
-has single windows of 15 ms). Captures at 0.75 (`captures/perf/002659-scale2-3600x3600/s075_*`):
-geometry and framing as at 1.0, softer; nothing at the edges of the sub-image.
+With the median and the 20 skipped frames (run `captures/perf/20261006-010653-scale-3600x3600`,
+start of the save, reflections per eye on): at a target of 0.85 x 13.9 ms (72 Hz) = 11.8 ms
+the scale stayed at 1.0 (GPU 10.6 ms, nothing to do); at 0.70 x 13.9 = 9.7 ms it went
+1.00 -> 0.94 -> 0.92 -> 0.90 within 0.7 s and held (frame 9.37 ms); turning for 5 s moved it
+between 0.84 and 0.88 (frame 9.74 ms, p95 12.7), and it settled at 0.86 afterwards (9.56 ms):
+8 changes in 25 s, none below 0.84. The first version (average of 10, 4 frames skipped)
+oscillated between 0.75 and 0.82 in the same situation. Captures at 0.75
+(`captures/perf/002659-scale2-3600x3600/s075_*`): geometry and framing as at 1.0, softer;
+nothing at the edges of the sub-image.
 
 Not on by default: it lowers the resolution exactly when the scene is heavy, and how a
 resolution change looks in motion (TAA reset, the runtime's scaling) and how the budget should
