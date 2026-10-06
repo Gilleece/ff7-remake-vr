@@ -478,6 +478,18 @@ void BackendBase::CaptureComposited(const FrameRecord& rec, const SubmitDesc& de
     }
     constexpr DXGI_FORMAT kViewFormat = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
     const float black[4] = {0, 0, 0, 1};
+    // The compose targets are eye-sized (78 MB each at 4608x4224) and only needed
+    // for this frame: released on every way out, created again by the next capture.
+    struct ReleaseComposeTargets {
+        BackendBase* self;
+        ~ReleaseComposeTargets() {
+            for (int e = 0; e < 2; ++e) {
+                if (self->composeTarget_[e]) self->compositor_.Forget(self->composeTarget_[e].Get());
+                self->composeTarget_[e].Reset();
+                self->composeW_[e] = self->composeH_[e] = 0;
+            }
+        }
+    } releaseComposeTargets{this};
     for (int e = 0; e < 2; ++e) {
         if (!composeTarget_[e] || composeW_[e] != eyeW || composeH_[e] != eyeH) {
             if (composeTarget_[e]) compositor_.Forget(composeTarget_[e].Get());

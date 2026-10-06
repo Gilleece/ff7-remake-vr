@@ -393,9 +393,14 @@ What fills the card at 4608x4224 with DLSS:
 - The mod's own per-eye fixes: a copy of the scene colour at the full buffer size (FP16,
   9216x4224, 311 MB) and the reflections target (4624x4224 FP16, 156 MB); with
   `r.ScreenPercentage 58` they are 105 and 53 MB.
-- After a `capture`, its targets stay allocated until the session ends: per eye a compose
-  target and a conversion target in the card and a staging copy in system memory (each
-  W x H x 4 bytes: 467 MB at 4608x4224, 311 of them in the card).
+- A `capture` allocates per eye a compose target and a conversion target in the card and a
+  staging copy in system memory (each W x H x 4 bytes: 467 MB at 4608x4224, 311 of them in the
+  card). Until 06/10 they stayed allocated until the session ended; now they are released as
+  soon as the capture has been read back and created again by the next one. Measured at
+  4032x3648 with `vram` around two captures 30 s apart: before, the card's total rose by
+  154 MB and the game's system memory by 96 MB after the first capture and stayed there; now
+  the card's total moved by 1 and 38 MB across the two captures (it moves by up to 56 MB in
+  5 s without one) and the game's system memory by 0-16 MB.
 - Other programs: dwm 0.7-1.1 GB, Virtual Desktop's Streamer 0.2-0.7 GB (more while it streams
   a large image), Steam's web helper 0.2 GB, browsers, editors: about 2-3 GB of the 16 with
   nothing else running.

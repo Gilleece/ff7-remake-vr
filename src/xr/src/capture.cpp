@@ -31,11 +31,7 @@ void CaptureManager::Shutdown() {
     }
     cv_.notify_all();
     if (worker_.joinable()) worker_.join();
-    for (int i = 0; i < 2; ++i) {
-        rt_[i].Reset();
-        staging_[i].Reset();
-        rtW_[i] = rtH_[i] = 0;
-    }
+    if (blitter_) ReleaseTextures();
     device_.Reset();
     requests_.clear();
     jobs_.clear();
@@ -222,9 +218,22 @@ void CaptureManager::CaptureRaw(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, 
     ctx->Unmap(staging.Get(), 0);
 }
 
+void CaptureManager::ReleaseTextures() {
+    for (int e = 0; e < 2; ++e) {
+        if (rt_[e]) blitter_->Forget(rt_[e].Get());
+        rt_[e].Reset();
+        staging_[e].Reset();
+        rtW_[e] = rtH_[e] = 0;
+    }
+}
+
 void CaptureManager::EndFrame() {
     if (!active_) return;
     active_ = false;
+    // The pixels are on the CPU now (CaptureEye maps and copies them). The eye-sized
+    // conversion and staging textures are released rather than kept for the session
+    // (at 4608x4224 they are 156 MB per eye); the next capture creates them again.
+    ReleaseTextures();
     {
         std::lock_guard lk(mutex_);
         jobs_.push_back(std::move(current_));

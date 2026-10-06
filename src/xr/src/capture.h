@@ -57,6 +57,7 @@ private:
     };
 
     void WorkerMain();
+    void ReleaseTextures();  // render thread (or after the worker stopped)
     static bool WritePng(const std::string& pathUtf8, const Image& img, std::string* err);
 
     const Logger* log_ = nullptr;
