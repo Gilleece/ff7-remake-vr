@@ -321,6 +321,99 @@ For one frame in detail: `fov trace` (GPU time per render target binding, accura
 include idle time while the trace itself holds the CPU, so use it for what is drawn, not for
 how long it takes).
 
+## Video memory and slow phases
+
+Three different states make stereo frames slow for seconds or minutes while the GPU reports
+100 % "utilization" but draws a third of its power (80-130 W against 250-340 W when it
+renders). All were measured with the Null backend at 90 Hz, the player's ini (DLSS on at
+`input_scale` 0.58 unless noted, foveation `performance`, LOD lines, bloom off), walking
+in the first room and the alley, on an RTX 5080 (16 GB, `DedicatedVideoMemory` 15977 MB)
+whose PCIe link runs at gen 4 x8 (`nvidia-smi --query-gpu=pcie.link.gen.current,pcie.link.width.current`;
+the card supports x16).
+
+**1. The card is full.** When all processes together hold about 95 % of the card, Windows'
+video memory manager moves part of the game's memory to system memory and back, and the GPU
+waits for it over PCIe. Frames go to 85-130 ms and stay there for as long as the memory does
+not shrink (minutes, the whole session). The game's own budget from
+`QueryVideoMemoryInfo` does not show it (12.9 GB used of a 13.8-15.2 GB budget): the budget is
+per process, the limit is the card. Signature: card usage (counter `GPU Adapter Memory`) at
+95-99 %, the game's `Shared Usage` (counter `GPU Process Memory`) at 400-900 MB instead of
+50-100, the System process's copy engine busy, and in `stereo framelog` the GPU frame time
+equal to the frame interval while the game thread ticks in 3-4 ms.
+
+**2. Uploads after loading.** For 20-40 s after the save is loaded (and longer after a change
+that reallocates the scene buffers, 2 minutes after the `r.ScreenPercentage` switch below) the
+game's copy engine and the System process's copy engine are busy at 50-100 % and frames take
+20-70 ms; the card is far from full (62-76 %). It ends by itself. Starting right after the
+previous game exited (14 s) or after a 2-minute pause made no difference.
+
+**3. A copy-bound state that does not end (cause not found).** At 4032x3648 with DLSS at 0.58
+three runs out of three (two with the committed code, one with a work-in-progress DLSS output
+mode) stayed at a median of about 71 ms per frame for the whole run (4 minutes), and two of
+four earlier 3072x3264 runs without DLSS did the same for 5 minutes. The card was only 62-90 %
+full. During it the game's two copy engines are busy at 40-130 % (summed), the System
+process's copy engine at 30-100 % and dwm's 3D engine at 10-90 %; the frame log shows the RHI
+thread waiting (9 ms of CPU in a 72 ms frame) rather than working. In one such session, with
+nothing moving (head pose frozen with `xr-sim head 0 0`, no input), it stayed slow with
+foveated rendering off, with DLSS off, and even with stereo off (the flat 1280x720 game, normally
+2.2 ms, took 73-249 ms). A separate process's GPU work (200 clears and copies of a 2048x2048
+FP16 target, 5.6 ms when the GPU is free) took 6-77 ms next to it: the game's GPU work holds the
+GPU while doing little (99 % busy, 76 W, memory-controller load 2 %, normal clocks, no
+throttle reason). A lower `r.Streaming.PoolSize` did not change it at 4032 (2500 MB: still
+71 ms), while at 4608x4224 the same setting gave 13 ms runs (twice). Not tried: a GPU trace
+(`gpu trace`) inside the state, the card at its stock clocks (MSI Afterburner applies a custom
+voltage curve and memory offset at start-up; the core sits at 2730 MHz even when nearly idle),
+NVIDIA Broadcast closed.
+| Run (4-5 min each) | Eye | Card, all processes | Game (DXGI) | Frames after the start | Power |
+|---|---|---|---|---|---|
+| 3072, no DLSS | 3072x3264 | 10.7-11.3 GB (67-71 %) | 8.6-9.4 GB | 11.11 ms (90 Hz) | 200-207 W |
+| 4032, no DLSS | 4032x3648 | 12.5-12.7 GB (78-80 %) | 8.9-10.6 GB | 11.11 ms (90 Hz) | 260-279 W |
+| 4608, DLSS 0.58 | 4608x4224 | 15.3-15.7 GB (95-98 %) | 11.8-12.9 GB | **85-136 ms, to the end** | 88-101 W |
+| 4608, DLSS 0.58, `r.Streaming.PoolSize` 2500 | 4608x4224 | 14.4-14.6 GB (90-91 %) | 11.1-11.3 GB | 13.0-13.4 ms, GPU-bound (twice) | 303-318 W |
+| 4608, DLSS via `r.ScreenPercentage` 58, `input_scale` 1 | 4608x4224 | 12.0 GB (75 %) | 8.1-8.8 GB | 14.2 ms after a 2-minute upload phase | 330-340 W |
+| 4032, DLSS 0.58 (committed code, twice: pool 4000 and 2500) | 4032x3648 | 12.5-14.4 GB (78-90 %) | 9.2-12.0 GB | **69-114 ms median, to the end** (state 3) | 55-95 W |
+| Player's headset session (Virtual Desktop), DLSS 0.58 | 4608x4224 | 15.4-15.85 GB (97-99 %) | 12.1-12.9 GB | 50 then 87 ms after 20 good seconds | 110-130 W |
+
+What fills the card at 4608x4224 with DLSS:
+
+- The engine's scene buffers are sized from the eye target. `[dlss] input_scale` and
+  `[stereo] render_scale` only shrink the views' rectangles (`docs/engine-module.md`, "Render
+  scale and dynamic resolution"), so with DLSS at 0.58 every scene buffer still has the full
+  9216x4224, of which a third is drawn. `r.ScreenPercentage` sizes them to the rendered size:
+  the same DLSS input and output with `r.ScreenPercentage 58` and `input_scale 1` used 3.9 GB
+  less (12.7 -> 8.8 GB for the game).
+- The texture streaming pool: `r.Streaming.PoolSize` is 4000 MB (set by the texture quality
+  setting; `r.Streaming.LimitPoolSizeToVRAM` 0). At 2500 the game used 1.4 GB less.
+- DLSS: 706 MB per eye for the NGX feature at a 4608x4224 output (preset K; 366 MB at
+  3072x3264), plus the motion-vector and output textures.
+- The mod's own per-eye fixes: a copy of the scene colour at the full buffer size (FP16,
+  9216x4224, 311 MB) and the reflections target (4624x4224 FP16, 156 MB); with
+  `r.ScreenPercentage 58` they are 105 and 53 MB.
+- After a `capture`, its targets stay allocated until the session ends: per eye a compose
+  target and a conversion target in the card and a staging copy in system memory (each
+  W x H x 4 bytes: 467 MB at 4608x4224, 311 of them in the card).
+- Other programs: dwm 0.7-1.1 GB, Virtual Desktop's Streamer 0.2-0.7 GB (more while it streams
+  a large image), Steam's web helper 0.2 GB, browsers, editors: about 2-3 GB of the 16 with
+  nothing else running.
+
+What helps, measured:
+
+- Keep the card below about 90 %. At 4608x4224 with DLSS, `[stereo_cvars] r.Streaming.PoolSize = 2500`
+  turned 85-136 ms frames into 13 ms (two runs). In a still view at 3072x3264 the backgrounds
+  were as sharp at 2500 as at 4000 (crops at 1:1; one view, characters not compared), and the
+  game held 1.3 GB less.
+- `r.ScreenPercentage` for the DLSS input instead of `input_scale` sizes the scene buffers (and
+  the mod's scratch textures) to the rendered size: 3.9 GB less at 4608x4224. Foveated rendering
+  does not follow it (its surface is still laid out for the full eye: the rings are in the wrong
+  place); not looked at in an image.
+- Fewer other programs on the card (each holds some of the 2-3 GB the game cannot have).
+
+The third state is not explained by memory and none of these settings removed it at 4032x3648.
+How to watch it: the timing block's `video memory:` line (`docs/render.md`, "Timing") and its
+warning, the dev command `vram`, and `tools\bench\gpu-counters.ps1 -OutCsv <file>` (every
+second: busy GPU engines per process, each process's memory in the card and in system
+memory, the card's total; no elevation needed) alongside `nvidia-smi --query-gpu=memory.used,utilization.gpu,power.draw,clocks.sm,pcie.link.width.current --format=csv -lms 1000`.
+
 ## Resting state
 
 After `bench-compare.ps1` (and after every `bench-run.ps1`) the machine is

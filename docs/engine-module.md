@@ -1159,6 +1159,11 @@ be set against Virtual Desktop's own GPU work can only be judged in the headset.
 `render_scale` below 1 is the same trade as `[xr] resolution_scale`, but without
 reallocation and adjustable while playing (`dynres scale`).
 
+Video memory: because the scene buffers keep the full size, a render scale (or `[dlss]
+input_scale`) below 1 saves GPU time but no memory. At 4608x4224 per eye with DLSS at 0.58
+the game held 12.7 GB, against 8.8 GB for the same input through `r.ScreenPercentage 58`,
+and the card filled up (`docs/benchmarking.md`, "Video memory and slow phases").
+
 ## Movies
 
 The game plays its pre-rendered movies (`.emov` files under
