@@ -20,6 +20,7 @@ $script:LockDir         = Join-Path $script:RepoRoot '.locks'
 $script:GameLock        = Join-Path $script:LockDir 'game'
 $script:StateDir        = Join-Path $script:LockDir 'state'      # .locks/ is gitignored
 $script:LumaStatePath   = Join-Path $script:StateDir 'luma-disabled.txt'
+$script:LastExitPath    = Join-Path $script:StateDir 'last-game-exit.txt'
 $script:CapturesDir     = Join-Path $script:RepoRoot 'captures'  # gitignored
 $script:LogName         = 'ff7vr.log'
 $script:ProxyDllName    = 'xinput1_3.dll'
@@ -983,8 +984,47 @@ function Stop-GameProcesses([int]$timeoutSeconds = 30) {
     }
     $gone = Wait-Until { (@(Get-GameProcesses).Count + @(Get-GameHelperProcesses).Count) -eq 0 } $timeoutSeconds 500 'game processes to exit'
     if (-not $gone) { throw 'Game processes are still running after kill' }
+    if ($procs.Count -gt 0) { Save-GameExitTime }
     # The loader releases the DLL file a moment after the process is reported gone.
     Start-Sleep -Milliseconds 500
+}
+
+# ------------------------------------------------------------------ waiting for the card after an exit
+# A game started soon after the previous one's exit can stay slow for minutes: frames of
+# 50-100 ms from the load on, the graphics card busy at a third of its power, the game's copy
+# engines saturated (docs\benchmarking.md, "Video memory and slow phases", state 3). With
+# 3072x3264 stereo it happened in 2 of 5 starts 9 s after an exit and in none of 5 starts
+# 89-90 s after; a separate upload test right after such a session was still about a hundred
+# times slower than normal with no game running. Wait-AfterGameExit waits until
+# $minSeconds have passed since the last game exit recorded by Stop-GameProcesses.
+
+function Save-GameExitTime([datetime]$when = (Get-Date)) {
+    try {
+        Ensure-Dir $script:StateDir
+        Set-Content -LiteralPath $script:LastExitPath -Value $when.ToString('o') -Encoding ASCII
+    } catch { }
+}
+
+function Get-GameExitTime {
+    try {
+        if (Test-Path -LiteralPath $script:LastExitPath) {
+            return [datetime]::Parse((Get-Content -LiteralPath $script:LastExitPath -TotalCount 1).Trim(), $null,
+                                     [System.Globalization.DateTimeStyles]::RoundtripKind)
+        }
+    } catch { }
+    return $null
+}
+
+# Returns the seconds waited (0 when no exit was recent).
+function Wait-AfterGameExit([int]$minSeconds = 90) {
+    $last = Get-GameExitTime
+    if (-not $last) { return 0 }
+    $since = ((Get-Date) - $last).TotalSeconds
+    if ($since -lt 0 -or $since -ge $minSeconds) { return 0 }
+    $wait = $minSeconds - $since
+    Write-Step ("The last game exited {0:N0} s ago. Waiting {1:N0} s more before starting: a game started again soon after an exit can stay slow for minutes. -NoIdleWait skips this." -f $since, $wait)
+    Start-Sleep -Milliseconds ([int]($wait * 1000))
+    return [int]$wait
 }
 
 # Full cleanup after a run: kill, undeploy (archives the log), restore Luma, release the lock.

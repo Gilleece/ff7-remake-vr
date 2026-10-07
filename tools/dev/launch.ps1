@@ -18,6 +18,11 @@
      dumps go to captures\runs\<time>\), restores dxgi.dll, releases the lock.
      With -KeepRunning, run stop.ps1 when done.
 
+  Started within 90 s of the previous game's exit (recorded when the harness
+  stops a game), it first waits until 90 s have passed: a game started again
+  soon after an exit can stay slow for minutes (docs\benchmarking.md, "Video
+  memory and slow phases"). -NoIdleWait skips the wait.
+
   -Set overrides single ini keys for one run without editing any file, for
   example -Set "xr.backend=null;log.level=trace" (section.key=value, separated
   by ';' or given as an array). The keys are appended to a copy of the ini
@@ -55,6 +60,7 @@ param(
     [switch]$KeepRunning,
     [switch]$NoMod,
     [switch]$KeepLuma,
+    [switch]$NoIdleWait,
     [switch]$Fullscreen,
     [int]$Width = 1280,
     [int]$Height = 720,
@@ -139,6 +145,7 @@ try {
     }
 
     if (-not (Start-SteamIfNeeded)) { throw 'Steam did not start' }
+    if (-not $NoIdleWait) { [void](Wait-AfterGameExit) }
     $gameArgs = Get-GameArguments -width $Width -height $Height -fullscreen:$Fullscreen -extra $ExtraArgs
     $t0 = Get-Date
     if ($Via -eq 'steam') {

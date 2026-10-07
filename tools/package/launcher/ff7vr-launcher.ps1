@@ -14,6 +14,8 @@
        window closed, crash, restart).
     4. Checks that Steam runs (starts it if not) and warns if no VR runtime's
        server or streamer seems to run (the game then simply runs flat).
+       Waits, when the previous session ended less than 90 s ago, until 90 s
+       have passed (see -NoIdleWait).
     5. Sets ReShade/Luma's dxgi.dll aside as dxgi.dll.vr-disabled, copies the
        mod (xinput1_3.dll) and ff7vr.ini into End\Binaries\Win64, and records
        every change in End\Binaries\Win64\ff7vr.session.json.
@@ -56,6 +58,11 @@
 .PARAMETER ExtraArgs
   Extra command-line arguments for the game.
 
+.PARAMETER NoIdleWait
+  Start at once, also right after a previous session. Normally a start within
+  90 s of the previous session's end waits until 90 s have passed: a game
+  started again soon after quitting can stay slow for minutes.
+
 .PARAMETER NoPause
   Close the window at once: no countdown, no key press, also after an error.
 
@@ -72,7 +79,8 @@ param(
     [switch]$KeepLuma,
     [string]$GameDir = '',
     [string]$ExtraArgs = '',
-    [switch]$NoPause
+    [switch]$NoPause,
+    [switch]$NoIdleWait
 )
 
 Set-StrictMode -Version 2.0
@@ -91,6 +99,8 @@ $script:LastLogDir = $null
 
 $AutoCloseSeconds = 10        # a session that ended without problems closes its window after this
 $StartWaitSeconds = 90        # how long start/restore wait for a previous game or launcher to finish
+$ExitWaitSeconds  = 90        # a start this soon after the previous session's end waits until this long after it
+$LastExitFile     = 'last-exit.txt'   # in logs\: when the launcher saw the previous game exit
 $script:Warned     = $false   # set by Warn and Fail; a session with warnings keeps its window open
 $script:AutoClose  = $false   # set for a session that ended cleanly
 $script:Mutex      = $null
@@ -292,6 +302,52 @@ function Get-RunningVrRuntimes {
 }
 
 function Get-Sha256([string]$path) { return (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash }
+
+# ---- the graphics card after a game exit
+# A game started again soon after the previous one's exit can stay slow for minutes: about 10
+# frames per second from the load on, the graphics card busy at a third of its power. In the
+# measurements it happened to 2 of 5 games started 9 s after an exit and to none of 5 started
+# 90 s after. The start therefore waits until 90 s have passed since the previous session ended.
+
+# When the previous session ended, or $null: the launcher's own note of the last exit, and the
+# time of the newest log of the mod (written at least every 10 s while the game runs), in the
+# game folder (installed by hand), its ff7vr-logs\ folder and this launcher's logs\ folder.
+function Get-LastGameExit([string]$bin) {
+    $times = @()
+    $note = Join-Path $LogsDir $LastExitFile
+    if (Test-Path -LiteralPath $note) {
+        try { $times += [datetime]::Parse((Get-Content -LiteralPath $note -TotalCount 1).Trim(), $null, [System.Globalization.DateTimeStyles]::RoundtripKind) } catch { }
+    }
+    $log = Join-Path $bin 'ff7vr.log'
+    if (Test-Path -LiteralPath $log) { $times += (Get-Item -LiteralPath $log).LastWriteTime }
+    foreach ($dir in @((Join-Path $bin 'ff7vr-logs'), $LogsDir)) {
+        if (-not (Test-Path -LiteralPath $dir)) { continue }
+        $f = @(Get-ChildItem -LiteralPath $dir -Filter '*.log' -File -Recurse -Depth 1 -ErrorAction SilentlyContinue |
+               Sort-Object LastWriteTime -Descending | Select-Object -First 1)
+        if ($f.Count -gt 0) { $times += $f[0].LastWriteTime }
+    }
+    if ($times.Count -eq 0) { return $null }
+    return ($times | Sort-Object -Descending | Select-Object -First 1)
+}
+
+function Save-LastGameExit([datetime]$when) {
+    try {
+        New-Item -ItemType Directory -Force -Path $LogsDir | Out-Null
+        Set-Content -LiteralPath (Join-Path $LogsDir $LastExitFile) -Value $when.ToString('o') -Encoding ASCII
+    } catch { }
+}
+
+function Wait-AfterGameExit([string]$bin) {
+    $last = Get-LastGameExit $bin
+    if (-not $last) { return }
+    $since = ((Get-Date) - $last).TotalSeconds
+    if ($since -lt 0 -or $since -ge $ExitWaitSeconds) { return }
+    $wait = $ExitWaitSeconds - $since
+    Info ("The previous session ended {0:N0} s ago. Waiting {1:N0} s before starting the game:" -f $since, $wait)
+    Say  '           a game started again soon after quitting can stay slow (about 10 frames per second) for minutes.'
+    Start-Sleep -Milliseconds ([int]($wait * 1000))
+    Info 'Done waiting.'
+}
 
 # ------------------------------------------------------------------ session record
 # ff7vr.session.json in End\Binaries\Win64 records every change before it is
@@ -603,6 +659,8 @@ if ((Get-RunningVrRuntimes).Count -eq 0) {
     Say  '         appears in it without a restart.'
 }
 
+if (-not $NoIdleWait) { Wait-AfterGameExit $bin }
+
 # Record first, then change. Every step below is undone by restore.
 $started = (Get-Date).ToString('o')
 $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss')
@@ -674,6 +732,7 @@ try {
         if (-not $goneSince) { $goneSince = Get-Date }
         if (((Get-Date) - $goneSince).TotalSeconds -ge 5) { break }
     }
+    Save-LastGameExit $goneSince
     $mins = [math]::Round(((Get-Date) - $t0).TotalMinutes, 1)
     Info "The game has exited completely (after $mins min)"
     if ($mins -lt 0.5) { Warn 'The game exited very quickly. Check the log below and send it along if this was not you.' }
@@ -701,6 +760,6 @@ try {
 }
 
 if ($script:LastLogDir -and $gameStarted) { Say ''; Say "Log of this session: $(Join-Path $script:LastLogDir 'ff7vr.log')" }
-if ($exitCode -eq 0 -and -not $script:Warned) { Info 'Session finished. You can start the next one now.' }
+if ($exitCode -eq 0 -and -not $script:Warned) { Info 'Session finished. You can start the next one now (it waits until 90 s after this exit before the game starts).' }
 $script:AutoClose = $gameStarted
 Finish $exitCode
