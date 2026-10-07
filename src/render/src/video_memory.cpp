@@ -8,8 +8,10 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <cwctype>
+#include <filesystem>
 #include <format>
 #include <mutex>
 #include <vector>
@@ -34,12 +36,19 @@ bool g_lookedUp = false;
 PDH_HQUERY g_query = nullptr;
 PDH_HCOUNTER g_cardCounter = nullptr;
 PDH_HCOUNTER g_procSharedCounter = nullptr;
+// Busy time of this process's copy engines ("GPU Engine ... engtype_Copy", summed over its
+// engines, so it can exceed 100 %): the uploads and copies the driver queues for the game.
+PDH_HCOUNTER g_engineCounter = nullptr;
 bool g_pdhTried = false;
 
 // Warning state (LogReport callers only).
 bool g_warned = false;
 std::chrono::steady_clock::time_point g_lastWarn{};
 double g_minSharedMb = -1;  // lowest shared-memory usage of the game seen since the device appeared
+unsigned g_copyBusyBits = 0;  // the last kCopyWindow reports, newest in bit 0: copy engines busy
+bool g_copyWarned = false;
+std::chrono::steady_clock::time_point g_lastCopyWarn{};
+bool g_startChecked = false;
 
 constexpr double kMb = 1024.0 * 1024.0;
 // Of DedicatedVideoMemory, all processes together. Measured on a 16 GB card: runs that kept
@@ -49,6 +58,16 @@ constexpr double kCardFullFraction = 0.94;
 constexpr double kBudgetFraction = 0.95;  // of this process's budget
 constexpr double kDemotedMb = 300.0;      // growth of the game's shared-memory usage that means allocations were moved out
 constexpr double kDemotedCardFraction = 0.90;  // ... counted only with the card at least this full (a loading screen reached 412 MB at 75 %)
+// The slow state after a quick restart (docs/benchmarking.md, "Video memory and slow phases"):
+// the game's copy engines are mostly 50-130 % busy (summed, single 10-s reports from 0 to 360 %)
+// while frames take 50-170 ms; in normal play they are at 2-6 %. Uploads after a load keep them
+// busy for 20-40 s as well, so the warning needs 5 of the last 6 reports (a minute), and the
+// all-clear 5 of the last 6 below the mark.
+constexpr double kCopyBusyPercent = 40.0;
+constexpr int kCopyWindow = 6;    // reports are 10 s apart
+constexpr int kCopyBusyNeeded = 5;
+// A session that starts this soon after the previous one ended can land in that state.
+constexpr double kQuickRestartSeconds = 90.0;
 
 void OpenPdh() {
     g_pdhTried = true;
@@ -59,10 +78,12 @@ void OpenPdh() {
     if (PdhAddEnglishCounterW(g_query, L"\\GPU Adapter Memory(*)\\Dedicated Usage", 0, &g_cardCounter) != ERROR_SUCCESS) g_cardCounter = nullptr;
     if (PdhAddEnglishCounterW(g_query, L"\\GPU Process Memory(*)\\Shared Usage", 0, &g_procSharedCounter) != ERROR_SUCCESS)
         g_procSharedCounter = nullptr;
+    if (PdhAddEnglishCounterW(g_query, L"\\GPU Engine(*)\\Utilization Percentage", 0, &g_engineCounter) != ERROR_SUCCESS)
+        g_engineCounter = nullptr;
     if ((!g_cardCounter && !g_procSharedCounter) || PdhCollectQueryData(g_query) != ERROR_SUCCESS) {
         PdhCloseQuery(g_query);
         g_query = nullptr;
-        g_cardCounter = g_procSharedCounter = nullptr;
+        g_cardCounter = g_procSharedCounter = g_engineCounter = nullptr;
         log::info("video memory: the whole card's usage is not available (performance counters 'GPU Adapter Memory' missing)");
     }
 }
@@ -85,6 +106,26 @@ double SumInstancesMb(PDH_HCOUNTER counter, const std::wstring& prefix) {
     return mb;
 }
 
+// Sum in percent of the counter's instances whose lower-case name starts with `prefix` and
+// contains `part`, or -1 when none has a value yet (a rate needs two collections).
+double SumInstancesPercent(PDH_HCOUNTER counter, const std::wstring& prefix, const std::wstring& part) {
+    if (!counter) return -1;
+    DWORD bytes = 0, count = 0;
+    const DWORD fmt = PDH_FMT_DOUBLE | PDH_FMT_NOCAP100;
+    if (PdhGetFormattedCounterArrayW(counter, fmt, &bytes, &count, nullptr) != static_cast<PDH_STATUS>(PDH_MORE_DATA)) return -1;
+    std::vector<std::byte> buf(bytes);
+    auto* items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(buf.data());
+    if (PdhGetFormattedCounterArrayW(counter, fmt, &bytes, &count, items) != ERROR_SUCCESS) return -1;
+    double sum = -1;
+    for (DWORD k = 0; k < count; ++k) {
+        std::wstring name = items[k].szName ? items[k].szName : L"";
+        std::transform(name.begin(), name.end(), name.begin(), [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
+        if (name.rfind(prefix, 0) != 0 || name.find(part) == std::wstring::npos || items[k].FmtValue.CStatus != ERROR_SUCCESS) continue;
+        sum = std::max(sum, 0.0) + items[k].FmtValue.doubleValue;
+    }
+    return sum;
+}
+
 // Fills the counter-based fields of `i`. Caller holds g_m.
 void ReadCounters(Info& i) {
     if (!g_pdhTried) OpenPdh();
@@ -94,6 +135,58 @@ void ReadCounters(Info& i) {
     const std::wstring luid = std::format(L"luid_0x{:08x}_0x{:08x}_", static_cast<uint32_t>(g_luid.HighPart), g_luid.LowPart);
     i.cardUsageMb = SumInstancesMb(g_cardCounter, luid);
     i.processSharedMb = SumInstancesMb(g_procSharedCounter, std::format(L"pid_{}_", GetCurrentProcessId()) + luid);
+    // Engine instances: "pid_1234_luid_0x00000000_0x0000ef10_phys_0_eng_4_engtype_copy".
+    i.processCopyPercent = SumInstancesPercent(g_engineCounter, std::format(L"pid_{}_", GetCurrentProcessId()) + luid, L"engtype_copy");
+}
+
+// Last write time of the newest earlier session's log the mod kept in ff7vr-logs\ next to
+// this DLL (log.cpp moves the previous ff7vr.log there at start and keeps its time stamp),
+// as seconds before this process was created; -1 when there is none. The log is written at
+// least every 10 s while the game runs, so its time is at most that long before the exit.
+double SecondsSincePreviousSession() {
+    namespace fs = std::filesystem;
+    HMODULE self = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(&SecondsSincePreviousSession), &self))
+        return -1;
+    wchar_t path[MAX_PATH * 2] = {};
+    if (!GetModuleFileNameW(self, path, static_cast<DWORD>(std::size(path)))) return -1;
+    std::error_code ec;
+    const fs::path archive = fs::path(path).parent_path() / L"ff7vr-logs";
+    fs::file_time_type newest{};
+    bool found = false;
+    for (const auto& e : fs::directory_iterator(archive, ec)) {
+        const std::wstring n = e.path().filename().wstring();
+        if (!e.is_regular_file(ec) || n.rfind(L"ff7vr-", 0) != 0 || n.size() < 4 || n.substr(n.size() - 4) != L".log" ||
+            n.rfind(L"ff7vr-crash-", 0) == 0)
+            continue;
+        const auto t = e.last_write_time(ec);
+        if (!ec && (!found || t > newest)) newest = t, found = true;
+    }
+    if (!found) return -1;
+    FILETIME created{}, exited{}, kernel{}, user{};
+    if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) return -1;
+    // file_time_type on MSVC counts 100 ns ticks since 1601, like FILETIME.
+    const long long start = (static_cast<long long>(created.dwHighDateTime) << 32) | created.dwLowDateTime;
+    const long long last = newest.time_since_epoch().count();
+    return double(start - last) / 1e7;
+}
+
+// Once, when the device appears: a hint in the log when this session started soon after the
+// previous one ended (only seen when the mod is installed by hand: the launcher and the dev
+// tools move the logs away and wait before a quick restart themselves).
+void CheckQuickRestart() {
+    const double s = SecondsSincePreviousSession();
+    if (s < 0) return;
+    if (s < kQuickRestartSeconds) {
+        log::warn("start: this session started {:.0f} s after the previous one's last log line. A game started again within about "
+                  "a minute and a half of quitting can be slow for minutes (about 10 frames per second from the load on, the "
+                  "graphics card busy at low power); the 'game copy engine' figure in the 'video memory:' lines then stays high. "
+                  "If that happens, quit, wait a minute and a half, start again",
+                  s);
+    } else {
+        log::info("start: the previous session's last log line was {:.0f} s before this start", s);
+    }
 }
 
 // The game's memory in system memory: the counter when available (it includes what was moved
@@ -126,6 +219,10 @@ Info Query(ID3D11Device* device) {
         } else {
             log::warn("video memory: IDXGIAdapter3 not available; no budget reports");
         }
+        if (!g_startChecked) {
+            g_startChecked = true;
+            CheckQuickRestart();
+        }
     }
     if (!g_adapter) return i;
     DXGI_QUERY_VIDEO_MEMORY_INFO local{}, nonLocal{};
@@ -147,8 +244,9 @@ std::string Line(const Info& i) {
     std::string card = i.cardUsageMb >= 0 ? std::format("card {:.0f} of {:.0f} MB in use by all processes ({:.0f} %)", i.cardUsageMb, i.dedicatedMb,
                                                         i.dedicatedMb > 0 ? 100.0 * i.cardUsageMb / i.dedicatedMb : 0.0)
                                           : std::format("card {:.0f} MB", i.dedicatedMb);
-    return std::format("video memory: game {:.0f} of budget {:.0f} MB ({:.0f} %); {}; game in system memory {:.0f} MB", i.localUsageMb,
-                       i.localBudgetMb, i.localBudgetMb > 0 ? 100.0 * i.localUsageMb / i.localBudgetMb : 0.0, card, SharedMb(i));
+    std::string copy = i.processCopyPercent >= 0 ? std::format("; game copy engine {:.0f} %", i.processCopyPercent) : std::string();
+    return std::format("video memory: game {:.0f} of budget {:.0f} MB ({:.0f} %); {}; game in system memory {:.0f} MB{}", i.localUsageMb,
+                       i.localBudgetMb, i.localBudgetMb > 0 ? 100.0 * i.localUsageMb / i.localBudgetMb : 0.0, card, SharedMb(i), copy);
 }
 
 void LogReport(ID3D11Device* device) {
@@ -184,6 +282,23 @@ void LogReport(ID3D11Device* device) {
     } else if (!bad && g_warned) {
         log::info("video memory: back within the card");
         g_warned = false;
+    }
+
+    // The copy-bound slow state: the game's copy engines busy report after report while the
+    // card is not full (when it is full, the warning above explains the slowness).
+    const bool copyBusy = i.processCopyPercent >= kCopyBusyPercent && !cardFull;
+    g_copyBusyBits = ((g_copyBusyBits << 1) | (copyBusy ? 1u : 0u)) & ((1u << kCopyWindow) - 1);
+    const int busyReports = std::popcount(g_copyBusyBits);
+    if (busyReports >= kCopyBusyNeeded && (!g_copyWarned || now - g_lastCopyWarn >= std::chrono::minutes(5))) {
+        log::warn("video memory: the game's copy engines were busy in {} of the last {} reports ({:.0f} % now) with the card {:.0f} % full. This is the "
+                  "slow state that can follow starting the game again soon after quitting it: frames take 50-170 ms although "
+                  "nothing else is wrong, for minutes. Quit, wait a minute and a half, and start again",
+                  busyReports, kCopyWindow, i.processCopyPercent, i.dedicatedMb > 0 ? 100.0 * i.cardUsageMb / i.dedicatedMb : 0.0);
+        g_copyWarned = true;
+        g_lastCopyWarn = now;
+    } else if (g_copyWarned && busyReports <= kCopyWindow - kCopyBusyNeeded) {
+        log::info("video memory: the game's copy engines are no longer busy ({:.0f} %)", i.processCopyPercent);
+        g_copyWarned = false;
     }
 }
 

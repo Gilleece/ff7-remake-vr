@@ -26,6 +26,7 @@ struct Info {
     double dedicatedMb = 0;  // DXGI_ADAPTER_DESC::DedicatedVideoMemory
     double cardUsageMb = -1;      // all processes on this adapter; -1 when the counter is not available
     double processSharedMb = -1;  // this process in shared system memory, including allocations moved out of the card; -1 if unknown
+    double processCopyPercent = -1;  // this process's copy engines busy since the previous query, summed (can exceed 100); -1 if unknown
 };
 
 // Queries the adapter of `device` (the adapter is looked up once per device). Thread-safe.
@@ -38,7 +39,11 @@ std::string Line(const Info& i);
 // Logs the timing-block line, and a warning (at most once a minute) when the card
 // is 94 % full, the game is at 95 % of its budget, or the game's shared-memory
 // usage has grown by 300 MB or more over its lowest value while the card is at
-// least 90 % full.
+// least 90 % full. A second warning (at most every 5 minutes) when the game's copy
+// engines were busy in 5 of the last 6 reports with the card not full: the slow state a
+// quick restart can leave (docs/benchmarking.md). The first query also logs how long
+// after the previous session's last log line this one started, as a warning when it
+// was less than 90 s.
 void LogReport(ID3D11Device* device);
 
 }  // namespace ff7vr::render::video_memory
