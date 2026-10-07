@@ -21,6 +21,10 @@ the driver resets with DLSS on had one cause, found on 06/10 and fixed: the mod 
 motion vectors inside a device context state of its own (`SwapDeviceContextState`) in the
 middle of the engine's frame; at the title screen that hung the GPU within seconds, with or
 without NGX. The draws now happen in the game's own pipeline state (section "GPU faults").
+**"DLSS stops after a few seconds" (07/10)**: Virtual Desktop's overlay read the other way
+round; DLSS ran in every frame with a scene, 100 % in the overlay is DLSS's output and 65 % the
+engine's image on loading screens. The log now accounts for every stereo frame (section "What
+the headset gets, frame by frame").
 
 ## Building it
 
@@ -621,6 +625,102 @@ What it says:
   (12.3 GB on the whole card). Right / left output change around the view axis in the three
   dumps: 1.03, 1.00, 1.02 (the motion vector fix holds in this mode too).
 
+### What the headset gets, frame by frame (07/10)
+
+The player's report from Virtual Desktop (4032x3648 per eye at 72 Hz, once 3264x3072 at 90 Hz,
+`input_scale` 0.65, `output = runtime`, stereo from the start): Virtual Desktop's performance
+overlay showed the input scale (65 %) at first and 100 % a few seconds later, read as "DLSS
+stops working". His path was reproduced headless: his package's ini with the Null backend at
+both sizes, the title screen and its menu in stereo, Continue with stereo on, the load, then
+3 minutes of head motion and walking, `dlss status` every 5 s, captures of what the runtime is
+handed (`capture ...+raw`) at 10, 30, 60 and 120 s, and the two log lines below
+(`captures/dlss/v/v02-base-4032`, `v03-instr-4032`, `v04-instr-3264-90`). What the runtime got:
+
+| Phase | Eye image handed to the runtime | Why |
+|---|---|---|
+| The first stereo frames (0.1 to 1.5 s) | the engine's eye target, 2620x2372 per eye at 4032x3648 (65 %) | NGX starting; the first anti-aliasing pass has no captured view constants yet |
+| Title screen and title menu | DLSS's texture, 4032x3648 (100 %), with short runs and single frames at 65 % | title frames without a 3D scene (no anti-aliasing pass to replace) |
+| Loading screen after Continue (about 10 s) | 65 % | no 3D scene: nothing to upscale |
+| Gameplay | 100 % in every frame: 704 to 725 of 704 to 725 frames per 10 s from DLSS's texture, both eyes, no fallback, no reset, no failed check (4032x3648, DLSS 2.1 to 2.5 ms per eye); 882 to 903 of 882 to 903 at 3264x3072 and 90 Hz (1.5 ms per eye) | |
+
+DLSS ran in every frame that had a scene, for the whole run, at both sizes. The captures agree:
+the source of the hand-over is DLSS's texture (8064x3648, two eyes of the runtime's size), the
+swapchain image equals its half within 1.3 to 2 levels (the `[picture]` adjustment and 8-bit
+encoding) to the corners, and consecutive captures differ (30 to 36 mean levels under head
+motion), so the image is not stale. A dump of one frame at 60 and 120 s (`dlss frames <prefix> 1 4096`, 3264x3072)
+shows DLSS's own work: against its input (the engine's jittered image at 2120x1996, before any
+anti-aliasing) stretched to the output size, the output has the dithered shadow edges and the
+aliased edges resolved (`v04-instr-3264-90/sheet_f060_input-stretched_vs_output.png`), a mean
+difference of 4.8 to 7.0 levels: it is not the engine's image stretched.
+
+So the overlay's numbers are the other way round: 100 % is DLSS's output at the headset's
+size, and 65 % is the engine's own image without DLSS (start-up, frames without a 3D scene,
+loading screens), which the runtime scales up. "100 % after a few seconds" is the end of the
+loading screen. Inferred, not measured: what the overlay shows is computed in Virtual Desktop's
+Streamer (closed source); its OpenXR runtime passes each projection view's `imageRect` on as the
+layer's viewport (`frame.cpp` of VirtualDesktop-OpenXR 1.0.10), and the mod's XR module copies
+the region it is handed 1:1 into the eye swapchain and sets `imageRect` to that region's size
+(`src/xr`, `EyeSubmit`), so a percentage of the image size against the swapchain size moves
+exactly as the table does. The new `projection layer:` line records every such change in the
+player's log, so his next session can confirm it.
+
+With the new log lines (commit "DLSS: account for every stereo frame in the log", built from a
+clean tree), the same reproduction at 4032x3648 (`captures/dlss/v/p1-proof-4032`): every 10-s
+window of gameplay 683 to 723 of 683 to 723 stereo frames upscaled in both eyes and handed from
+DLSS's texture, no other reason, no reset, no failed check; captures at 60 and 120 s full size
+from DLSS's texture; no warning, no driver event. The 10-minute soak of the earlier
+configuration (3072x3264 at 120 Hz, foveation `performance`, `input_scale` 0.65 fixed, head
+turning, walking, Insert off and on every 2 minutes, a 150-degree head jump;
+`captures/dlss/v/p2-soak-fov065`): 69,071 stereo frames, 69,068 upscaled in both eyes and handed
+from DLSS's texture (the other 3: the first 2 frames and 1 at a stereo switch), no warning, no
+failed check, no driver event, 8.43 to 8.47 ms per frame on average (the 120 Hz pace). A build
+without DLSS logs the `projection layer:` line too ("from the engine's eye target").
+
+**What the log tells since 07/10** (DLSS builds; one line per change or per 10-s window):
+
+- `projection layer: eye images 4032x3648 and 4032x3648 (100 % x 100 % and 100 % x 100 % of the
+  runtime's eye 4032x3648) from DLSS's texture; before: eye images 2620x2372 and 2620x2372 (65 %
+  ...) from the engine's eye target for 711 frames (9.9 s) (change 8)`: whenever the size of the
+  image handed to the runtime or its source changes (`render_host.cpp`; also in builds without
+  DLSS, where the source is always the engine's eye target). The first 50 changes, then every
+  power of two.
+- `dlss: last 10.0 s (on, upscale, output = runtime): 720 stereo frames, upscaled in both eyes
+  720 (left 720, right 720); not upscaled (eye-frames): none; to the runtime: 720 frames from
+  DLSS's texture (0 eyes in it at the engine's size), 0 from the engine's eye target; DLSS GPU ms
+  per eye L 2.13 R 2.13; history resets L 0 R 0; features created 0; checks failed 0`: after
+  every `frame time` line (the game thread's window, 10 s by default), what DLSS did with the
+  stereo frames of that window. "Did DLSS run during these 10 seconds" is answered by the
+  upscaled count against the stereo frames.
+- `dlss: no DLSS evaluation for 2.0 s while stereo renders (143 frames): left: <reason>; right:
+  <reason> | this session: ...`: a warning when a 3D scene was rendered (something stops DLSS),
+  an information line when the frames had no 3D scene (a loading screen or a movie); repeated
+  every 10 s while it lasts, and `dlss: evaluating again after 10.0 s (711 stereo frames without
+  an evaluation)` when it ends.
+
+Each eye of each stereo frame is either upscaled (evaluated in that frame) or counted under the
+first reason that applied, with the latest detail of each reason (`dlss status` has the same
+counts for the whole session):
+
+| Reason | Meaning |
+|---|---|
+| NGX not ready | NGX starting (the first stereo frame, about 1 s) or failed to start |
+| anti-aliasing pass not seen | no draw with the recognised anti-aliasing pass this frame. After a few such frames every full-screen draw is checked for the pass's inputs whatever its pixel shader (for 8 frames, at most once every 144 frames): "no draw with the anti-aliasing pass's inputs ... no 3D scene" (loading screens), or "a draw with the anti-aliasing pass's inputs but pixel shader X instead of the recognised Y" (the game switched shaders: the recognition no longer matches) |
+| anti-aliasing pass not replaced | the pass was seen but its replacement could not be made (for example no captured view constants, at start-up) |
+| last pass not seen | the eye's anti-aliasing pass was replaced but its last pass was not recognised; the detail names the first full-screen draw into a 10-bit target with another pixel shader, if there was one |
+| last pass not replaced | the last pass was recognised but one of its checks failed (each check has its text: render targets, viewport against the eye's rectangle, the input, the textures, the constants) |
+| input outside NGX's range, no feature, check failed, evaluation failed | as in "Checks and diagnostics" |
+| test switch | `dlss skip`, `dlss eyes`, `test_skip` |
+
+`dlss mispin taa|final|both|off` (test) pins the recognised pixel shader of the anti-aliasing
+pass, of the last pass or of both to a value no draw has, as if the game had switched to other
+shaders, so these reasons can be seen working. Checked headless (`v04-instr-3264-90`, 4 s each):
+`taa` gave the warning "left: anti-aliasing pass not seen (a draw with the anti-aliasing pass's
+inputs (colour 4240x1996, viewport 0 0 2120x1996) but pixel shader ... instead of the recognised
+0x10)", `final` gave "last pass not seen (a full-screen draw into a 10-bit 4240x1996 target at
+viewport 0 0 2120x1996 with pixel shader ... (the recognised last pass: 0x10))", and each `off` gave
+"evaluating again after 4.2 s" with a `projection layer:` line back to 100 %. Nothing else
+warned in these runs.
+
 ## The right eye's shimmer (06/10)
 
 In the first headset sessions with DLSS (Virtual Desktop at 3264x3072 per eye, `input_scale`
@@ -1178,15 +1278,23 @@ The fault-isolation keys (`test_eyes`, `test_zero_mv`, `test_mv_sanitize`, `test
   session: `UpdateSubresource` from the engine's render thread, and `Map`/`Unmap` from an
   unnamed thread, some of them during NGX calls. That check did not yet compare the device,
   so they may have been another D3D11 device's immediate context in the process (an XR
-  runtime's); since then only the game's device counts. Not resolved.
+  runtime's); since then only the game's device counts. Not resolved. Headless with stereo kept
+  on through a load (07/10, `captures/dlss/v/v02-base-4032`): 2424 to 3342 `UpdateSubresource`
+  calls on the game's immediate context from an unnamed thread, all during the loading screen
+  and the first seconds after it, none during an NGX call, none later in gameplay; the earlier
+  headless runs had stereo off while loading.
 - Video memory (local budget and use, DLSS's own share from `NGX_DLSS_GET_STATS`) is in every
   feature creation line and in the event ring.
+- **Every frame accounted for** (since 07/10): each stereo frame's eyes are upscaled or counted
+  under a reason; a `dlss:` line after every `frame time` line, a warning after 2 s without an
+  evaluation while a 3D scene renders, and a `projection layer:` line whenever the image handed
+  to the runtime changes size or source (section "What the headset gets, frame by frame").
 
 ## Dev commands
 
 | Command | Effect |
 |---|---|
-| `dlss status` | NGX state, capability, feature library, the recognised pass, counters, features, GPU time per eye, jitter, the output mode with the runtime's and the engine's eye sizes, the latest video memory reading, the motion vector textures, and each eye's history resets by cause (a new feature, not evaluated in the previous frame, a camera cut, a request; more than 10 resets of an eye in 100 frames is also logged as a warning) |
+| `dlss status` | NGX state, capability, feature library, the recognised pass, counters, features, GPU time per eye, jitter, the output mode with the runtime's and the engine's eye sizes, the latest video memory reading, the stereo frames of the session with the eyes upscaled, the eyes not upscaled by reason and what went to the runtime (section "What the headset gets, frame by frame"), the motion vector textures, and each eye's history resets by cause (a new feature, not evaluated in the previous frame, a camera cut, a request; more than 10 resets of an eye in 100 frames is also logged as a warning) |
 | `dlss on` / `dlss off` | switch while the game runs (the history is reset; off releases the features) |
 | `dlss mode <dlaa\|upscale>` | switch the mode; with `upscale`, set the size with `cvar set r.ScreenPercentage <n>` |
 | `dlss bench <out w> <out h> <in w> <in h>`, `dlss bench off` | one extra evaluation per frame of that size on blank textures, timed (cost of a mode without changing the engine) |
@@ -1202,6 +1310,7 @@ The fault-isolation keys (`test_eyes`, `test_zero_mv`, `test_mv_sanitize`, `test
 | `dlss reset`, `dlss recreate` | reset the history, release and recreate the features |
 | `dlss skip <0\|1>` | upscale mode fault test: everything runs (motion vectors, the graded copy at the reduced size) except the NGX evaluation; the game's own last pass scales the image up. `[dlss] test_skip` from the ini also has levels 2 (no graded copy either), 3 (pass-through copy only), 4 (nothing replaced), 5 (the mod's context state swapped in and out, no draw), 6 (motion vectors drawn in the game's state) |
 | `dlss events` | write the event ring to the log (section "Checks and diagnostics") |
+| `dlss mispin <taa\|final\|both\|off>` | test: the recognised pixel shader of the anti-aliasing pass, the last pass or both pinned to a value no draw has (as if the game had switched shaders), to see the reasons of "What the headset gets, frame by frame" reported; `off` puts the recognised shaders back |
 | `dlss eyes <0\|1\|2>` | both eyes, left only, right only (the other eye runs the game's passes) |
 | `dlss ownstate <0\|1>`, `dlss evalend <0\|1>`, `dlss params <shared\|feature>` | `[dlss] context_state`, `eval_at`, `params` while the game runs |
 | `dlss zeromv`, `mvsanitize`, `flush`, `validate`, `stats`, `copyinputs` `<0\|1>` | tests: motion vectors zero or sanitised, `Flush` after each evaluation, the checks, the input statistics, per-eye input copies |
