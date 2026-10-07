@@ -12,6 +12,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cctype>
 #include <cstdlib>
 #include <format>
@@ -38,7 +39,7 @@ const char* action_name(Action a) {
     return "?";
 }
 
-std::atomic<std::uint64_t> g_triggers{0}, g_pad_triggers{0}, g_pad_polls{0};
+std::atomic<std::uint64_t> g_triggers{0}, g_pad_triggers{0};
 
 // Runs a registered dev command (another module's) off the calling thread and logs the reply.
 void run_command(std::string line, std::string what) {
@@ -124,15 +125,37 @@ Key g_keys[] = {
     {&g_settings.ui_farther_key, Action::UiFarther},
 };
 
-// Gamepad state (XInput poll thread).
+// Gamepad state, one per XInput user index (the game's poll thread; guarded by g_pad_mutex).
+// The filter acts on every user index: a pad does not have to sit at index 0.
 constexpr unsigned short kUp = 0x0001, kDown = 0x0002, kStart = 0x0010, kView = 0x0020, kLeftThumb = 0x0040,
                          kRightThumb = 0x0080;
-constexpr unsigned kViewReplayMs = 120;
+constexpr std::int64_t kViewReplayUs = 120000;
+constexpr unsigned long kPads = 4;
 std::mutex g_pad_mutex;
-unsigned short g_prev = 0;
-bool g_latched = false;     // a combination was used since View went down: View and the combination buttons are hidden
-bool g_view_held = false;   // View is down and held back from the game
-std::uint64_t g_replay_until = 0;
+
+enum class Chord { Idle, Pending, Fired, Passed };
+
+struct Pad {
+    unsigned short prev = 0;
+    bool latched = false;    // a combination was used since View went down: View and the combination buttons are hidden
+    bool view_held = false;  // View is down and held back from the game
+    std::int64_t replay_until = 0;
+    // The chord: see chord_filter.
+    Chord chord = Chord::Idle;
+    std::int64_t chord_t0 = 0;
+    unsigned short chord_seen = 0;    // chord buttons seen down while pending
+    unsigned short chord_replay = 0;  // buttons replayed to the game after a short press
+    std::int64_t chord_replay_until = 0;
+    // Diagnostics.
+    std::int64_t last_poll = 0, last_change = 0;
+    unsigned short last_in = 0, last_out = 0;
+};
+Pad g_pads[kPads];
+
+// Microseconds on a steady clock (the chord window is 150 ms; GetTickCount64 steps in 15.6 ms).
+std::int64_t now_us() {
+    return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 
 unsigned short combo_buttons() {
     unsigned short m = 0;
@@ -204,64 +227,80 @@ std::string chord_name(unsigned short m) {
     return s;
 }
 
-// The chord (guarded by g_pad_mutex). Idle -> Pending (some of its buttons down, held back
-// from the game) -> Fired (all down within the window: toggled once, hidden until all are
-// released) or Passed (window over: the game gets the buttons as they are) or back to Idle
-// with the held-back press replayed (released within the window).
-enum class Chord { Idle, Pending, Fired, Passed };
-Chord g_chord = Chord::Idle;
-std::uint64_t g_chord_t0 = 0;
-unsigned short g_chord_seen = 0;    // chord buttons seen down while pending
-unsigned short g_chord_replay = 0;  // buttons replayed to the game after a short press
-std::uint64_t g_chord_replay_until = 0;
-std::atomic<std::uint64_t> g_chord_fired{0}, g_chord_passed{0}, g_chord_replayed{0};
+// Counters for `controls status` and the timing block (totals; the timing line shows the
+// change since the previous line).
+struct Counters {
+    std::atomic<std::uint64_t> polls{0}, changes{0}, chord_pending{0}, chord_fired{0}, chord_passed{0}, chord_replayed{0},
+        chord_skipped_view{0}, view_combos{0};
+};
+Counters g_count;
 std::atomic<unsigned short> g_last_in{0}, g_last_out{0};
-std::atomic<bool> g_pad_log{false};
+std::atomic<unsigned long> g_last_user{0};
+std::atomic<int> g_pad_log{0};  // state changes still to be logged (-1 = all)
 
+const char* chord_state_name(Chord c) {
+    switch (c) {
+        case Chord::Idle: return "idle";
+        case Chord::Pending: return "pending";
+        case Chord::Fired: return "fired";
+        case Chord::Passed: return "passed";
+    }
+    return "?";
+}
+
+// The chord. Idle -> Pending (some of its buttons down, held back from the game) -> Fired
+// (all down within the window of the first: toggled once, hidden until all are released) or
+// Passed (window over: the game gets the buttons as they are until all are released) or back
+// to Idle with the held-back press replayed short (released within the window).
 // Applies the chord to `b` (the buttons the game will get). Returns true when it fired.
-bool chord_filter(unsigned short& b, unsigned short chord, std::uint64_t now) {
+bool chord_filter(Pad& p, unsigned short& b, unsigned short chord, std::int64_t now) {
     const unsigned short d = b & chord;
-    const unsigned window = static_cast<unsigned>(std::clamp(g_settings.fp_chord_ms.load(), 0, 2000));
+    const std::int64_t window = static_cast<std::int64_t>(std::clamp(g_settings.fp_chord_ms.load(), 0, 2000)) * 1000;
     bool fired = false;
-    switch (g_chord) {
+    switch (p.chord) {
         case Chord::Idle:
             if (d == 0) break;
-            g_chord_replay_until = 0;  // a new press ends a replay
+            p.chord_replay_until = 0;  // a new press ends a replay
             if (d == chord) {
-                g_chord = Chord::Fired;
+                p.chord = Chord::Fired;  // all in the same poll
                 fired = true;
             } else {
-                g_chord = Chord::Pending;
-                g_chord_t0 = now;
-                g_chord_seen = d;
+                p.chord = Chord::Pending;
+                p.chord_t0 = now;
+                p.chord_seen = d;
+                ++g_count.chord_pending;
             }
             break;
         case Chord::Pending:
             if (d == chord) {
-                g_chord = Chord::Fired;
+                // Complete. Also when this poll is past the window: every earlier poll was
+                // inside it (the first one past it ends Pending), so the game's poll gap made
+                // the second press late, not the player.
+                p.chord = Chord::Fired;
                 fired = true;
             } else if (d == 0) {
                 // Released before the chord formed: the game gets the press now, short.
-                g_chord = Chord::Idle;
-                g_chord_replay = g_chord_seen;
-                g_chord_replay_until = now + kViewReplayMs;
-                ++g_chord_replayed;
-            } else if (now - g_chord_t0 >= window) {
-                g_chord = Chord::Passed;
-                ++g_chord_passed;
+                p.chord = Chord::Idle;
+                p.chord_replay = p.chord_seen;
+                p.chord_replay_until = now + kViewReplayUs;
+                ++g_count.chord_replayed;
+            } else if (now - p.chord_t0 > window) {
+                // The window is over without the chord: the game gets the buttons as they are.
+                p.chord = Chord::Passed;
+                ++g_count.chord_passed;
             } else {
-                g_chord_seen |= d;
+                p.chord_seen |= d;
             }
             break;
         case Chord::Fired:
         case Chord::Passed:
-            if (d == 0) g_chord = Chord::Idle;
+            if (d == 0) p.chord = Chord::Idle;
             break;
     }
-    if (g_chord == Chord::Pending || g_chord == Chord::Fired) b = static_cast<unsigned short>(b & ~chord);
-    if (g_chord_replay_until) {
-        if (now < g_chord_replay_until) b |= g_chord_replay;
-        else g_chord_replay_until = 0;
+    if (p.chord == Chord::Pending || p.chord == Chord::Fired) b = static_cast<unsigned short>(b & ~chord);
+    if (p.chord_replay_until) {
+        if (now < p.chord_replay_until) b |= p.chord_replay;
+        else p.chord_replay_until = 0;
     }
     return fired;
 }
@@ -292,7 +331,9 @@ void read_config(const Config& cfg) {
     }
     s.fp_chord = chord;
     s.fp_chord_ms = static_cast<int>(std::clamp<long long>(cfg.get_int("controls", "fp_toggle_chord_ms", s.fp_chord_ms.load()), 0, 2000));
-    log::info("controls: first/third person chord {} (within {} ms)", chord_name(s.fp_chord.load()), s.fp_chord_ms.load());
+    g_pad_log = static_cast<int>(std::clamp<long long>(cfg.get_int("controls", "pad_log", 0), -1, 100000));
+    log::info("controls: first/third person chord {} (within {} ms){}", chord_name(s.fp_chord.load()), s.fp_chord_ms.load(),
+              g_pad_log.load() ? std::format("; logging the first {} pad state changes", g_pad_log.load()) : std::string());
 }
 
 void tick() {
@@ -308,27 +349,33 @@ void tick() {
 }
 
 void filter_pad(unsigned long user, unsigned short* buttons) {
-    if (user != 0 || !buttons) return;
+    if (user >= kPads || !buttons) return;
     const unsigned short combos = combo_buttons();
     const unsigned short chord = player::settings().fp_available.load() ? g_settings.fp_chord.load() : 0;
     if (combos == 0 && chord == 0) return;
-    ++g_pad_polls;
+    ++g_count.polls;
     std::vector<Action> fired;
     bool chord_fired = false;
     const unsigned short in = *buttons;
     unsigned short b = in;
+    const std::int64_t now = now_us();
+    std::string log_line;
     {
         std::lock_guard lock(g_pad_mutex);
+        Pad& p = g_pads[user];
+        const Chord chord_before = p.chord;
         // The chord first, unless a View/Back combination is in progress (View down or still
-        // latched: those use the stick clicks themselves). A chord already under way finishes.
-        if (chord && (g_chord != Chord::Idle || (!(b & kView) && !g_latched))) {
-            if (chord_filter(b, chord, GetTickCount64())) {
-                ++g_chord_fired;
+        // latched: those use the stick clicks themselves). A chord under way finishes.
+        if (chord && (p.chord != Chord::Idle || (!(b & kView) && !p.latched))) {
+            if (chord_filter(p, b, chord, now)) {
+                ++g_count.chord_fired;
                 chord_fired = true;
             }
+        } else if (chord && (b & chord)) {
+            ++g_count.chord_skipped_view;
         }
-        const unsigned short pressed = static_cast<unsigned short>(b & ~g_prev);
-        g_prev = b;
+        const unsigned short pressed = static_cast<unsigned short>(b & ~p.prev);
+        p.prev = b;
         if (b & kView) {
             const unsigned short hits = pressed & combos;
             if (hits & kRightThumb) fired.push_back(Action::FirstPerson);
@@ -337,32 +384,54 @@ void filter_pad(unsigned long user, unsigned short* buttons) {
             if (hits & kUp) fired.push_back(Action::UiFarther);
             if (hits & kDown) fired.push_back(Action::UiNearer);
             if (hits) {
-                g_latched = true;
-                g_view_held = false;
-                g_replay_until = 0;
+                p.latched = true;
+                p.view_held = false;
+                p.replay_until = 0;
             }
         }
-        if (g_latched) {
-            if ((b & (kView | combos)) == 0) g_latched = false;  // everything released
+        if (p.latched) {
+            if ((b & (kView | combos)) == 0) p.latched = false;  // everything released
             b = static_cast<unsigned short>(b & ~(kView | combos));
         } else if (g_settings.pad_hold_view.load()) {
             // View alone: held back until released, then handed to the game as a short press.
             if (b & kView) {
                 b = static_cast<unsigned short>(b & ~kView);
-                g_view_held = true;
-            } else if (g_view_held) {
-                g_view_held = false;
-                g_replay_until = GetTickCount64() + kViewReplayMs;
+                p.view_held = true;
+            } else if (p.view_held) {
+                p.view_held = false;
+                p.replay_until = now + kViewReplayUs;
             }
-            if (g_replay_until && !(b & kView)) {
-                if (GetTickCount64() < g_replay_until) b |= kView;
-                else g_replay_until = 0;
+            if (p.replay_until && !(b & kView)) {
+                if (now < p.replay_until) b |= kView;
+                else p.replay_until = 0;
             }
         }
+        g_count.view_combos += fired.size();
+        // Diagnostics: a state change in or out ([controls] pad_log, `controls padlog`).
+        const bool changed = p.last_in != in || p.last_out != b, chord_moved = p.chord != chord_before;
+        if (changed) ++g_count.changes;
+        if (changed || chord_moved) {
+            int left = g_pad_log.load();
+            while (left != 0 && !g_pad_log.compare_exchange_weak(left, left > 0 ? left - 1 : left)) {
+            }
+            if (left != 0)
+                log_line = std::format("controls: pad {} in {:#06x} -> game {:#06x} (poll +{:.1f} ms, {}{}{})", user, in, b,
+                                       p.last_poll ? double(now - p.last_poll) / 1000.0 : 0.0,
+                                       p.last_change ? std::format("previous change {:.1f} ms before", double(now - p.last_change) / 1000.0)
+                                                     : std::string("first change"),
+                                       chord_moved ? std::format("; chord {} -> {}", chord_state_name(chord_before), chord_state_name(p.chord)) : "",
+                                       chord_fired ? ", toggles" : "");
+        }
+        if (changed) p.last_change = now;
+        p.last_in = in;
+        p.last_out = b;
+        p.last_poll = now;
     }
     *buttons = b;
-    const unsigned short last_in = g_last_in.exchange(in), last_out = g_last_out.exchange(b);
-    if (g_pad_log.load() && (last_in != in || last_out != b)) log::info("controls: pad in {:#06x} -> game {:#06x}", in, b);
+    g_last_in = in;
+    g_last_out = b;
+    g_last_user = user;
+    if (!log_line.empty()) log::info("{}", log_line);
     if (chord_fired) {
         ++g_pad_triggers;
         trigger(Action::FirstPerson, "gamepad chord");
@@ -373,7 +442,35 @@ void filter_pad(unsigned long user, unsigned short* buttons) {
     }
 }
 
-std::uint64_t pad_polls() { return g_pad_polls.load(); }
+std::uint64_t pad_polls() { return g_count.polls.load(); }
+
+namespace {
+
+// One line of the render module's timing block: the counters since the previous line.
+std::string timing_line() {
+    static std::mutex m;
+    static std::uint64_t last[8] = {};
+    std::lock_guard lk(m);
+    const std::uint64_t now[8] = {g_count.polls.load(),        g_count.changes.load(),      g_count.chord_pending.load(),
+                                  g_count.chord_fired.load(),  g_count.chord_passed.load(), g_count.chord_replayed.load(),
+                                  g_count.chord_skipped_view.load(), g_count.view_combos.load()};
+    std::uint64_t d[8];
+    for (int i = 0; i < 8; ++i) d[i] = now[i] - last[i], last[i] = now[i];
+    std::string states;
+    {
+        std::lock_guard lock(g_pad_mutex);
+        for (unsigned long u = 0; u < kPads; ++u)
+            if (g_pads[u].last_poll) states += std::format("{}pad {} {}", states.empty() ? "" : ", ", u, chord_state_name(g_pads[u].chord));
+    }
+    const Settings& s = g_settings;
+    return std::format("ok pad filter: {} polls, {} state changes; chord {} ({} ms){}: started {}, fired {}, passed late {}, replayed short {}, "
+                       "ignored while View held {}; View combinations {}; now {}; last pad {} in {:#06x} -> game {:#06x}",
+                       d[0], d[1], chord_name(s.fp_chord.load()), s.fp_chord_ms.load(), player::settings().fp_available.load() ? "" : " (first person off)",
+                       d[2], d[3], d[4], d[5], d[6], d[7], states.empty() ? "no pad polled" : states, g_last_user.load(), g_last_in.load(),
+                       g_last_out.load());
+}
+
+}  // namespace
 
 std::string command(const std::string& args) {
     std::istringstream in(args);
@@ -385,15 +482,19 @@ std::string command(const std::string& args) {
                            "triggers {} (gamepad {}), pad polls {}; stereo {}",
                            s.recenter_key.load(), s.stereo_key.load(), s.ui_nearer_key.load(), s.ui_farther_key.load(),
                            s.pad.load() ? 1 : 0, s.pad_hold_view.load() ? 1 : 0, s.ui_step.load(), s.ui_min.load(), s.ui_max.load(),
-                           g_triggers.load(), g_pad_triggers.load(), g_pad_polls.load(), device::wanted() ? "on" : "off") +
-               std::format("; fp chord {} within {} ms: fired {}, passed late {}, replayed short {}; last pad in {:#06x} -> game {:#06x}; pad log {}",
-                           chord_name(s.fp_chord.load()), s.fp_chord_ms.load(), g_chord_fired.load(), g_chord_passed.load(),
-                           g_chord_replayed.load(), g_last_in.load(), g_last_out.load(), g_pad_log.load() ? 1 : 0);
+                           g_triggers.load(), g_pad_triggers.load(), g_count.polls.load(), device::wanted() ? "on" : "off") +
+               std::format("; fp chord {} within {} ms: started {}, fired {}, passed late {}, replayed short {}; last pad {} in {:#06x} -> game {:#06x}; "
+                           "pad log {}",
+                           chord_name(s.fp_chord.load()), s.fp_chord_ms.load(), g_count.chord_pending.load(), g_count.chord_fired.load(),
+                           g_count.chord_passed.load(), g_count.chord_replayed.load(), g_last_user.load(), g_last_in.load(), g_last_out.load(),
+                           g_pad_log.load());
     }
+    if (a[0] == "timing") return timing_line();
     if (a[0] == "padlog" && a.size() == 2) {
-        // Logs every change of the pad state the game asks for and of what it receives.
-        g_pad_log = a[1] == "1";
-        return std::format("ok pad log {}", g_pad_log.load() ? 1 : 0);
+        // Logs the next N changes of the pad state the game asks for and of what it receives
+        // ("on" = all, 0 = off).
+        g_pad_log = a[1] == "on" ? -1 : std::max(0, std::atoi(a[1].c_str()));
+        return std::format("ok pad log {}", g_pad_log.load());
     }
     if (a[0] == "chord" && a.size() >= 2) {
         unsigned short chord = 0;
@@ -402,10 +503,13 @@ std::string command(const std::string& args) {
         if (a.size() >= 3) g_settings.fp_chord_ms = std::clamp(std::atoi(a[2].c_str()), 0, 2000);
         return std::format("ok fp chord {} within {} ms", chord_name(chord), g_settings.fp_chord_ms.load());
     }
-    if (a[0] == "pad" && a.size() == 2) {
-        // Test without a pad: one XInput button state through the filter.
+    if (a[0] == "pad" && (a.size() == 2 || a.size() == 3)) {
+        // Test without a pad: one XInput button state through the filter (user index 0, or the
+        // one given second).
         unsigned short b = static_cast<unsigned short>(std::strtoul(a[1].c_str(), nullptr, 16));
-        filter_pad(0, &b);
+        const unsigned long user = a.size() == 3 ? std::strtoul(a[2].c_str(), nullptr, 10) : 0;
+        if (user >= kPads) return "err user index 0..3";
+        filter_pad(user, &b);
         return std::format("ok buttons after filter {:#06x}", b);
     }
     const struct {
@@ -418,7 +522,7 @@ std::string command(const std::string& args) {
             return std::string("ok ") + action_name(w.action);
         }
     }
-    return "err usage: controls status | pad <hex buttons> | padlog 0|1 | chord <L3+R3|off> [ms] | recenter | stereo | nearer | farther";
+    return "err usage: controls status | timing | pad <hex buttons> [user] | padlog <n>|on | chord <L3+R3|off> [ms] | recenter | stereo | nearer | farther";
 }
 
 }  // namespace ff7vr::engine::controls

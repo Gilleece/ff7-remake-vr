@@ -437,6 +437,11 @@ void XrController::LogStats() {
         if (!line.empty()) log::info("timing:   {}", line);
     }
     for (const std::string& line : foveation::TakeTimingLines()) log::info("timing:   {}", line);
+    // The gamepad path (the loader's XInput proxy and the engine's pad filter), when present.
+    for (const char* cmd : {"xinput timing", "controls timing"}) {
+        std::string reply;
+        if (dev_commands::dispatch(cmd, reply) && reply.starts_with("ok ")) log::info("timing:   controls: {}", reply.substr(3));
+    }
     if (!runtimeCalls.empty()) log::info("timing:   {}", runtimeCalls);
     ComPtr<ID3D11Device> dev;
     {

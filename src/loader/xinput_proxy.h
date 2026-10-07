@@ -36,5 +36,13 @@ using PadFilter = void (*)(unsigned long user, unsigned short* buttons);
 void set_pad_filter(PadFilter filter);
 // Number of XInputGetState calls seen (diagnostics: proves the game polls us).
 std::uint64_t get_state_calls();
+// Call once after load_real. With `wrap_import`, points the game's import of XInputGetState
+// at a wrapper that calls our export through its current entry and applies the pad filter to
+// the result, so a hook on the export (the Steam overlay places one) cannot bypass the filter.
+// Also the diagnostics for the player's log: the dev command `xinput status | timing | probe`
+// and, from the game's first XInputGetState call on, one-time lines about who polls (thread,
+// calling module, rate) and a line whenever a user index gains or loses a pad. Counters only
+// on the call path.
+void register_diagnostics(bool wrap_import);
 
 }  // namespace ff7vr::loader::xinput

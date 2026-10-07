@@ -164,6 +164,7 @@ DWORD WINAPI bootstrap(void*) {
         log::warn("xinput: real xinput1_3.dll not found; gamepad calls report 'not connected'");
     loader::xinput::set_virtual_pad_enabled(g_config.get_bool("dev", "virtual_pad", false));
     if (loader::xinput::virtual_pad_enabled()) log::info("xinput: virtual pad enabled on user index 0");
+    loader::xinput::register_diagnostics(g_config.get_bool("controls", "pad_after_hooks", true));
 
     hook::init();
 
