@@ -29,7 +29,7 @@ global are written, and two single bytes of code can be changed:
 | the controlled pawn, its location and the view target | reflected functions called through `ProcessEvent`, game thread, every frame | camera modes: level boom and first person (see "Camera modes") |
 | the pawn's skeletal mesh components and the mesh components attached to them | `SetVisibility` through `ProcessEvent` | only while first person applies; put back afterwards |
 | the battle signal | a reflected function called through `ProcessEvent` every frame (`[first_person] battle_signal`) | automatic third person in battles |
-| XInput state | a filter in the loader's XInput proxy | only with stereo enabled: the View/Back combinations of "Player controls" trigger their action and are removed from the state; View alone reaches the game as a short press on release |
+| XInput state | the game's import slot for `XInputGetState` (pointed at a wrapper in the loader) and a filter in the wrapper | the wrapper always (`[controls] pad_after_hooks`); the filter only with stereo enabled: the View/Back combinations and the chord of "Player controls" trigger their action and are removed from the state; View alone reaches the game as a short press on release |
 | keyboard state | `GetAsyncKeyState`, game thread, once per frame, only while the game window has the focus | the keys of "Player controls" |
 
 Everything else goes through the device's own function tables, which the engine calls:
@@ -278,9 +278,9 @@ captures after the toggles (`h05_third_toggled`, `h08_third_after_toggles`,
 
 ### Gamepad toggle
 
-The loader's XInput proxy passes every successful `XInputGetState` / `XInputGetStateEx`
-result through `ff7vr::engine::filter_pad` (registered only when the stereo device is
-enabled). View/Back (`0x0020`) held and the right stick click (`0x0080`) pressed requests a
+The loader passes every successful `XInputGetState` result the game receives through
+`ff7vr::engine::filter_pad` (registered only when the stereo device is enabled; every user
+index, each with its own state). See "The real pad path" below for where the filter sits. View/Back (`0x0020`) held and the right stick click (`0x0080`) pressed requests a
 toggle; the filter is shared with the other combinations of "Player controls", which
 describes how the buttons are hidden from the game. The game polls XInput only while a pad
 is connected; `fp pad <hex buttons>` feeds a button state through the same filter for a
@@ -379,6 +379,8 @@ hidden buttons, is inferred from the filter's output.
 | `pad_hold_view` | `1` | View alone reaches the game on release (see above) |
 | `fp_toggle_chord` | `L3+R3` | buttons pressed together that toggle first/third person (see below); empty = off. Names: `L3 R3 A B X Y LB RB Back Start Up Down Left Right` (also `LS RS View Menu L1 R1 DPadUp ...`) |
 | `fp_toggle_chord_ms` | `150` | how close together the chord's buttons must go down |
+| `pad_log` | `0` | log the first N changes of the pad state in and out of the filter (see "Diagnostics") |
+| `pad_after_hooks` | `1` | point the game's `XInputGetState` import at the loader's wrapper, so the filter sees what the game receives even when the Steam overlay hooks the export; `0` = filter inside the export, as before |
 
 ### The first/third person chord
 
@@ -394,10 +396,10 @@ reaches the game up to the window late. The toggle goes through
 `player::request_pad_toggle` (the same as View + R3) and is logged as
 `controls: first/third person (gamepad chord): toggle requested`.
 
-Dev pipe: `controls status` shows the chord, its counters (fired, passed late, replayed
-short) and the last state in and out of the filter; `controls padlog 1` logs every
-change (`controls: pad in 0x0040 -> game 0x0000`); `controls chord <buttons|off> [ms]`
-changes it live.
+Dev pipe: `controls status` shows the chord, its counters (started, fired, passed late,
+replayed short) and the last state in and out of the filter; `controls padlog <n>|on` logs
+the next n changes (see "Diagnostics" below); `controls chord <buttons|off> [ms]` changes
+it live; `controls pad <hex> [user]` feeds one state through the filter.
 
 Tested in the game without a pad (`captures/chord`, Null backend, first room of the
 Sector 7 slums save): button states fed through the filter every 15 ms over the pipe
@@ -413,8 +415,65 @@ Sector 7 slums save): button states fed through the filter every 15 ms over the 
   (`c03_after_chord2`).
 - R3 300 ms after L3: L3 reaches the game after 150 ms, then `0x00c0`; no toggle.
 - View, then View + R3: `0x0000`, toggles as before (`c04_after_view_r3`).
-The game itself never polled XInput in this run (`ping`: `xinput_calls=0`, also with
-`[dev] virtual_pad = 1`), so what the game does with a late stick click is untested.
+The game itself never reached the mod's XInput code in this run (`ping`:
+`xinput_calls=0`, also with `[dev] virtual_pad = 1`): the Steam overlay's hook on the
+export answered (see below), so what the game does with a late stick click is untested.
+
+### The real pad path
+
+The game reads pads two ways (`docs/re/engine.md`, "Gamepad input paths"): UE4's
+`FXInputInterface` calls `XInputGetState` (import by ordinal 2 from `xinput1_3.dll`, one
+call site, users 0 to 3 every engine frame while a pad is connected), and Square Enix's own
+DirectInput/HID code (`dinput8.dll`, `HID.DLL`) reads DualShock and other DirectInput pads.
+Only the first path can carry the View combinations and the chord: a pad the game reads
+through DirectInput (a DualSense without Steam Input, for example) never reaches the filter.
+
+The Steam overlay (`gameoverlayrenderer64.dll`, in the process also when the exe is started
+directly) patches the entry of the mod's exported `XInputGetState` for Steam Input, and its
+hook may answer without calling the mod's code. Before 2026-10-07 the filter ran inside the
+export, so with the overlay present the game's polls could bypass it entirely. Now the loader
+points the game's import slot at a wrapper (`[controls] pad_after_hooks = 1`, default) that
+calls the export through its current entry (the overlay's hook, if any, then the system DLL)
+and applies the filter to what comes back, i.e. to exactly what the game receives.
+
+### Diagnostics (for a session with a real pad)
+
+Always on, cheap (counters on the call path, lines written once or per change):
+- at start: `controls: XInput: import slot ff7remake_.exe+0x40941f8 now calls the pad filter
+  after any hook on the export`;
+- at the game's first `XInputGetState` call: `controls: the game's first XInputGetState call:
+  user 0, thread N, called from ff7remake_.exe+0x1d2f884; the system reports a pad|no pad`
+  and where the game's imports point and whether the export is patched (and by which module);
+- after 3 s: `controls: the game polls XInput on thread N every X ms (user U; ...)`;
+- `controls: XInput user N has a pad` / `lost its pad` on every change;
+- two lines in every 10-second timing block: `timing:   controls: xinput: <calls> ...; pads at
+  user ...` (calls per user index with the poll interval, how many reached the system DLL when
+  a hook answered the rest) and `timing:   controls: pad filter: <polls>, <state changes>;
+  chord L3+R3 (150 ms): started, fired, passed late, replayed short, ignored while View held;
+  View combinations; now <chord state per pad>; last pad N in 0x.... -> game 0x....`.
+
+`[controls] pad_log = N` (default 0) also logs the first N changes of the state in or out of
+the filter: `controls: pad 0 in 0x0040 -> game 0x0000 (poll +13.9 ms, previous change
+812.0 ms before; chord idle -> pending)`. Dev pipe: `xinput status`, `xinput timing`,
+`xinput probe` (calls the export's current entry for users 0 to 3 and says whether each call
+reached the system DLL).
+
+Tested 2026-10-07 (Null backend, Sector 7 save, no physical pad; `captures/chord`):
+- Before the wrapper: the export patched by `gameoverlayrenderer64.dll+0xd0580`, `ping`
+  `xinput_calls=0` with the virtual pad on. With it: the game polls on its game thread from
+  `ff7remake_.exe+0x1d2f884`, user 0 every 1.6 to 11 ms (one poll per engine frame), users 1
+  to 3 once; 11583 of 11583 calls answered by the overlay's hook without reaching the mod's
+  export or the system DLL (`xinput probe`: "reached the system XInput no" for all four).
+- End to end through the game's own polls (virtual pad, `captures/chord/vpad-test.ps1`):
+  L3 then R3 78 ms later: game `0x0000` throughout, one toggle (`player: toggled to third
+  person`); L3 tapped 100 ms: replayed `0x0040` for 123 ms; R3 then L3 230 ms later: R3
+  reaches the game after 157 ms, no toggle; both together: one toggle back to first person.
+- Through the filter (`captures/chord/chord-test.ps1`, `filter-cases.txt`): the cases above
+  plus a chord on user index 1, a 220 ms poll gap (L3 seen, next poll has both: fires), 2 ms
+  polling with 90 ms skew (fires), R3 released and pressed again while L3 held (no second
+  toggle), A held through the chord (A passes, the stick clicks do not).
+**Not tested**: a physical pad (none connected); what the overlay's hook returns for a real
+XInput pad, and whether Steam Input is on for the game on the player's PC.
 
 ## ini keys (`[stereo]` in `ff7vr.ini`)
 

@@ -1032,6 +1032,41 @@ room):
   device has creation flags 0 (no multithread protection) and no thread other than the RHI
   thread was seen calling `Map`, `Unmap` or `UpdateSubresource` on the immediate context.
 
+## 14. Gamepad input paths (STATIC + LIVE)
+
+Two independent paths read pads; only the first passes through the mod's `xinput1_3.dll`.
+
+**XInput (UE4's `FXInputInterface`).** Imports from `XINPUT1_3.dll` are ordinal 3
+(`XInputSetState`, IAT RVA `0x40941f0`) and ordinal 2 (`XInputGetState`, IAT RVA `0x40941f8`)
+only; no `xinput1_4`, `XInput9_1_0`, `GameInput` or `Windows.Gaming.Input` import or string.
+The one call site of `XInputGetState` is RVA `0x1d2f87e` (`call [rip+...]` on the IAT slot)
+in `FXInputInterface::SendControllerEvents` (`0x1d2f7f0`, vtable `0x4d26738` slot 2): a loop
+over users 0 to 3 that calls when the user was connected or `bNeedsControllerStateUpdate`
+(byte +8) is set; the constructor (`0x1d2f430`) sets it to 1, so the first poll asks all four.
+The object is created in the `FWindowsApplication` constructor (`0x1d1d720`) and stored at
++0x1d8. `FWindowsApplication::PollGameDeviceState` (`0x1d23960`) calls it only when
+`!byte[0x57f9c93] || byte[0x57fb57a]` (both 0 in the image and read 0 live; probably
+`FApp::UseVRFocus` / `HasVRFocus`), then ticks the external input devices (array at +0x1e8).
+Method: `dumpbin /imports`, `tools/re/ff7re.py` (`code_refs` on the IAT slot, the vtable and
+the +0x1d8 member), `re peek` live.
+
+**DirectInput / HID (Square Enix).** `HID.DLL` is a static import (`HidD_GetAttributes`,
+`HidD_GetProductString`, `HidD_GetFeature`, `HidD_SetFeature`, ...), SetupAPI device
+enumeration too, and `dinput8.dll` (UTF-16 string) is loaded at run time (seen in the live
+module list). Strings: `EndDirectInput`, `WinDualShock`, `Wireless Controller` (the product
+string of Sony's pads), `Wireless Gamepad (L/R)`, `EEndMenuGamepadType::XInput` /
+`DirectInput`, `DirectInput_Button1` to `32`. A DualShock, DualSense or other DirectInput pad
+is read here and never reaches the XInput proxy. (Not traced further: which pads this path
+takes and whether it also reads XInput pads.)
+
+**The Steam overlay hooks the proxy's export (LIVE).** `gameoverlayrenderer64.dll` is in the
+process even when the exe is started directly (through `steam_api64`). It patches the first
+bytes of the `XInputGetState` exported by the module named `xinput1_3.dll` that the game uses,
+i.e. the mod's proxy: `e9` to a relay just below the mod's DLL, relay `e9` to
+`gameoverlayrenderer64.dll+0xd0580` (2026-10-07). See `docs/engine-module.md`, "The real pad
+path", for what the mod does about it. With no physical pad the hook answered all
+11583 polls of a run itself (`xinput probe`: none reached the mod's export or the system DLL).
+
 ## Tools
 
 All in `tools/re/`, run with the repo's `.venv` Python. The exe is found through Steam's
