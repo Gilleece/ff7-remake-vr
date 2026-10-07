@@ -347,7 +347,76 @@ game's copy engine and the System process's copy engine are busy at 50-100 % and
 20-70 ms; the card is far from full (62-76 %). It ends by itself. Starting right after the
 previous game exited (14 s) or after a 2-minute pause made no difference.
 
-**3. A copy-bound state that may not end (cause not found).** At 4032x3648 with DLSS at 0.58,
+**3. The slow state after a quick restart (cause inside the graphics driver or card, not
+found; avoided by waiting).** A game started soon after the previous one exited can run at
+a median of about 71 ms per frame (14 fps at 90 Hz) from the load on, for minutes: the GPU
+reports 97-100 % "utilization" at 55-110 W (250 W when it renders normally), its memory
+controller is idle (1-5 %), the game's copy engines are busy at 50-136 % (summed) and the
+System process's copy engine at 20-100 %, while DLSS, the eye images and everything else stay
+correct. Measured on 07/10 with the Null backend at 90 Hz, 3072x3264, the player's ini (DLSS at
+0.65), walking in the first room and the alley for 3 minutes after the load, the previous game
+ended by `stop.ps1` (killed) unless noted:
+
+| Start after the previous exit | Slow runs | Frame median when slow | Power when slow |
+|---|---|---|---|
+| 9 s, mod | 2 of 5 | 71.4 and 71.9 ms, every 10-s window from t+21 s | 72-81 W |
+| 89-90 s, mod | 0 of 5 (and the first start of the day) | - | - |
+| 90 s, through the launcher's wait (below) | 0 of 4 | - | - |
+| 9 s, mod, a second series (stopped at the first slow one) | 1 of 1 | 165 ms (gameplay reached after 75 s instead of 35) | 60 W |
+| 9 s after a normal quit (window closed, as Alt+F4), mod | 2 of 2 | 91.7 and 71.5 ms | 68-72 W |
+| 125-222 s after the exit of a slow game, mod | 0 of 3 | - | - |
+| 9 s, the game without the mod (flat 6144x3264, 320-330 W) | 0 of 3 | - | - |
+
+Earlier runs fit: at 4032x3648 with DLSS three starts 5-10 s after an exit were slow for the
+whole run (4 minutes), one 0.6 s after an exit for 105 s, one 100 s after an exit never; a
+release check on 07/10 started 18 s after an exit was slow from the load on. Three starts
+without the mod at 9 s were all fast, which with 2 of 5 for the mod does not show whether the
+game alone can land in it.
+
+What it is not: the previous game's video memory. The card's used memory is back to its idle
+level 1-2 s after the kill (`nvidia-smi`, 1-s samples; the System process's copy engine idle
+afterwards), long before the next start. The start of a slow and a fast game look the same in
+the log (budget, card usage, timing). The game's resident and dedicated memory stay equal in
+the first 90 s in slow runs as in fast ones. The texture streaming moves as much memory in a
+fast run (the game's dedicated usage swings by up to 400 MB per 5 s in both); in the slow
+state the same uploads take far longer (copy engine 5 % against 50-136 %).
+
+It is not confined to the game process: a separate test program (copy of a 256 MB buffer from
+system memory into the card, one D3D11 device of its own) reaches 14 GB/s with no game running
+and 7-9 GB/s next to a fast game, but 0.03-0.1 GB/s next to a slow one, and it stays that slow
+after the slow game has exited: with no game running it measured 0.04-0.2 GB/s at 5, 15, 45, 60,
+75, 90 and 120 s after the exit (once it did not finish within 12 s), while the card went down
+to its idle state P8 and up again. So the state belongs to the graphics driver or the card, not
+to the game, and survives the game by at least two minutes. Yet every game started after a slow
+one was fast (89, 125, 130 and 222 s after its exit), once 4 s after the test program had
+measured the state: the next game's start apparently ends it, and what decides is how soon after
+the previous exit a game starts. A normal quit instead of a kill does not avoid it. Inside it nothing tried in the game ended it:
+`r.Streaming.PoolSize` 7000 (from 4000), standing still (57 ms instead of 70-88), `stereo off`
+(the flat game still at 100 % "utilization" and 60-75 W) and on again; earlier, at 4032x3648, the
+head frozen, foveation and DLSS off, a lower `r.Streaming.PoolSize`. Once (the first series) it
+ended 4.3 minutes after the start while the game ran, within 20 s of `r.UniformBufferPooling 0`
+being set (the player standing still; not repeated, so not shown to be a remedy). The PCIe link stays at gen 4 x8
+and its replay counter rises only when the link speeds up at a game start, not during the
+state. After an exit the card steps down from P0 through P3 and P5 (memory clock 810 MHz, PCIe
+gen 2) to P8 within 30-65 s; a start 9 s after an exit meets it in P5, a start 90 s after in P8.
+MSI Afterburner applies a custom voltage curve and a memory offset on this PC; the card at stock
+settings was not tried, nor a driver other than the installed one.
+
+What helps: waiting before the start. The launcher (`ff7vr-launcher.ps1`) and
+`ff7vr-start.cmd` start the game no sooner than 90 s after the previous session ended (the launcher's own record of the exit and
+the time of the newest `ff7vr.log`), with a message; `-NoIdleWait` skips it. The dev harness
+does the same (`launch.ps1`, exit recorded by `stop.ps1` in `.locks\state\last-game-exit.txt`,
+`-NoIdleWait`). A start from Steam cannot wait. The mod helps tell it apart: every `video memory:`
+line in the timing block ends with `game copy engine N %` (2-6 % in normal play, 50-130 % in
+this state, 60-80 % for 20-40 s after a load), and the log gets a warning when it has stayed at
+40 % or more in 5 of the last 6 reports with the card not full, and at the start when the
+previous session's log (kept in `ff7vr-logs\` when the mod is installed by hand) was written less
+than 90 s before. After a slow session the next start, 89-222 s later, was fast every time
+(4 of 4); if it is slow again, quit and wait longer.
+Evidence: `captures\perf\restart\` (local, not in the repository).
+
+Older measurements of the same state:
+At 4032x3648 with DLSS at 0.58,
 three runs (two with the committed code, one with a work-in-progress DLSS output mode) stayed
 at a median of about 71 ms per frame for the whole run (4 minutes), and two of four earlier
 3072x3264 runs without DLSS did the same for 5 minutes. It is intermittent: the same 4032

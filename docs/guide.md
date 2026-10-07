@@ -315,6 +315,9 @@ session it is `ff7vr.log` in the game's `End\Binaries\Win64` folder).
   `[stereo_cvars]` at the end, remove the `;` at the start of the line
   `; r.BloomQuality = 0` (console variables in that section apply only while 3D
   runs).
+- **Wait a minute and a half between quitting the game and starting it again**: a game
+  started sooner can run at about 10 frames per second for minutes (the launcher and
+  `ff7vr-start.cmd` wait by themselves; a start from Steam does not).
 - **Smooth turning only.** The game camera turns you smoothly, as in the flat game;
   there is no snap turn. This can be uncomfortable for some players.
 - **Markers over enemies and objects are slightly off** on the default HUD panel
