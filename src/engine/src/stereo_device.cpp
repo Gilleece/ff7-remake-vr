@@ -195,6 +195,11 @@ struct FrameTimer {
                 log::info("frame time: {} frames, avg {:.2f} ms, median {:.2f}, p95 {:.2f}, max {:.2f} ({}, eye {}x{})", last_n,
                           last_avg, last_p50, last_p95, last_max, window_stereo_all ? "stereo" : "not all stereo", g.eye_w,
                           g.eye_h);
+#if FF7VR_ENGINE_WITH_DLSS
+                // What DLSS did with the stereo frames of the same window.
+                const std::string d = dlss::window_line(std::chrono::duration<double>(now - window_start).count());
+                if (!d.empty()) log::info("{}", d);
+#endif
             } catch (...) {
             }
             samples.clear();

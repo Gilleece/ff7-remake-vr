@@ -65,6 +65,16 @@ void engine_eye_size(std::uint32_t& w, std::uint32_t& h);
 // runtime scales it). Otherwise only the rectangles change, as output_rects does.
 void output_texture(EyeTexture& eyes);
 
+// RHI thread: true if t is DLSS's own output texture ([dlss] output = runtime), i.e. the eye
+// image handed to the runtime comes from DLSS and not from the engine's eye target.
+bool is_output_texture(ID3D11Texture2D* t);
+
+// Any one thread, once per frame-time window (the game thread's "frame time" line): what DLSS
+// did with the stereo frames since the previous call: frames upscaled in both eyes, the eyes
+// not upscaled by reason, what went to the runtime, GPU time per eye, history resets, feature
+// creations and failed checks. Empty while DLSS is off and nothing happened.
+std::string window_line(double seconds);
+
 // Dev pipe: "dlss ..." (see docs/dlss.md).
 std::string command(const std::string& args);
 

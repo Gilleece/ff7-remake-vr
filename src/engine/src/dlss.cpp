@@ -106,6 +106,10 @@ struct Settings {
     std::atomic<bool> validate{true};     // every evaluation's inputs checked first; the game's pass runs if one fails
     std::atomic<bool> input_stats{false};  // GPU statistics of the evaluation inputs (non-finite or huge values), read back late
     std::atomic<int> events_requests{0};  // `dlss events`: dump the event ring to the log
+    // Test (`dlss mispin`): the recognised pixel shader of the anti-aliasing pass (1), of the last
+    // pass (2) or of both (3) replaced by a value no draw has, as if the game had switched to
+    // other shaders; the reporting of the eyes that are not upscaled is then seen working. 0: back.
+    std::atomic<int> mispin{0};
     int log_lines = 0;                    // [dlss] log_lines: NGX messages kept in the log (0: 400, or 20000 with log_verbose)
     // Synthetic cost measurement: one extra DLSS evaluation per frame on blank textures of a
     // chosen input and output size (the image is discarded).
@@ -708,6 +712,8 @@ struct Info {
     unsigned seen_this_frame = 0, seen_last_frame = 0;
     double ms_sum[3]{}, mv_ms_sum[3]{};  // [2]: the synthetic bench
     std::uint64_t ms_n[3]{};
+    double win_ms_sum[2]{};  // since the last frame-time window line (window_line)
+    std::uint64_t win_ms_n[2]{};
     std::string bench;
     float jitter_px[2][2]{};
     std::string dump;
@@ -786,6 +792,7 @@ std::atomic<std::uint64_t> g_check_fail[kChkCount]{};
 std::atomic<std::uint64_t> g_checked{0}, g_depth_changes{0};
 ID3D11Resource* g_last_depth[2]{};  // compared only
 std::atomic<int> g_check_logs{0};
+std::string g_last_check_fail;  // RHI thread: the check that failed last, with its detail
 
 struct EvalInputs {
     int eye = 0;
@@ -874,6 +881,7 @@ bool before_eval(const EvalInputs& e) {
     const int bad = check_eval(e, detail);
     if (bad < 0) return true;
     const std::uint64_t n = ++g_check_fail[bad];
+    g_last_check_fail = std::format("{}: {}", kCheckNames[bad], detail);
     event(std::format("CHECK FAILED eye {}: {}: {}", e.eye, kCheckNames[bad], detail));
     if (n == 1 || (n & (n - 1)) == 0) log::warn("dlss: eye {}: check '{}' failed ({} times): {}; the game's pass runs instead", e.eye, kCheckNames[bad], n, detail);
     return false;
@@ -1747,13 +1755,14 @@ bool is_depth_view(DXGI_FORMAT f) {
 // The temporal anti-aliasing pass of a view: t1 scene depth, t2 scene colour (float), t3 the
 // history (same size and format as t2), t4 the velocity buffer (two 16-bit channels), one or
 // two render targets of t2's size, constant buffer 1 (the view). Shape checks only; the
-// first match fixes the pixel shader, later draws must use the same one.
-bool read_pass(ID3D11DeviceContext* ctx, PassInputs& in, std::string* why) {
+// first match fixes the pixel shader, later draws must use the same one. any_ps: the shapes
+// only, whatever the pixel shader (the probe of "anti-aliasing pass not seen"); fixes nothing.
+bool read_pass(ID3D11DeviceContext* ctx, PassInputs& in, std::string* why, bool any_ps = false) {
     ID3D11PixelShader* ps = nullptr;
     ctx->PSGetShader(&ps, nullptr, nullptr);
     if (ps) ps->Release();  // compared only
     Rhi& R = *g_rhi;
-    if (R.taa_ps && ps != R.taa_ps) return false;
+    if (R.taa_ps && ps != R.taa_ps && !any_ps) return false;
     ID3D11ShaderResourceView* srv[5]{};
     ctx->PSGetShaderResources(0, 5, srv);
     for (int i = 0; i < 5; ++i) in.srv[i].Attach(srv[i]);
@@ -1793,7 +1802,7 @@ bool read_pass(ID3D11DeviceContext* ctx, PassInputs& in, std::string* why) {
     if (cb[0]) cb[0]->Release();
     in.cb1.Attach(cb[1]);
     if (!in.cb1) return false;
-    if (!R.taa_ps) {
+    if (!R.taa_ps && !any_ps) {
         R.taa_ps = ps;
         D3D11_BUFFER_DESC bd{};
         in.cb1->GetDesc(&bd);
@@ -1858,6 +1867,10 @@ void collect_timing(ID3D11DeviceContext* ctx) {
             i.ms_sum[t.eye] += total;
             i.mv_ms_sum[t.eye] += mv;
             ++i.ms_n[t.eye];
+            if (t.eye < 2) {
+                i.win_ms_sum[t.eye] += total;
+                ++i.win_ms_n[t.eye];
+            }
         });
     }
 }
@@ -2117,6 +2130,80 @@ RuntimeOut g_rt_out;  // RHI thread (counters read by status)
 D3D11_TEXTURE2D_DESC g_up_out_desc{};
 ID3D11PixelShader* g_final_ps = nullptr;  // compared only
 std::atomic<std::uint64_t> g_up_count{0}, g_up_fail{0}, g_up_skipped{0};
+
+// ------------------------------------------------------------------ what happened to each eye in each stereo frame (RHI thread)
+// At every stereo frame end each eye is either upscaled by DLSS (evaluated this frame) or
+// counted under the reason it was not. The tallies feed the line in every frame-time window
+// (window_line), the warning when DLSS has not evaluated for 2 s while stereo renders, and
+// `dlss status`. The reasons are set where the path stops; a stage that was never reached
+// (no anti-aliasing pass, no last pass) is found at the frame end.
+enum Miss : int {
+    kMissNgx,      // NGX not ready (starting, or failed)
+    kMissNoTaa,    // no anti-aliasing pass recognised for the eye this frame
+    kMissTaa,      // the anti-aliasing pass was recognised but not replaced
+    kMissNoFinal,  // the anti-aliasing pass was replaced; the eye's last pass was not recognised
+    kMissFinal,    // the last pass was recognised; its replacement could not be prepared
+    kMissRange,    // the input is outside every input range NGX reports for the output
+    kMissFeature,  // no feature for the input (creation failed, or it does not accept the input)
+    kMissCheck,    // a check before the evaluation failed
+    kMissEval,     // NGX's evaluation failed
+    kMissTest,     // a test switch (dlss skip, dlss eyes, test_skip)
+    kMissCount
+};
+constexpr const char* kMissNames[kMissCount] = {"NGX not ready",        "anti-aliasing pass not seen", "anti-aliasing pass not replaced",
+                                                "last pass not seen",   "last pass not replaced",      "input outside NGX's range",
+                                                "no feature",           "check failed",                "evaluation failed",
+                                                "test switch"};
+struct EyeAudit {
+    std::uint64_t frame = 0;  // the frame `miss` and `detail` were set in
+    int miss = -1;
+    std::string detail;
+    std::uint64_t other_final_frame = 0;  // a full-screen draw into a 10-bit target with another pixel shader was seen (last pass not seen)
+    std::string other_final;
+};
+EyeAudit g_audit[2];  // RHI thread
+
+void audit_miss(int eye, int miss, std::string detail) {
+    EyeAudit& a = g_audit[eye & 1];
+    a.frame = g_rhi->frame;
+    a.miss = miss;
+    a.detail = std::move(detail);
+}
+
+// Counts of one period (the frame-time window, or the whole session).
+struct Tally {
+    std::uint64_t frames = 0, both = 0, eyes[2]{}, miss[kMissCount]{};
+    std::string detail[kMissCount];  // the latest detail of each reason
+    std::uint64_t to_runtime_dlss = 0, engine_size_eyes = 0, to_runtime_engine = 0;
+    void add_miss(int m, const std::string& d) {
+        ++miss[m];
+        if (!d.empty()) detail[m] = d;
+    }
+};
+std::mutex g_tally_mutex;
+Tally g_window, g_session;  // under g_tally_mutex
+std::uint64_t g_window_resets[2]{}, g_window_creates = 0, g_window_checks = 0;  // values at the last window line (window_line's thread)
+
+// "Anti-aliasing pass not seen" for a while: for a few frames every full-screen draw is checked
+// for the pass's inputs whatever its pixel shader, to tell a loading screen (no such draw) from
+// a pass the recognition no longer matches (a draw with the inputs and another shader).
+int g_probe_frames = 0;                    // frames left to probe (RHI thread)
+std::uint64_t g_probe_last = 0;            // frame the last probe started
+std::string g_probe_found;                 // what the probe found this frame
+std::string g_probe_result;                // the outcome of the last finished probe
+bool g_probe_saw_scene = false;            // the last finished probe found a draw with the pass's inputs
+
+// The warning when DLSS has not evaluated for kStallSeconds while it is on and stereo renders.
+constexpr double kStallSeconds = 2.0;
+struct Stall {
+    std::chrono::steady_clock::time_point since{};       // the last evaluation (or when evaluating became possible)
+    std::chrono::steady_clock::time_point last_frame{};  // the previous stereo frame end
+    std::chrono::steady_clock::time_point last_report{};
+    std::uint64_t frames = 0;  // stereo frames since the last evaluation
+    bool reported = false;
+    bool warned = false;       // the report was a warning (a scene was rendered)
+};
+Stall g_stall;  // RHI thread
 // The last pass's pixel shader constants (cb0, 1024 bytes): rows 30/31 the input rectangle
 // and size, rows 34/35 the output rectangle (min x, min y, max x, max y) and size (w, h,
 // 1/w, 1/h); the pixel shader maps SV_Position through rows 34/35 (docs/re/engine.md
@@ -2578,6 +2665,32 @@ void run_pending(ID3D11DeviceContext* ctx) {
     }
 }
 
+// A full-screen draw after an eye's anti-aliasing pass (its last pass still to come) whose
+// pixel shader is not the recognised last pass's: the first one per frame and eye that writes a
+// 10-bit target is kept, as the likely reason if the eye's last pass is then not seen.
+void note_other_final(ID3D11DeviceContext* ctx, ID3D11PixelShader* ps) {
+    Rhi& R = *g_rhi;
+    D3D11_VIEWPORT vp{};
+    UINT nvp = 1;
+    ctx->RSGetViewports(&nvp, &vp);
+    if (nvp == 0) return;
+    const int eye = vp.TopLeftX >= 1.0f ? 1 : 0;
+    EyeAudit& a = g_audit[eye];
+    if (g_stash[eye].frame != R.frame || a.other_final_frame == R.frame) return;
+    ID3D11RenderTargetView* rtv = nullptr;
+    ctx->OMGetRenderTargets(1, &rtv, nullptr);
+    ComPtr<ID3D11RenderTargetView> view;
+    view.Attach(rtv);
+    if (!view) return;
+    ComPtr<ID3D11Resource> res;
+    view->GetResource(&res);
+    D3D11_TEXTURE2D_DESC d{};
+    if (!tex_desc(res.Get(), d) || (d.Format != DXGI_FORMAT_R10G10B10A2_UNORM && d.Format != DXGI_FORMAT_R10G10B10A2_TYPELESS)) return;
+    a.other_final_frame = R.frame;
+    a.other_final = std::format("a full-screen draw into a 10-bit {}x{} target at viewport {} {} {}x{} with pixel shader {} (the recognised last pass: {})",
+                                d.Width, d.Height, vp.TopLeftX, vp.TopLeftY, vp.Width, vp.Height, static_cast<void*>(ps), static_cast<void*>(g_final_ps));
+}
+
 // The last pass of a view in upscale mode: true if it was replaced.
 bool try_final(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_trace::DrawIndexedFn original) {
     Rhi& R = *g_rhi;
@@ -2586,7 +2699,10 @@ bool try_final(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_t
     ID3D11PixelShader* ps = nullptr;
     ctx->PSGetShader(&ps, nullptr, nullptr);
     if (ps) ps->Release();
-    if (g_final_ps && ps != g_final_ps) return false;
+    if (g_final_ps && ps != g_final_ps) {
+        note_other_final(ctx, ps);
+        return false;
+    }
     D3D11_VIEWPORT vp{};
     UINT nvp = 1;
     ctx->RSGetViewports(&nvp, &vp);
@@ -2594,6 +2710,13 @@ bool try_final(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_t
     const int eye = vp.TopLeftX >= 1.0f ? 1 : 0;
     Stash& s = g_stash[eye];
     if (s.frame != R.frame || !s.depth) return false;
+    // Once the last pass's pixel shader is known, a draw with it that cannot be replaced gives
+    // the eye's reason for this frame ("last pass not replaced"); before that, other
+    // full-screen draws are expected to fail these checks.
+    auto reject = [&](std::string what) {
+        if (g_final_ps) audit_miss(eye, kMissFinal, std::move(what));
+        return false;
+    };
     ID3D11RenderTargetView* rtv[8]{};
     ID3D11DepthStencilView* dsv = nullptr;
     ctx->OMGetRenderTargets(8, rtv, &dsv);
@@ -2601,27 +2724,29 @@ bool try_final(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_t
     for (int i = 0; i < 8; ++i) saved_rtv[i].Attach(rtv[i]);
     ComPtr<ID3D11DepthStencilView> saved_dsv;
     saved_dsv.Attach(dsv);
-    if (!saved_rtv[0] || saved_rtv[1]) return false;
+    if (!saved_rtv[0] || saved_rtv[1]) return reject(saved_rtv[0] ? "more than one render target" : "no render target");
     ComPtr<ID3D11Resource> target;
     saved_rtv[0]->GetResource(&target);
     D3D11_TEXTURE2D_DESC td{};
-    if (!tex_desc(target.Get(), td)) return false;
+    if (!tex_desc(target.Get(), td)) return reject("the render target is not a 2D texture");
     // The eye texture: two halves side by side. The pass writes the view's rectangle at the
     // corner of the eye's half: the whole half, or less of it with [stereo] render_scale.
     const UINT half = td.Width / 2;
     if ((td.Format != DXGI_FORMAT_R10G10B10A2_UNORM && td.Format != DXGI_FORMAT_R10G10B10A2_TYPELESS) || half < 64 || vp.Width < 64.0f ||
         vp.TopLeftX != static_cast<float>(eye * half) || vp.TopLeftY != 0.0f || vp.Width > static_cast<float>(half) ||
         vp.Height > static_cast<float>(td.Height) || vp.Width < static_cast<float>(s.w) || vp.Height < static_cast<float>(s.h))
-        return false;
+        return reject(std::format("target {}x{} format {}, viewport {} {} {}x{}, the eye's rectangle at the reduced size {}x{}", td.Width, td.Height,
+                                  static_cast<int>(td.Format), vp.TopLeftX, vp.TopLeftY, vp.Width, vp.Height, s.w, s.h));
     ID3D11ShaderResourceView* srv1 = nullptr;
     ctx->PSGetShaderResources(1, 1, &srv1);
     ComPtr<ID3D11ShaderResourceView> input;
     input.Attach(srv1);
-    if (!input) return false;
+    if (!input) return reject("no input at t1");
     ComPtr<ID3D11Resource> input_res;
     input->GetResource(&input_res);
     D3D11_TEXTURE2D_DESC id{};
-    if (!tex_desc(input_res.Get(), id) || s.x + s.w > id.Width || s.y + s.h > id.Height) return false;
+    if (!tex_desc(input_res.Get(), id) || s.x + s.w > id.Width || s.y + s.h > id.Height)
+        return reject(std::format("the input at t1 ({}x{}) does not hold the eye's rectangle {},{} {}x{}", id.Width, id.Height, s.x, s.y, s.w, s.h));
     if (!g_final_ps) {
         g_final_ps = ps;
         log::info("dlss: last pass recognised: pixel shader {} | target {}x{} format {} | vp {} {} {} {} | input {}x{} format {} | eye rect at the reduced size {} {} {} {}",
@@ -2657,7 +2782,7 @@ bool try_final(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_t
         if (!g_graded || FAILED(R.dev->CreateRenderTargetView(g_graded.Get(), nullptr, &g_graded_rtv)) ||
             FAILED(R.dev->CreateShaderResourceView(g_graded.Get(), nullptr, &g_graded_srv))) {
             g_graded.Reset();
-            return false;
+            return reject("the graded texture could not be created");
         }
         g_graded->GetDesc(&g_graded_desc);
         log::info("dlss: graded texture {}x{} format {}", id.Width, id.Height, static_cast<int>(td.Format));
@@ -2668,10 +2793,10 @@ bool try_final(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_t
         R.dev->CheckFormatSupport(DXGI_FORMAT_R10G10B10A2_UNORM, &support);
         if (!(support & D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW)) {
             ++g_up_fail;
-            return false;
+            return reject("R10G10B10A2_UNORM has no typed unordered access on this device");
         }
         g_up_out = make_tex(R.dev, 2 * out_w, out_h, DXGI_FORMAT_R10G10B10A2_UNORM, D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE);
-        if (!g_up_out) return false;
+        if (!g_up_out) return reject(std::format("the output texture {}x{} could not be created", 2 * out_w, out_h));
         g_up_out->GetDesc(&g_up_out_desc);
         log::info("dlss: upscale output texture {}x{} R10G10B10A2_UNORM ({}; the engine's eye texture {}x{}) | {}", 2 * out_w, out_h,
                   rt_mode ? "output = runtime: it goes to the runtime" : "copied into the eye texture", td.Width, td.Height, vram_text(R.dev));
@@ -2705,6 +2830,7 @@ bool try_final(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_t
             retire(s.depth);
             retire(s.depth_srv);
             ++g_up_skipped;
+            audit_miss(eye, kMissTest, "dlss skip");
             return true;
         }
         evaluate_upscale(ctx, eye, s, half, td.Width, td.Height, id.Width, id.Height, target.Get(), vp.Width, vp.Height, out_w, out_h, false);
@@ -2719,11 +2845,11 @@ bool try_final(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_t
     game_cb0.Attach(cb0_raw);
     D3D11_BUFFER_DESC cbd{};
     if (game_cb0) game_cb0->GetDesc(&cbd);
-    if (!game_cb0 || cbd.ByteWidth < 16 * (kFinalOutRectRow + 2)) return false;
+    if (!game_cb0 || cbd.ByteWidth < 16 * (kFinalOutRectRow + 2)) return reject("no constant buffer 0 of the expected size");
     if (g_cb_checked == 0) g_cb_checked = check_final_rows(ctx, game_cb0.Get(), vp) ? 1 : -1;
     if (g_cb_checked < 0) {
         ++g_up_fail;
-        return false;
+        return reject("the pass's constants do not describe its viewport (checked once)");
     }
     if (!g_cb_copy || [&] {
             D3D11_BUFFER_DESC d{};
@@ -2740,7 +2866,7 @@ bool try_final(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_t
         p.ByteWidth = 32;
         if (FAILED(R.dev->CreateBuffer(&d, nullptr, &g_cb_copy)) || FAILED(R.dev->CreateBuffer(&p, nullptr, &g_cb_patch))) {
             g_cb_copy.Reset();
-            return false;
+            return reject("the constant buffer copy could not be created");
         }
     }
     const float patch[8] = {static_cast<float>(s.x), static_cast<float>(s.y), static_cast<float>(s.x + s.w), static_cast<float>(s.y + s.h),
@@ -2790,6 +2916,7 @@ bool try_final(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_t
         retire(s.depth);
         retire(s.depth_srv);
         ++g_up_skipped;
+        audit_miss(eye, kMissTest, "dlss skip");
         original(ctx, count, start, base);
         return true;
     }
@@ -2833,7 +2960,10 @@ bool evaluate_upscale(ID3D11DeviceContext* ctx, int eye, Stash& s, UINT half, UI
                       float vp_w, float vp_h, UINT out_w, UINT out_h, bool copy_back) {
     Rhi& R = *g_rhi;
     ComPtr<ID3D11DeviceContext1> ctx1;
-    if (FAILED(ctx->QueryInterface(IID_PPV_ARGS(&ctx1)))) return false;
+    if (FAILED(ctx->QueryInterface(IID_PPV_ARGS(&ctx1)))) {
+        audit_miss(eye, kMissEval, "the immediate context has no ID3D11DeviceContext1");
+        return false;
+    }
     const bool in_game_state = !g_set.own_state.load(std::memory_order_relaxed);
     if (in_game_state) {
         // NGX reads the engine's depth texture; in the game's state it must not be bound for
@@ -2970,9 +3100,11 @@ bool evaluate_upscale(ID3D11DeviceContext* ctx, int eye, Stash& s, UINT half, UI
         e.reset = reset;
         NVSDK_NGX_Result r = NVSDK_NGX_Result_Fail;
         bool checked = (copies || f.subrects) && before_eval(e);
+        std::string not_checked = !(copies || f.subrects) ? "test_copy_inputs: the input copies could not be made" : checked ? "" : g_last_check_fail;
         // The engine runs post-processing view by view (left: anti-aliasing ... last pass, then
         // right), so at an eye's last pass that eye's anti-aliasing pass must have run this frame.
         if (checked && g_set.validate.load(std::memory_order_relaxed) && !(g_taa_frame == R.frame && (g_taa_mask & (1u << eye)))) {
+            not_checked = "pass order: the eye's anti-aliasing pass was not seen this frame";
             const std::uint64_t n = ++g_check_fail[kChkEyes];
             event(std::format("CHECK FAILED eye {}: its anti-aliasing pass not seen this frame (passes 0x{:x} of frame {})", eye, g_taa_mask, g_taa_frame));
             if (n == 1 || (n & (n - 1)) == 0)
@@ -3065,11 +3197,13 @@ bool evaluate_upscale(ID3D11DeviceContext* ctx, int eye, Stash& s, UINT half, UI
             });
         } else if (checked) {
             ++g_up_fail;
+            audit_miss(eye, kMissEval, std::format("EvaluateFeature {}", result_text(r)));
             with_info([&](Info& i) {
                 ++i.eval_fail;
                 i.last_error = std::format("upscale EvaluateFeature {}", result_text(r));
             });
         } else {
+            audit_miss(eye, kMissCheck, not_checked);
             with_info([&](Info& i) { i.last_error = "a check before the evaluation failed (see the log)"; });
         }
         if (t) {
@@ -3079,6 +3213,11 @@ bool evaluate_upscale(ID3D11DeviceContext* ctx, int eye, Stash& s, UINT half, UI
         }
     } else {
         ++g_up_fail;
+        if (!found)
+            audit_miss(eye, kMissRange, std::format("input {}x{}, output {}x{}", s.w, s.h, ow, oh));
+        else
+            audit_miss(eye, kMissFeature, f.handle ? std::format("input {}x{}, the feature accepts {}x{} to {}x{}", s.w, s.h, f.min_w, f.min_h, f.w, f.h)
+                                                   : std::format("no feature for the input {}x{} -> {}x{} (creation failed, see the log)", s.w, s.h, ow, oh));
     }
     if (!in_game_state) {
         ctx1->SwapDeviceContextState(game_state, nullptr);
@@ -3466,6 +3605,143 @@ void start(const Config& cfg, const std::filesystem::path& dll_dir) {
 
 bool wants_hooks() { return g_set.enabled.load(std::memory_order_relaxed) || g_set.init_requested.load(std::memory_order_relaxed); }
 
+namespace {
+
+std::string clip(std::string t, std::size_t n = 240) {
+    if (t.size() > n) t = t.substr(0, n) + "...";
+    return t;
+}
+
+std::string miss_list(const Tally& t) {
+    std::string out;
+    for (int m = 0; m < kMissCount; ++m) {
+        if (!t.miss[m]) continue;
+        out += std::format("{}{} {}", out.empty() ? "" : ", ", kMissNames[m], t.miss[m]);
+        if (!t.detail[m].empty()) out += " (" + clip(t.detail[m]) + ")";
+    }
+    return out.empty() ? "none" : out;
+}
+
+// The stereo frame that is ending (RHI thread, from frame() before the frame counter moves on):
+// per eye, upscaled or the reason it was not; the tallies; the probe; the stall warning.
+void audit_frame_end() {
+    Rhi& R = *g_rhi;
+    Stall& S = g_stall;
+    const auto now = std::chrono::steady_clock::now();
+    // More than a second without a stereo frame (stereo was off, or the frames stopped): the
+    // time without an evaluation starts again.
+    const bool resumed = S.last_frame.time_since_epoch().count() == 0 || now - S.last_frame > std::chrono::seconds(1);
+    S.last_frame = now;
+    if (!g_set.enabled.load(std::memory_order_relaxed)) {
+        S.since = now;
+        S.frames = 0;
+        S.reported = false;
+        return;
+    }
+    bool up[2]{};
+    int miss[2] = {-1, -1};
+    std::string detail[2];
+    for (int e = 0; e < 2; ++e) {
+        up[e] = R.frame != 0 && R.feat[e].last_eval_frame == R.frame;
+        if (up[e]) continue;
+        const EyeAudit& a = g_audit[e];
+        if (R.ngx_state != 1) {
+            miss[e] = kMissNgx;
+            detail[e] = R.ngx_state < 0 ? "NGX could not start" : "NGX starting";
+        } else if (a.frame == R.frame && a.miss >= 0) {
+            miss[e] = a.miss;
+            detail[e] = a.detail;
+        } else if (g_taa_frame == R.frame && (g_taa_mask & (1u << e))) {
+            miss[e] = kMissNoFinal;
+            detail[e] = a.other_final_frame == R.frame ? a.other_final : std::string("no full-screen draw into a 10-bit target after the anti-aliasing pass");
+        } else {
+            miss[e] = kMissNoTaa;
+            detail[e] = !g_probe_found.empty() ? g_probe_found : g_probe_result.empty() ? std::string("not probed yet") : g_probe_result;
+        }
+    }
+    {
+        std::lock_guard lk(g_tally_mutex);
+        for (Tally* t : {&g_window, &g_session}) {
+            ++t->frames;
+            if (up[0] && up[1]) ++t->both;
+            for (int e = 0; e < 2; ++e) {
+                if (up[e]) ++t->eyes[e];
+                else t->add_miss(miss[e], detail[e]);
+            }
+        }
+    }
+    // The probe: its result, and a new one while the pass is not seen (at most every 144 frames).
+    if (g_probe_frames > 0) {
+        if (!g_probe_found.empty()) {
+            g_probe_result = g_probe_found;
+            g_probe_saw_scene = true;
+            g_probe_frames = 0;
+        } else if (--g_probe_frames == 0) {
+            g_probe_result = "no draw with the anti-aliasing pass's inputs in 8 frames: no 3D scene (a loading screen or a movie)";
+            g_probe_saw_scene = false;
+        }
+    }
+    g_probe_found.clear();
+    if ((miss[0] == kMissNoTaa || miss[1] == kMissNoTaa) && g_probe_frames == 0 && R.taa_ps && (g_probe_last == 0 || R.frame >= g_probe_last + 144)) {
+        g_probe_frames = 8;
+        g_probe_last = R.frame;
+    }
+    // The stall: no evaluation for kStallSeconds while DLSS is on and stereo renders.
+    if (up[0] || up[1]) {
+        if (S.reported)
+            log::info("dlss: evaluating again after {:.1f} s ({} stereo frames without an evaluation)",
+                      std::chrono::duration<double>(now - S.since).count(), S.frames);
+        S.since = now;
+        S.frames = 0;
+        S.reported = false;
+        return;
+    }
+    if (resumed || R.ngx_state != 1) {
+        // Start-up (NGX not ready yet) and a new run of stereo frames do not count.
+        S.since = now;
+        S.frames = 0;
+        S.reported = false;
+        return;
+    }
+    ++S.frames;
+    const double idle = std::chrono::duration<double>(now - S.since).count();
+    if (idle < kStallSeconds || (S.reported && now - S.last_report < std::chrono::seconds(10))) return;
+    S.last_report = now;
+    S.reported = true;
+    std::string why;
+    bool scene = false;  // a 3D scene was rendered in this frame (else a loading screen or a movie)
+    for (int e = 0; e < 2; ++e) {
+        why += std::format("{}{}: {}{}", e ? "; " : "", e ? "right" : "left", kMissNames[miss[e]], detail[e].empty() ? "" : " (" + clip(detail[e]) + ")");
+        if (miss[e] != kMissNoTaa || g_probe_saw_scene) scene = true;
+    }
+    std::string recent;
+    {
+        std::lock_guard lk(g_tally_mutex);
+        recent = std::format("this session: {} stereo frames, upscaled in both eyes {}; not upscaled (eye-frames): {}", g_session.frames,
+                             g_session.both, miss_list(g_session));
+    }
+    if (scene)
+        log::warn("dlss: no DLSS evaluation for {:.1f} s while stereo renders ({} frames): {} | {}", idle, S.frames, why, recent);
+    else
+        log::info("dlss: no DLSS evaluation for {:.1f} s while stereo renders ({} frames): {}; no 3D scene in these frames (a loading screen or a "
+                  "movie) | {}",
+                  idle, S.frames, why, recent);
+}
+
+void count_handover(bool from_dlss, unsigned engine_size_eyes) {
+    std::lock_guard lk(g_tally_mutex);
+    for (Tally* t : {&g_window, &g_session}) {
+        if (from_dlss) {
+            ++t->to_runtime_dlss;
+            t->engine_size_eyes += engine_size_eyes;
+        } else {
+            ++t->to_runtime_engine;
+        }
+    }
+}
+
+}  // namespace
+
 void output_rects(EyeRect rects[2]) {
     const std::uint64_t ended = g_rhi->frame - 1;  // frame() has already counted the frame that just ended
     for (int e = 0; e < 2; ++e)
@@ -3490,6 +3766,7 @@ void output_texture(EyeTexture& eyes) {
     const std::uint64_t ended = g_rhi->frame - 1;
     if (g_rt_out.frame != ended || !g_up_out || !eyes.texture) {
         output_rects(eyes.eyes);
+        if (wants_hooks()) count_handover(false, 0);
         return;
     }
     const UINT ow = g_rt_out.ow, oh = g_rt_out.oh;
@@ -3501,13 +3778,16 @@ void output_texture(EyeTexture& eyes) {
     }
     if (!ctx) {
         output_rects(eyes.eyes);
+        if (wants_hooks()) count_handover(false, 0);
         return;
     }
+    unsigned engine_size_eyes = 0;
     for (int e = 0; e < 2; ++e) {
         if (g_full[e].frame == ended) {
             eyes.eyes[e] = g_full[e].rect;
             continue;
         }
+        ++engine_size_eyes;
         // DLSS did not write this eye: its image at the engine's size goes into the output
         // texture's half at the corner, and the runtime scales it.
         const EyeRect r = eyes.eyes[e];
@@ -3519,6 +3799,48 @@ void output_texture(EyeTexture& eyes) {
     }
     eyes.texture = g_up_out.Get();
     ++g_rt_out.handed;
+    count_handover(true, engine_size_eyes);
+}
+
+bool is_output_texture(ID3D11Texture2D* t) { return t && g_up_out && t == g_up_out.Get(); }
+
+std::string window_line(double seconds) {
+    Tally w;
+    {
+        std::lock_guard lk(g_tally_mutex);
+        w = g_window;
+        g_window = Tally{};
+    }
+    const bool on = g_set.enabled.load();
+    if (!on && w.frames == 0 && w.to_runtime_dlss == 0) return {};
+    double ms[2]{};
+    std::uint64_t creates = 0;
+    with_info([&](Info& i) {
+        for (int e = 0; e < 2; ++e) {
+            ms[e] = i.win_ms_n[e] ? i.win_ms_sum[e] / static_cast<double>(i.win_ms_n[e]) : 0.0;
+            i.win_ms_sum[e] = 0;
+            i.win_ms_n[e] = 0;
+        }
+        creates = i.creates;
+    });
+    std::uint64_t resets[2]{};
+    for (int e = 0; e < 2; ++e) {
+        const std::uint64_t r = g_resets[e].resets.load();
+        resets[e] = r - g_window_resets[e];
+        g_window_resets[e] = r;
+    }
+    std::uint64_t checks = 0;
+    for (int c = 0; c < kChkCount; ++c) checks += g_check_fail[c].load();
+    const std::uint64_t new_checks = checks - g_window_checks, new_creates = creates - g_window_creates;
+    g_window_checks = checks;
+    g_window_creates = creates;
+    const bool upscale = g_set.mode.load() == 1;
+    return std::format("dlss: last {:.1f} s ({}{}): {} stereo frames, upscaled in both eyes {} (left {}, right {}); not upscaled (eye-frames): {}; "
+                       "to the runtime: {} frames from DLSS's texture ({} eyes in it at the engine's size), {} from the engine's eye target; "
+                       "DLSS GPU ms per eye L {:.2f} R {:.2f}; history resets L {} R {}; features created {}; checks failed {}",
+                       seconds, on ? (upscale ? "on, upscale" : "on, dlaa") : "off", upscale && runtime_output() ? ", output = runtime" : "", w.frames,
+                       w.both, w.eyes[0], w.eyes[1], miss_list(w), w.to_runtime_dlss, w.engine_size_eyes, w.to_runtime_engine, ms[0], ms[1],
+                       resets[0], resets[1], new_creates, new_checks);
 }
 
 void frame(ID3D11Texture2D* any_texture) {
@@ -3537,6 +3859,30 @@ void frame(ID3D11Texture2D* any_texture) {
         }
     }
     if (R.ngx_state == 1) event(std::format("frame end (anti-aliasing passes 0x{:x})", g_taa_frame == R.frame ? g_taa_mask : 0u));
+    if (wants_hooks()) audit_frame_end();
+    {
+        // Test (`dlss mispin`): applied between frames, on this thread.
+        static int pinned = 0;
+        static ID3D11PixelShader* real_taa = nullptr;
+        static ID3D11PixelShader* real_final = nullptr;
+        const int want = g_set.mispin.load(std::memory_order_relaxed);
+        if (want != pinned) {
+            ID3D11PixelShader* const fake = reinterpret_cast<ID3D11PixelShader*>(static_cast<std::uintptr_t>(0x10));  // compared only, never used
+            if ((pinned & 1) && real_taa) R.taa_ps = real_taa;
+            if ((pinned & 2) && real_final) g_final_ps = real_final;
+            if ((want & 1) && R.taa_ps) {
+                real_taa = R.taa_ps;
+                R.taa_ps = fake;
+            }
+            if ((want & 2) && g_final_ps) {
+                real_final = g_final_ps;
+                g_final_ps = fake;
+            }
+            pinned = want;
+            log::info("dlss: test: recognised pixel shaders now: anti-aliasing pass {}, last pass {} (dlss mispin {})", static_cast<void*>(R.taa_ps),
+                      static_cast<void*>(g_final_ps), want);
+        }
+    }
     // The texture mip bias of the next frame: while this frame was upscaled.
     const bool upscaled = g_set.enabled.load(std::memory_order_relaxed) && g_set.mode.load(std::memory_order_relaxed) == 1 && R.ngx_state == 1 &&
                           (R.feat[0].last_eval_frame == R.frame || R.feat[1].last_eval_frame == R.frame);
@@ -3664,7 +4010,23 @@ bool on_draw_indexed(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base,
     const bool upscale = g_set.mode.load(std::memory_order_relaxed) == 1;
     if (upscale && g_set.enabled.load(std::memory_order_relaxed) && g_rhi->ngx_state == 1 && try_final(ctx, count, start, base, original)) return true;
     PassInputs in;
-    if (!read_pass(ctx, in, nullptr)) return false;
+    if (!read_pass(ctx, in, nullptr)) {
+        // The probe ("anti-aliasing pass not seen" for a while): a draw with the pass's inputs
+        // but another pixel shader means the recognition no longer matches the game's pass.
+        if (g_probe_frames > 0 && g_probe_found.empty() && g_rhi->taa_ps) {
+            PassInputs any;
+            if (read_pass(ctx, any, nullptr, true)) {
+                ID3D11PixelShader* ps = nullptr;
+                ctx->PSGetShader(&ps, nullptr, nullptr);
+                if (ps) ps->Release();  // compared only
+                g_probe_found = std::format("a draw with the anti-aliasing pass's inputs (colour {}x{}, viewport {} {} {}x{}) but pixel shader {} instead of "
+                                            "the recognised {}",
+                                            any.color_desc.Width, any.color_desc.Height, any.vp.TopLeftX, any.vp.TopLeftY, any.vp.Width, any.vp.Height,
+                                            static_cast<void*>(ps), static_cast<void*>(g_rhi->taa_ps));
+            }
+        }
+        return false;
+    }
     const int eye = in.vp.TopLeftX >= 1.0f ? 1 : 0;
     with_info([](Info& i) {
         ++i.taa_seen;
@@ -3672,8 +4034,14 @@ bool on_draw_indexed(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base,
     });
     // Test (`[dlss] test_eyes`): one eye only; the other eye runs the game's own passes.
     const int only = g_set.test_eyes.load(std::memory_order_relaxed);
-    if ((only == 1 && eye != 0) || (only == 2 && eye != 1)) return false;
-    if (g_set.skip_level.load(std::memory_order_relaxed) >= 4) return false;  // test: recognised only, the game's pass runs
+    if ((only == 1 && eye != 0) || (only == 2 && eye != 1)) {
+        audit_miss(eye, kMissTest, "dlss eyes / test_eyes");
+        return false;
+    }
+    if (g_set.skip_level.load(std::memory_order_relaxed) >= 4) {  // test: recognised only, the game's pass runs
+        audit_miss(eye, kMissTest, "test_skip 4");
+        return false;
+    }
     if (!g_set.enabled.load(std::memory_order_relaxed) || g_rhi->ngx_state != 1) {
         if (g_set.dump_requests.load() > 0) {
             ViewRows rows;
@@ -3686,6 +4054,7 @@ bool on_draw_indexed(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base,
     }
     std::string why;
     const bool ok = upscale ? run_passthrough(ctx, in, eye, why) : run_dlss(ctx, in, eye, why);
+    if (!ok) audit_miss(eye, kMissTaa, why);
     with_info([&](Info& i) {
         ++(ok ? i.replaced : i.fallback);
         if (!ok) i.last_error = why;
@@ -3849,6 +4218,14 @@ std::string command(const std::string& args) {
         return std::format("ok with copyinputs 1 DLSS reads from the copies: colour {} depth {} motion vectors {} (output always its own)",
                            g_set.copy_mask.load() & 1, (g_set.copy_mask.load() >> 1) & 1, (g_set.copy_mask.load() >> 2) & 1);
     }
+    if (sub == "mispin" && a.size() == 2) {
+        const int v = a[1] == "taa" ? 1 : a[1] == "final" ? 2 : a[1] == "both" ? 3 : 0;
+        g_set.mispin = v;
+        return std::format("ok test: {} from the next frame end", v == 0 ? "the recognised pixel shaders back"
+                                                                 : v == 1 ? "the anti-aliasing pass's pixel shader pinned to a value no draw has"
+                                                                 : v == 2 ? "the last pass's pixel shader pinned to a value no draw has"
+                                                                          : "both pixel shaders pinned to values no draw has");
+    }
     if (sub == "eyes" && a.size() == 2) {
         g_set.test_eyes = std::clamp(std::atoi(a[1].c_str()), 0, 2);
         return std::format("ok eyes {}", g_set.test_eyes.load() == 0 ? "both" : g_set.test_eyes.load() == 1 ? "left only" : "right only");
@@ -3908,7 +4285,7 @@ std::string command(const std::string& args) {
     if (sub != "status")
         return "err dlss status|on|off|init|mode <dlaa|upscale>|preset <default|j|k|l|m>|autoexp <0|1>|mvjitter <0|1|2>|jitter <sx> <sy>|cutreset <0|1>|"
                "cutflag <0|1>|cutlimits <cm> <deg>|cuttest <prefix> <reset 0|1> <zero_mv 0|1>|hdr <0|1>|sharpness <v>|preexp <v>|nograin <0|1>|reset|"
-               "recreate|skip <0|1>|stall [ms]|dump|timing|bench ...";
+               "recreate|skip <0|1>|stall [ms]|mispin <taa|final|both|off>|dump|timing|bench ...";
     std::string s;
     with_info([&](Info& i) {
         auto avg = [&](int e, const double* sum) { return i.ms_n[e] ? sum[e] / static_cast<double>(i.ms_n[e]) : 0.0; };
@@ -3946,6 +4323,13 @@ std::string command(const std::string& args) {
         if (!i.bench.empty())
             s += std::format(" | {}{}: GPU {:.3f} ms (samples {})", i.bench, g_set.bench.load() ? "" : " (off)", avg(2, i.ms_sum), i.ms_n[2]);
     });
+    {
+        std::lock_guard lk(g_tally_mutex);
+        const Tally& t = g_session;
+        s += std::format(" | stereo frames {}: upscaled in both eyes {} (left {}, right {}); not upscaled (eye-frames): {}; to the runtime: {} frames from "
+                         "DLSS's texture ({} eyes in it at the engine's size), {} from the engine's eye target",
+                         t.frames, t.both, t.eyes[0], t.eyes[1], miss_list(t), t.to_runtime_dlss, t.engine_size_eyes, t.to_runtime_engine);
+    }
     s += std::format(" | checks {}: {} evaluations checked, failed:", g_set.validate.load() ? "on" : "off", g_checked.load());
     for (int c = 0; c < kChkCount; ++c) s += std::format(" {} {}{}", kCheckNames[c], g_check_fail[c].load(), c + 1 < kChkCount ? "," : "");
     s += std::format(" | depth texture changes {} | immediate context calls from other threads {} ({} during NGX calls)", g_depth_changes.load(),
