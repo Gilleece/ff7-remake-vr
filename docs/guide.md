@@ -207,6 +207,9 @@ up to 150 ms late, because the mod waits that long for the second click; a quick
 is handed over as a short press when you release it. `[controls] fp_toggle_chord`
 changes the buttons (empty = off) and `fp_toggle_chord_ms` the window. All keys can be
 changed in `ff7vr.ini` (`[controls]`, `[first_person] toggle_key`).
+The gamepad combinations go through the mod only for an XInput pad (an Xbox pad or a pad
+in XInput mode); a DualSense or a pad in DirectInput mode is read by the game itself, and
+the combinations do not apply to it (use the keys).
 
 3D starts in first person outside battles. First person puts the view between the
 character's eyes, hides the character and the sword, and blends over in about a
@@ -451,3 +454,11 @@ with 10 GB of video memory instead of 12 GB the earlier way; that fits 72 Hz, no
 5376x4992 with `input_scale = 0.57` takes 15.3 ms: too slow even for 72 Hz on that PC.
 `output = engine` brings back the earlier way. Also since 06/10 the right eye no longer
 shimmers when the head moves (its motion vectors were read wrongly by DLSS).
+
+Virtual Desktop's performance overlay shows the share of the headset's resolution the
+headset receives. With DLSS that is 100 %: DLSS's finished image at the headset's size.
+The input scale (for example 65 %) shows only on frames without DLSS: the first frames
+after the start, title frames without a 3D scene, and loading screens. So 65 % turning
+into 100 % a few seconds after Continue is the end of the loading screen, not DLSS
+stopping. The log's `projection layer:` lines record each change of what the headset
+receives, and the `dlss:` line every 10 seconds counts the upscaled frames.

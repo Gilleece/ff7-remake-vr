@@ -114,6 +114,9 @@ package folder.
 - ReShade/Luma loaded together with the mod is new: the mod corrects Luma's
   tonemapping for the right eye and turns Luma's own DLSS off for the headset image,
   checked without a headset only. The launcher still sets Luma aside per session.
+- With DLSS, Virtual Desktop's performance overlay shows 100 % (DLSS's image at the
+  headset's size); the input scale (for example 65 %) shows only at the start, on the
+  title and on loading screens. That is normal.
 - Battle detection has never been seen in a real battle; switch by hand with Home if
   needed.
 - Pre-rendered movies are very likely wrong (`[stereo] movie_screen = 1` is worth a
