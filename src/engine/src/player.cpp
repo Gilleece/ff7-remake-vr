@@ -67,6 +67,21 @@ uobj::Lookup* g_child_lookup = nullptr;  // SceneComponent.GetChildrenComponents
 enum BoneFn : std::size_t { kHideBone, kUnHideBone, kIsBoneHidden, kGetParentBone };
 uobj::Lookup* g_bone_lookup = nullptr;
 uobj::Lookup* g_pass_lookup = nullptr;  // PrimitiveComponent.SetRenderInMainPass
+// Camera collision: KismetSystemLibrary.LineTraceSingle called on the library's class default
+// object; the parameter and FHitResult offsets are read from reflection (UStruct::Children).
+enum TraceFn : std::size_t { kLineTrace, kKismetCdo, kHitResultStruct };
+uobj::Lookup* g_trace_lookup = nullptr;
+struct TraceLayout {
+    bool ok = false;
+    int size = 0;  // UFunction PropertiesSize
+    int world = -1, start = -1, end = -1, channel = -1, complex = -1, ignore = -1, debug = -1, hit = -1, ignore_self = -1, ret = -1;
+    int hit_time = -1;  // FHitResult::Time
+};
+TraceLayout g_trace_layout;
+bool g_trace_failed = false;  // lookup or layout check failed: collision off
+// ETraceTypeQuery: 0 = TraceTypeQuery1 (visibility), 1 = TraceTypeQuery2 (camera). Visibility:
+// in the street the camera channel hit nothing in thousands of traces where visibility hit.
+std::atomic<int> g_trace_channel{0};
 bool g_lookup_logged = false;
 bool g_opt_logged = false;
 
@@ -113,6 +128,14 @@ struct State {
     FVector cam_apply{};        // offset applied this frame
     float cam_t = 1.0f;         // progress of the current move (1 = done)
     std::uint64_t cam_blends = 0, cam_cuts = 0;
+    // Camera collision of the level boom (once per frame).
+    std::uint64_t col_frame = ~0ull;
+    bool col_valid = false;     // col_len holds last frame's length
+    double col_len = 0.0;       // boom length applied (cm), shortens at once, lengthens over about 0.3 s
+    double col_boom = 0.0;      // the level boom's own length this frame (cm)
+    double col_hit = -1.0;      // distance of the hit from the pivot (cm), -1 none
+    FVector col_eye{};
+    std::uint64_t col_traces = 0, col_hits = 0, col_failures = 0;
     double aim_miss = 0.0;      // last distance of the pivot from the camera's line of sight (cm)
     bool follow_camera = false; // the game uses its follow camera
     bool fresh = false;         // stereo just started: no follow-camera history yet
@@ -626,6 +649,149 @@ void hide_meshes(void* pawn, int mode) {
         for (void* c : g.hidden_pass) set_main_pass(c, false);
 }
 
+// Reflected properties of a UStruct (a UFunction's parameters, a script struct's members):
+// UStruct::Children (+0x38) linked through UField::Next (+0x28); UProperty::Offset_Internal
+// at +0x44 (UE 4.18; docs/re/engine.md, "Reflection layouts").
+int prop_offset(void* ustruct, std::string_view name) {
+    void* f = nullptr;
+    if (!uobj::read(static_cast<std::uint8_t*>(ustruct) + 0x38, f)) return -1;
+    for (int guard = 0; f && guard < 64; ++guard) {
+        if (uobj::object_name(f) == name) {
+            std::int32_t off = -1;
+            if (!uobj::read(static_cast<std::uint8_t*>(f) + 0x44, off)) return -1;
+            return off;
+        }
+        if (!uobj::read(static_cast<std::uint8_t*>(f) + 0x28, f)) return -1;
+    }
+    return -1;
+}
+
+// "name@offset ..." of every property of a UStruct (for the log).
+std::string prop_list(void* ustruct) {
+    std::string r;
+    void* f = nullptr;
+    if (!uobj::read(static_cast<std::uint8_t*>(ustruct) + 0x38, f)) return r;
+    for (int guard = 0; f && guard < 64; ++guard) {
+        std::int32_t off = -1;
+        uobj::read(static_cast<std::uint8_t*>(f) + 0x44, off);
+        r += std::format("{}{}@{}", r.empty() ? "" : " ", uobj::object_name(f), off);
+        if (!uobj::read(static_cast<std::uint8_t*>(f) + 0x28, f)) break;
+    }
+    return r;
+}
+
+void step_trace_lookup() {
+    if (g_trace_failed || !g_trace_lookup || g_trace_layout.ok) return;
+    if (!g_trace_lookup->ready()) {
+        if (g_trace_lookup->passes() >= 3) {
+            for (const auto& e : g_trace_lookup->entries())
+                if (!e.obj) log::warn("player: {} ({} {}) not found; no camera collision", e.name, e.outer, e.cls);
+            g_trace_failed = true;
+            return;
+        }
+        g_trace_lookup->step();
+        if (!g_trace_lookup->ready()) return;
+    }
+    void* fn = g_trace_lookup->get(kLineTrace);
+    TraceLayout l;
+    std::int32_t size = 0;
+    uobj::read(static_cast<std::uint8_t*>(fn) + 0x40, size);
+    l.size = size;
+    l.world = prop_offset(fn, "WorldContextObject");
+    l.start = prop_offset(fn, "Start");
+    l.end = prop_offset(fn, "End");
+    l.channel = prop_offset(fn, "TraceChannel");
+    l.complex = prop_offset(fn, "bTraceComplex");
+    l.ignore = prop_offset(fn, "ActorsToIgnore");
+    l.debug = prop_offset(fn, "DrawDebugType");
+    l.hit = prop_offset(fn, "OutHit");
+    l.ignore_self = prop_offset(fn, "bIgnoreSelf");
+    l.ret = prop_offset(fn, "ReturnValue");
+    l.hit_time = prop_offset(g_trace_lookup->get(kHitResultStruct), "Time");
+    // Seen in 1.0.0.7: the first FVector's name does not compare as "Start"; it is the
+    // 12 bytes before End, after the 8-byte world context.
+    const bool start_inferred = l.start < 0 && l.end == 20;
+    if (start_inferred) l.start = 8;
+    l.ok = l.size > 0 && l.size <= 1024 && l.world == 0 && l.start > 0 && l.end == l.start + 12 && l.channel >= 0 && l.complex >= 0 &&
+           l.ignore >= 0 && l.debug >= 0 && l.hit >= 0 && l.ignore_self >= 0 && l.ret >= 0 && l.ret < l.size && l.hit_time >= 0 &&
+           l.hit + l.hit_time + 4 <= l.size;
+    log::info("player: camera collision: {} at {} on {}, parameters {} bytes: world {} start {} end {} channel {} complex {} ignore {} debug {} "
+              "hit {} (Time +{}) ignore_self {} return {}{}",
+              uobj::path_of(fn), fn, uobj::path_of(g_trace_lookup->get(kKismetCdo)), l.size, l.world, l.start, l.end, l.channel, l.complex,
+              l.ignore, l.debug, l.hit, l.hit_time, l.ignore_self, l.ret, l.ok ? "" : "; layout not as expected, no camera collision");
+    log::info("player: camera collision: LineTraceSingle parameters: {}{}", prop_list(fn), start_inferred ? " (Start taken as End - 12)" : "");
+    if (!l.ok) {
+        g_trace_failed = true;
+        return;
+    }
+    g_trace_layout = l;
+}
+
+// One line trace from `from` to `to`, the pawn ignored. Returns the hit's fraction of the
+// line (0..1), or -1 for no hit, -2 for a failed call.
+double line_trace(const math::Vec& from, const math::Vec& to) {
+    const TraceLayout& l = g_trace_layout;
+    alignas(16) std::uint8_t params[1024]{};
+    std::memcpy(params + l.world, &g.pawn, sizeof(void*));
+    const float a[3] = {static_cast<float>(from.x), static_cast<float>(from.y), static_cast<float>(from.z)};
+    const float b[3] = {static_cast<float>(to.x), static_cast<float>(to.y), static_cast<float>(to.z)};
+    std::memcpy(params + l.start, a, sizeof(a));
+    std::memcpy(params + l.end, b, sizeof(b));
+    params[l.channel] = static_cast<std::uint8_t>(g_trace_channel.load());
+    params[l.complex] = 0;
+    params[l.debug] = 0;  // EDrawDebugTrace::None
+    params[l.ignore_self] = 1;
+    ++g.calls;
+    ++g.col_traces;
+    if (!uobj::call(g_trace_lookup->get(kKismetCdo), g_trace_lookup->get(kLineTrace), params)) {
+        ++g.call_failures;
+        ++g.col_failures;
+        return -2.0;
+    }
+    if (params[l.ret] == 0) return -1.0;
+    float t = 1.0f;
+    std::memcpy(&t, params + l.hit + l.hit_time, sizeof(t));
+    if (!(t >= 0.0f && t <= 1.0f)) return -1.0;
+    ++g.col_hits;
+    return t;
+}
+
+// The level boom shortened in front of what is between the pivot and the eyes: one trace
+// per frame from the pivot to the eye position (plus the margin); a hit shortens the boom
+// at once, and it lengthens back over about 0.3 s, as the game's own camera collision does.
+FVector collide_boom(const math::Vec& pivot, const FVector& eye) {
+    const Settings& s = g_settings;
+    if (g.col_frame == g.frame) return g.col_eye;
+    const bool contiguous = g.col_valid && g.col_frame + 1 == g.frame;
+    g.col_frame = g.frame;
+    const math::Vec d{eye.X - pivot.x, eye.Y - pivot.y, eye.Z - pivot.z};
+    const double len = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+    g.col_boom = len;
+    g.col_hit = -1.0;
+    if (!s.collision.load() || !g_trace_layout.ok || len < 1.0) {
+        g.col_valid = false;
+        g.col_len = len;
+        g.col_eye = eye;
+        return eye;
+    }
+    const double margin = s.collision_margin.load();
+    const math::Vec n{d.x / len, d.y / len, d.z / len};
+    const double reach = len + margin;
+    const double t = line_trace(pivot, math::Vec{pivot.x + n.x * reach, pivot.y + n.y * reach, pivot.z + n.z * reach});
+    double want = len;
+    if (t >= 0.0) {
+        g.col_hit = t * reach;
+        want = std::clamp(g.col_hit - margin, 0.0, len);
+    }
+    if (!contiguous || want <= g.col_len) g.col_len = want;
+    else g.col_len += (want - g.col_len) * (1.0 - std::exp(-g.dt / 0.1));  // about 95 % in 0.3 s
+    g.col_len = std::min(g.col_len, len);
+    g.col_valid = true;
+    g.col_eye = FVector{static_cast<float>(pivot.x + n.x * g.col_len), static_cast<float>(pivot.y + n.y * g.col_len),
+                        static_cast<float>(pivot.z + n.z * g.col_len)};
+    return g.col_eye;
+}
+
 // The game's own camera actor in normal play: an object named EndCameraActor of class
 // CameraActor exactly (a cutscene's CineCameraActor or any other camera is not).
 bool is_game_camera_actor(void* o) {
@@ -780,6 +946,11 @@ void init(std::uint8_t* object_array, std::uint8_t* name_pool, void** gengine) {
         {"GetParentBone", "SkinnedMeshComponent", "Function"},
     });
     g_pass_lookup = new uobj::Lookup({{"SetRenderInMainPass", "PrimitiveComponent", "Function"}});
+    g_trace_lookup = new uobj::Lookup({
+        {"LineTraceSingle", "KismetSystemLibrary", "Function"},
+        {"Default__KismetSystemLibrary", "", "KismetSystemLibrary"},
+        {"HitResult", "", "ScriptStruct"},
+    });
     if (!g_battle_class.empty()) g_battle_lookup = new uobj::Lookup({{g_battle_function, g_battle_class, "Function"}});
 }
 
@@ -799,6 +970,7 @@ void tick(bool stereo, float delta_seconds) {
         g_pass_lookup->step();
         if (g_pass_lookup->passes() >= 3 && !g_pass_lookup->ready()) log::warn("player: PrimitiveComponent.SetRenderInMainPass not found");
     }
+    step_trace_lookup();
     if (g_opt_lookup && !g_opt_lookup->ready() && g_opt_lookup->passes() < 3) {
         g_opt_lookup->step();
         if (g_opt_lookup->passes() >= 2 && !g_opt_logged) {
@@ -909,14 +1081,16 @@ void tick(bool stereo, float delta_seconds) {
         "pc {} pawn {} ({}) view_target {} ({}) target_ok {} aim_miss {:.1f} orbit_frames {} follow {} stereo {} first_person {} combat {} blend {:.2f} hidden {} "
         "bones {} pass {} bob {} toggles {} (pad {} of {} polls) auto {} calls {} failed {} pawn_loc ({:.1f} {:.1f} {:.1f}) head {} {} ({:.1f} {:.1f} {:.1f}) failures {} "
         "battle_signal {} raw {} value {:#x} reads {} changes {} in_battle {} hold {} orbit_s {:.2f} flips {} cam_kind {} cam_t {:.2f} cam_off {:.1f} "
-        "blends {} cuts {} mode {}",
+        "blends {} cuts {} collision {} boom {:.1f} hit {:.1f} applied {:.1f} traces {} hits {} trace_failures {} mode {}",
         g.pc, g.pawn, g.pawn ? uobj::object_name(uobj::class_of(g.pawn)) : "", g.view_target,
         g.view_target ? uobj::object_name(g.view_target) : "", g.target_ok ? 1 : 0, g.aim_miss, g.orbit_frames, g.follow_camera ? 1 : 0, stereo ? 1 : 0, g.first_person ? 1 : 0,
         g.combat ? 1 : 0, g.blend, g.hidden.size(), g.hidden_bones.size(), g.hidden_pass.size(), s.head_bob.load() ? 1 : 0, g.toggles, g_pad_toggles.load(), controls::pad_polls(), g.auto_switches, g.calls, g.call_failures, g.pawn_loc.X,
         g.pawn_loc.Y, g.pawn_loc.Z, g.head_bone.empty() ? "-" : g.head_bone, g.head_ok ? "ok" : "no", g.head_loc.X, g.head_loc.Y,
         g.head_loc.Z, g.head_failures, g_battle_class.empty() ? std::string("none") : g_battle_class + "." + g_battle_function, g.battle_raw,
         g.battle_value, g.battle_reads, g.battle_changes, g.in_battle ? 1 : 0, g.battle_hold ? 1 : 0, g.orbit_time, g.follow_flips, g.cam_kind,
-        g.cam_t, dist(g.cam_apply, FVector{}), g.cam_blends, g.cam_cuts, g.last_mode);
+        g.cam_t, dist(g.cam_apply, FVector{}), g.cam_blends, g.cam_cuts,
+        g_trace_layout.ok ? (s.collision.load() ? 1 : 0) : (g_trace_failed ? -1 : 0), g.col_boom, g.col_hit, g.col_len, g.col_traces, g.col_hits,
+        g.col_failures, g.last_mode);
 }
 
 // Logs every change of the camera mode with its reason (one line per change).
@@ -995,6 +1169,7 @@ static bool mode_camera(FRotator& rotation, FVector& location, bool decoupled, b
         const math::Vec pivot{g.pawn_loc.X, g.pawn_loc.Y, g.pawn_loc.Z + s.pivot_height.load()};
         const math::Vec lv = math::level_boom(rotation, location, pivot);
         third = FVector{static_cast<float>(lv.x), static_cast<float>(lv.y), static_cast<float>(lv.z)};
+        if (g.blend < 1.0f) third = collide_boom(pivot, third);  // not needed in first person
     }
     if (g.blend <= 0.0f) {
         location = third;
@@ -1180,6 +1355,13 @@ std::string command(const std::string& args) {
     if (a[0] == "pivot" && a.size() == 2) {
         s.pivot_height = static_cast<float>(std::atof(a[1].c_str()));
         return std::format("ok pivot height {}", s.pivot_height.load());
+    }
+    if (a[0] == "collision" && a.size() >= 2) {
+        // fp collision <0|1> [margin cm] [channel 0 = visibility | 1 = camera]
+        s.collision = a[1] == "1";
+        if (a.size() >= 3) s.collision_margin = std::max(0.0f, static_cast<float>(std::atof(a[2].c_str())));
+        if (a.size() >= 4) g_trace_channel = std::clamp(std::atoi(a[3].c_str()), 0, 31);
+        return std::format("ok collision {} margin {} cm channel {}", s.collision.load() ? 1 : 0, s.collision_margin.load(), g_trace_channel.load());
     }
     if (a[0] == "camblend" && a.size() == 2) {
         s.camera_blend_seconds = std::max(0.0f, static_cast<float>(std::atof(a[1].c_str())));
@@ -1373,7 +1555,7 @@ std::string command(const std::string& args) {
         return r;
     }
     return "err fp status|toggle|first|third|available <0|1>|combat <0|1|auto>|offset <fwd> <right> <up>|hide <none|meshes|head|bones|pass>|"
-           "bob <0|1>|steady <s>|trace <frames> <csv path>|headbone <name|auto>|eye <head|offset>|headoffset <fwd> <right> <up>|boom <level|game>|pivot <cm>|blend <s>|camblend <s>|combatcam <level|game>|aim <cm>|miss <s>|find <name> [outer] [class]|"
+           "bob <0|1>|steady <s>|trace <frames> <csv path>|headbone <name|auto>|eye <head|offset>|headoffset <fwd> <right> <up>|boom <level|game>|pivot <cm>|blend <s>|camblend <s>|collision <0|1> [margin] [channel]|combatcam <level|game>|aim <cm>|miss <s>|find <name> [outer] [class]|"
            "classes <text>|chain <hex address>|funcs <text> [class text]|props <text> [class text]|call <obj|class> <Class.Function> [hex]|"
            "bones [text]";
 }

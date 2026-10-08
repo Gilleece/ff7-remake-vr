@@ -897,6 +897,24 @@ array and the name pool (section 2), and functions are called with `ProcessEvent
 | Mesh visibility | `SceneComponent.SetVisibility(bool bNewVisibility, bool bPropagateToChildren)` (bytes +0, +1), `SceneComponent.IsVisible()` -> bool at +0 | UFunctions, outer `SceneComponent` | LIVE (called without failures; effect: see the first-person captures in `docs/engine-module.md`) |
 | `UStruct::SuperStruct` | `+0x30`, right after `UField::Next` (+0x28): 4.18 has no `FStructBaseChain`. `+0x40` is `PropertiesSize` (int32) followed by `MinAlignment` (int32): read as a pointer it gave `0x100000990` (size 0x990, alignment 1), the bad address of the earlier attempt | `fp chain pawn` prints the whole chain up to `Object` | LIVE |
 
+### Reflection layouts (LIVE)
+
+UE 4.18 layouts used to read a function's parameters and a struct's members by name
+(`prop_offset` in `src/engine/src/player.cpp`): `UStruct::Children` at `+0x38` (the first
+property; after `SuperStruct` at `+0x30`), each property linked through `UField::Next` at
+`+0x28`, and `UProperty::Offset_Internal` at `+0x44` (after `ArrayDim` +0x30, `ElementSize`
++0x34, `PropertyFlags` +0x38, `RepIndex` +0x40). `UStruct::PropertiesSize` (+0x40) is the
+parameter block's size for a `UFunction`.
+
+`KismetSystemLibrary.LineTraceSingle` in 1.0.0.7 (`player: camera collision:` log line):
+`WorldContextObject@0 START@8 End@20 TraceChannel@32 bTraceComplex@33 ActorsToIgnore@40
+DrawDebugType@56 OutHit@64 bIgnoreSelf@200 TraceColor@204 TraceHitColor@220 DrawTime@236
+ReturnValue@240`, `PropertiesSize` 248; `FHitResult::Time` at +4. The first parameter's
+name reads `START` from the name pool (FNames compare without case in the engine and keep
+the first spelling registered), so a case-sensitive lookup of `Start` fails; the mod takes
+it as the 12 bytes before `End`. Called on `/Script/Engine.Default__KismetSystemLibrary`
+through `ProcessEvent` with the pawn as world context.
+
 ### The follow camera's boom (LIVE)
 
 Street outside the first room, camera yaw fixed, pitch changed with the mouse, camera

@@ -363,8 +363,9 @@ session it is `ff7vr.log` in the game's `End\Binaries\Win64` folder).
   climbing, squeezing through gaps and other special animations were not tried.
 - **Third person near obstacles:** the eyes are where the game camera would be at
   zero tilt, so something the tilted camera passed over (a counter, a low wall, a
-  person) can be right in front of your eyes. `[camera] boom = game` uses the game
-  camera's own position instead.
+  person) can be right in front of your eyes. The view now moves in front of walls and
+  objects in the way (`[camera] collision = 1`; not yet tried against a wall or a
+  person in play). `[camera] boom = game` uses the game camera's own position instead.
 - **The desktop window** shows a crop of the left eye, not the full picture.
 - **Some effects stay as in the flat game:** the vignette (darker image corners),
   and the game's depth of field in cutscenes. Camera motion blur and chromatic

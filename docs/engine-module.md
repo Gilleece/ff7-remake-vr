@@ -214,6 +214,43 @@ Dev commands: `fp combatcam level|game`, `fp camblend <s>`, `fp miss <s>`, and
 `fp aim <cm>` (the aim tolerance; `fp aim 1` makes every frame miss, which is how the
 transitions were tested without a battle).
 
+### Camera collision
+
+The game's own camera collision shortens its boom along the pitched direction only, so the
+level boom's position (zero pitch) can be inside or right behind something the pitched
+camera passed over. With `[camera] collision = 1` (default) the level boom is traced each
+frame in third person: one `KismetSystemLibrary.LineTraceSingle` from the pivot to the eye
+position plus `collision_margin` (20 cm), called through `ProcessEvent` on the library's
+class default object with the pawn as world context and `bIgnoreSelf` (the pawn is
+ignored), on the visibility trace channel (`TraceTypeQuery1`; see below). A hit puts the eyes on the line
+`collision_margin` short of it; the boom shortens at once and lengthens back over about
+0.3 s (an exponential with a 0.1 s time constant), as the game's camera does. Not traced in
+full first person or with `boom = game` (the game's camera is collided by the game).
+
+The function's parameter offsets and `FHitResult::Time` are read from reflection at start
+(`docs/re/engine.md`, section 11, "Reflection layouts") and logged once:
+`player: camera collision: ... parameters <n> bytes: world 0 start 8 end 20 ...`; if a
+parameter is missing or the layout is not as expected the collision stays off with a
+warning. The status shows `collision` (1 on, 0 off, -1 not available), `boom` (the level
+boom's length), `hit` (distance of the hit from the pivot, -1 none), `applied` (the length
+used), `traces`, `hits` and `trace_failures`. Dev command:
+`fp collision <0|1> [margin cm] [channel: 0 visibility, 1 camera]`.
+
+Measured (Null backend, street of the Sector 7 slums save, third person, `fp status`):
+the function and its layout were found at start (log above: parameters 248 bytes, `OutHit`
+at 64 with `Time` at +4, `ReturnValue` at 240); about 2000 traces over 30 s with no failed
+call. At the normal pivot (55 cm) nothing was hit in the street, walking backwards 11 m and
+turning the camera through 360 degrees in eight steps, on either channel (the street is
+wide; the eyes stayed at the level boom's 369 to 396 cm). With the pivot lowered to 60 cm
+below the pawn's location (`fp pivot -60`, the trace close to the ground) and a 300 cm
+margin, the visibility channel hit kerbs and props at some yaws: the applied length went
+406.0 -> 347.4 cm in one frame and back to 403.0 after 0.3 s and 405.5 after 0.6 s; in a
+second sweep 406.0 -> 270.3, then 398.6 after 0.3 s and 405.6 after 0.6 s. The camera
+channel (`TraceTypeQuery2`) hit nothing in the same sweeps, so the default trace channel is
+visibility (`TraceTypeQuery1`). Not yet shown: a real wall or person behind the level boom
+in play (no such spot was reached with scripted input), and how often visibility hits small
+props or foliage in other areas.
+
 ### Camera modes: evidence
 
 Street and first room of the Sector 7 slums save, Null backend, Quest 3 class asymmetric
@@ -675,6 +712,8 @@ filter without a pad), and in the render module `snap <deg>`.
 | `miss_seconds` | `1.5` | seconds the camera must look away from the pivot before the game camera takes over |
 | `combat` | `level` | `level`: in a battle the level boom holds while the battle camera frames the enemies (see "Battle camera"); `game`: the aim test as outside battles |
 | `blend_seconds` | `0.35` | seconds a change between the camera modes takes (0 = cut); a change of view target is always a cut |
+| `collision` | `1` | the level boom is shortened in front of what is between the character and the eyes (see "Camera collision") |
+| `collision_margin` | `20` | cm kept between the eyes and what the collision trace hit |
 
 `[first_person]`:
 
