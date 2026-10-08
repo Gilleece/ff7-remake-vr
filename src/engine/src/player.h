@@ -41,6 +41,9 @@ struct Settings {
     std::atomic<bool> eye_head{true};        // [first_person] eye = head (the head bone) | offset
     std::atomic<float> head_forward{2.0f}, head_right{0.0f}, head_up{0.0f};  // [first_person] head_offset (cm, from the eye bones or the head bone)
     std::atomic<int> hide{1};                // [first_person] hide: 0 none, 1 the character's skeletal meshes
+    std::atomic<bool> head_bob{false};       // [first_person] head_bob: 1 = the view follows every step of the head
+    std::atomic<float> steady_seconds{0.3f}; // [first_person] steady_seconds: time constant of each of the two filter
+                                             // stages that take the step motion out of the head's offset (head_bob = 0)
     std::atomic<int> toggle_key{0x24};       // [first_person] toggle_key (virtual key, 0 = none); default Home
     std::atomic<float> blend_seconds{0.35f};
     std::atomic<bool> pad_toggle{true};      // [first_person] pad_toggle: View/Back + right stick click

@@ -178,6 +178,8 @@ void read_camera_settings(const Config& cfg) {
     p.blend_seconds = static_cast<float>(cfg.get_float("first_person", "blend_seconds", p.blend_seconds.load()));
     p.toggle_key = static_cast<int>(cfg.get_int("first_person", "toggle_key", p.toggle_key.load()));
     p.hide = cfg.get_string("first_person", "hide", "meshes") == "none" ? 0 : 1;
+    p.head_bob = cfg.get_bool("first_person", "head_bob", p.head_bob.load());
+    p.steady_seconds = std::clamp(static_cast<float>(cfg.get_float("first_person", "steady_seconds", p.steady_seconds.load())), 0.01f, 5.0f);
     p.pad_toggle = cfg.get_bool("first_person", "pad_toggle", p.pad_toggle.load());
     p.eye_head = cfg.get_string("first_person", "eye", "head") != "offset";
     player::set_battle_signal(cfg.get_string("first_person", "battle_signal", kBattleSignal));

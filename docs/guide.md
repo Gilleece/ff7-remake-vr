@@ -213,7 +213,9 @@ the combinations do not apply to it (use the keys).
 
 3D starts in first person outside battles. First person puts the view between the
 character's eyes, hides the character and the sword, and blends over in about a
-third of a second. It only applies while the game's normal follow camera is active:
+third of a second. The view does not bob with Cloud's steps: it follows his movement at
+once and slow changes of his head's height (crouching, climbing) about half a second
+late. `[first_person] head_bob = 1` brings the step motion back. It only applies while the game's normal follow camera is active:
 during a scripted camera shot the game's camera is used as it is. A battle switches
 to third person and its end back to first person; a manual switch lasts until the
 next battle starts or ends.
@@ -337,8 +339,8 @@ session it is `ff7vr.log` in the game's `End\Binaries\Win64` folder).
   or both stick clicks (L3+R3), and send the log. If it misfires outside battles,
   set `battle_signal =` (empty) and `default = 0`.
 - **First person:** the whole character is hidden, probably its shadow too; the view
-  stays level and does not follow the head's animation; climbing, squeezing through
-  gaps and other special animations were not tried.
+  stays level and, with `head_bob = 0` (the default), does not bob with the steps;
+  climbing, squeezing through gaps and other special animations were not tried.
 - **Third person near obstacles:** the eyes are where the game camera would be at
   zero tilt, so something the tilted camera passed over (a counter, a low wall, a
   person) can be right in front of your eyes. `[camera] boom = game` uses the game
@@ -387,6 +389,7 @@ To narrow a problem down, change one setting at a time and start a new session:
 | uncomfortable camera height or movement | `[camera] boom = game`, then `[stereo] decoupled_pitch = 0` |
 | first person in a battle, or third person outside one | `[first_person] battle_signal =` (empty) and `default = 0` |
 | first person at the wrong height or inside the head | `[first_person] eye = offset` (a fixed height above the character's position instead of its eyes) |
+| first person: the view lags when Cloud crouches or climbs | `[first_person] steady_seconds = 0.15` (follows faster, a little more step motion), or `head_bob = 1` |
 | anything else in first person | `[first_person] enabled = 0` |
 | stutter or low frame rate | `[xr] resolution_scale = 0.8` |
 | the headset stays on its runtime's own view although the game runs | look in the log for `OpenXR runtime (auto)`: if it chose another runtime than the headset's, pin the right one with `[xr] runtime`. Otherwise quit the game, wait for the launcher window to finish (it closes by itself), start again; if that does not help, restart the headset's PC app (for example the Virtual Desktop Streamer) |

@@ -233,10 +233,21 @@ captures after the toggles (`h05_third_toggled`, `h08_third_after_toggles`,
 - **Eye**: the point between the character's eye bones (`L_Eye` and `R_Eye`; without them
   a bone named `head` or containing `head`, not an end or helper bone), found once per pawn
   by name over its skeletal meshes (`SkinnedMeshComponent.GetNumBones` / `GetBoneName`) and
-  read every frame after the world has ticked (`SceneComponent.GetSocketLocation`). Its offset from the pawn's location is smoothed over
-  about 80 ms so animation jitter does not shake the view, while the pawn's own movement is
-  followed without delay. `head_offset` (forward, right, up, in the camera's yaw frame) is
-  added. When the bone cannot be read (no such bone, a call fails, a location more than
+  read every frame after the world has ticked (`SceneComponent.GetSocketLocation`). The
+  pawn's own movement is followed without delay; only the eyes' offset from the pawn's
+  location is filtered:
+  - `head_bob = 0` (default): the offset goes through two first-order low-pass stages in a
+    row, each with the time constant `steady_seconds` (0.3 s). The walk and run cycles move
+    the head about 3 times a second (up and down, forward and back) and 1.5 times a second
+    (side to side); the pair keeps about 3 % and 12 % of those, while a slow change of the
+    offset (crouching, climbing, the run's lower and forward-leaning posture, idle sway)
+    arrives about 0.6 s late. The filter works in world axes: when the character turns
+    while running, its forward lean (about 20 cm) swings round with the same delay.
+  - `head_bob = 1`: the first versions' behaviour, the offset smoothed over about 80 ms
+    (animation jitter only), so the view follows every step.
+
+  Both filters run all the time, so `fp bob 0|1` switches without a jump. `head_offset`
+  (forward, right, up, in the camera's yaw frame) is added. When the bone cannot be read (no such bone, a call fails, a location more than
   2.5 m from the pawn) the eyes go to the pawn's location plus `eye_offset` for that frame.
 - **Body**: with `hide = meshes` (default) every skeletal mesh component owned by the pawn
   that is visible is hidden (`SetVisibility(false)`, not propagated to attached components),
@@ -248,6 +259,25 @@ captures after the toggles (`h05_third_toggled`, `h08_third_after_toggles`,
   Finding the meshes scans the object array each time first person starts (a one-off cost
   of a few milliseconds on the game thread), so meshes added since the last time (equipment)
   are included. When the game exits nothing needs restoring (visibility is not saved).
+- **Head bob, measured** (`captures/fp/run1`, Null backend, Sector 7 slums street, 90 fps;
+  `fp trace` writes each first-person frame's pawn location and the eyes' raw, 80 ms and
+  steady offsets to a CSV; analysis after removing the 0.5 s moving average). Standing:
+  the eyes 75.1 cm above the pawn's location, still within 0.01 cm. Running (W held, 540 to
+  590 cm/s, two segments of about 4 s): the pawn's location does not bob (its height
+  varies by 0.00 cm); the eyes' raw offset bobs 15.4 / 18.1 cm peak to peak vertically
+  (RMS 3.2 / 3.5 cm) at 3.0 Hz, 8.7 / 13.1 cm sideways (RMS 1.7 / 1.9) at 1.4 Hz and
+  10.4 / 19.9 cm forward and back (RMS 2.0 / 3.0); the run also lowers the eyes from 75 to
+  about 60 cm and puts them about 22 cm ahead of the pawn's location. What reached the view:
+
+  | | vertical p-p (RMS) | sideways p-p (RMS) | forward p-p (RMS) |
+  |---|---|---|---|
+  | raw eye bones | 15.4 / 18.1 (3.2 / 3.5) cm | 8.7 / 13.1 (1.7 / 1.9) cm | 10.4 / 19.9 (2.0 / 3.0) cm |
+  | `head_bob = 1` (80 ms) | 9.6 / 11.5 (2.0 / 2.2) cm | 6.3 / 8.7 (1.3 / 1.5) cm | 7.8 / 14.4 (1.4 / 2.3) cm |
+  | `head_bob = 0` (2 x 0.3 s) | 1.9 / 2.1 (0.29 / 0.31) cm | 0.9 / 1.2 (0.18 / 0.21) cm | 2.1 / 2.4 (0.23 / 0.48) cm |
+
+  The remaining peak-to-peak values are mostly the start and stop of the run (the change
+  of posture), not the steps. Dev commands: `fp bob 0|1`, `fp steady <s>`,
+  `fp trace <frames> <csv path>`.
 - **Blend**: switching between third and first person moves the eye base over
   `blend_seconds` (smoothstep); a switch to or from an authored camera is a cut, as the
   game's own camera cuts there.

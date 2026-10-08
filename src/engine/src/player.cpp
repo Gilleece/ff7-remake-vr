@@ -114,7 +114,8 @@ struct State {
     std::string head_bone;
     bool head_ok = false;         // last frame's head location was valid
     FVector head_loc{};
-    math::Vec head_rel{};         // smoothed head location relative to the pawn's location
+    math::Vec head_rel{};         // smoothed head location relative to the pawn's location (about 80 ms)
+    math::Vec head_slow1{}, head_slow2{};  // the same through two slow stages (steady_seconds each): no step motion
     bool head_rel_valid = false;
     std::uint64_t head_failures = 0;
     // battle signal
@@ -135,6 +136,18 @@ struct State {
 } g;
 std::mutex g_status_mutex;
 std::string g_status_line;
+// Per-frame trace of the first-person eye (fp trace): game thread only.
+struct TraceRow {
+    double t, dt;
+    FVector pawn;
+    math::Vec raw, fast, slow;
+    int bob;
+};
+std::vector<TraceRow> g_trace;
+std::size_t g_trace_want = 0;
+std::string g_trace_path;
+std::chrono::steady_clock::time_point g_trace_start;
+
 
 double dist(const FVector& a, const FVector& b) {
     const double dx = a.X - b.X, dy = a.Y - b.Y, dz = a.Z - b.Z;
@@ -353,18 +366,46 @@ bool head_location(FVector& out) {
     }
     if (g.head_name2) h = lerp(h, h2, 0.5);
     const math::Vec rel{h.X - g.pawn_loc.X, h.Y - g.pawn_loc.Y, h.Z - g.pawn_loc.Z};
+    const auto approach = [](math::Vec& v, const math::Vec& to, double a) {
+        v = math::Vec{v.x + (to.x - v.x) * a, v.y + (to.y - v.y) * a, v.z + (to.z - v.z) * a};
+    };
     if (!g.head_rel_valid) {
-        g.head_rel = rel;
+        g.head_rel = g.head_slow1 = g.head_slow2 = rel;
         g.head_rel_valid = true;
     } else {
-        const double a = 1.0 - std::exp(-static_cast<double>(g.dt) / 0.08);  // about 80 ms
-        g.head_rel = math::Vec{g.head_rel.x + (rel.x - g.head_rel.x) * a, g.head_rel.y + (rel.y - g.head_rel.y) * a,
-                               g.head_rel.z + (rel.z - g.head_rel.z) * a};
+        const double dt = static_cast<double>(g.dt);
+        approach(g.head_rel, rel, 1.0 - std::exp(-dt / 0.08));  // about 80 ms: animation jitter only
+        // Without head bob: two slow first-order stages in a row. The walk and run cycles move
+        // the head 2 to 3 times a second; the pair passes slow changes of the head's offset
+        // (crouching, climbing, leaning) with a delay of about twice steady_seconds.
+        const double a = 1.0 - std::exp(-dt / std::max(0.01, static_cast<double>(g_settings.steady_seconds.load())));
+        approach(g.head_slow1, rel, a);
+        approach(g.head_slow2, g.head_slow1, a);
+    }
+    const bool bob = g_settings.head_bob.load();
+    const math::Vec& use = bob ? g.head_rel : g.head_slow2;
+    if (g_trace_want > 0) {
+        g_trace.push_back(TraceRow{std::chrono::duration<double>(std::chrono::steady_clock::now() - g_trace_start).count(),
+                                   static_cast<double>(g.dt), g.pawn_loc, rel, g.head_rel, g.head_slow2, bob ? 1 : 0});
+        if (g_trace.size() >= g_trace_want) {
+            FILE* f = nullptr;
+            if (fopen_s(&f, g_trace_path.c_str(), "w") == 0 && f) {
+                std::fputs("t,dt,pawn_x,pawn_y,pawn_z,raw_x,raw_y,raw_z,fast_x,fast_y,fast_z,slow_x,slow_y,slow_z,bob\n", f);
+                for (const auto& r : g_trace)
+                    std::fprintf(f, "%.5f,%.5f,%.2f,%.2f,%.2f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d\n", r.t, r.dt, r.pawn.X, r.pawn.Y,
+                                 r.pawn.Z, r.raw.x, r.raw.y, r.raw.z, r.fast.x, r.fast.y, r.fast.z, r.slow.x, r.slow.y, r.slow.z, r.bob);
+                std::fclose(f);
+                log::info("player: trace of {} frames written to {}", g_trace.size(), g_trace_path);
+            } else {
+                log::warn("player: trace could not be written to {}", g_trace_path);
+            }
+            g_trace.clear();
+            g_trace_want = 0;
+        }
     }
     g.head_loc = h;
     g.head_ok = true;
-    out = FVector{static_cast<float>(g.pawn_loc.X + g.head_rel.x), static_cast<float>(g.pawn_loc.Y + g.head_rel.y),
-                  static_cast<float>(g.pawn_loc.Z + g.head_rel.z)};
+    out = FVector{static_cast<float>(g.pawn_loc.X + use.x), static_cast<float>(g.pawn_loc.Y + use.y), static_cast<float>(g.pawn_loc.Z + use.z)};
     return true;
 }
 
@@ -674,11 +715,11 @@ void tick(bool stereo, float delta_seconds) {
     std::lock_guard lock(g_status_mutex);
     g_status_line = std::format(
         "pc {} pawn {} ({}) view_target {} ({}) target_ok {} aim_miss {:.1f} orbit_frames {} follow {} stereo {} first_person {} combat {} blend {:.2f} hidden {} "
-        "toggles {} (pad {} of {} polls) auto {} calls {} failed {} pawn_loc ({:.1f} {:.1f} {:.1f}) head {} {} ({:.1f} {:.1f} {:.1f}) failures {} "
+        "bob {} toggles {} (pad {} of {} polls) auto {} calls {} failed {} pawn_loc ({:.1f} {:.1f} {:.1f}) head {} {} ({:.1f} {:.1f} {:.1f}) failures {} "
         "battle_signal {} raw {} value {:#x} reads {} changes {} mode {}",
         g.pc, g.pawn, g.pawn ? uobj::object_name(uobj::class_of(g.pawn)) : "", g.view_target,
         g.view_target ? uobj::object_name(g.view_target) : "", g.target_ok ? 1 : 0, g.aim_miss, g.orbit_frames, g.follow_camera ? 1 : 0, stereo ? 1 : 0, g.first_person ? 1 : 0,
-        g.combat ? 1 : 0, g.blend, g.hidden.size(), g.toggles, g_pad_toggles.load(), controls::pad_polls(), g.auto_switches, g.calls, g.call_failures, g.pawn_loc.X,
+        g.combat ? 1 : 0, g.blend, g.hidden.size(), s.head_bob.load() ? 1 : 0, g.toggles, g_pad_toggles.load(), controls::pad_polls(), g.auto_switches, g.calls, g.call_failures, g.pawn_loc.X,
         g.pawn_loc.Y, g.pawn_loc.Z, g.head_bone.empty() ? "-" : g.head_bone, g.head_ok ? "ok" : "no", g.head_loc.X, g.head_loc.Y,
         g.head_loc.Z, g.head_failures, g_battle_class.empty() ? std::string("none") : g_battle_class + "." + g_battle_function, g.battle_raw,
         g.battle_value, g.battle_reads, g.battle_changes, g.last_mode);
@@ -826,6 +867,28 @@ std::string command(const std::string& args) {
     if (a[0] == "hide" && a.size() == 2) {
         s.hide = a[1] == "meshes" ? 1 : 0;
         return std::format("ok hide {}", s.hide.load());
+    }
+    if (a[0] == "bob" && a.size() == 2) {
+        s.head_bob = a[1] == "1";
+        return std::format("ok head bob {}", s.head_bob.load() ? 1 : 0);
+    }
+    if (a[0] == "steady" && a.size() == 2) {
+        s.steady_seconds = std::clamp(static_cast<float>(std::atof(a[1].c_str())), 0.01f, 5.0f);
+        return std::format("ok steady {} s", s.steady_seconds.load());
+    }
+    if (a[0] == "trace" && a.size() == 3) {
+        // fp trace <frames> <csv path>: the first-person eye's raw, smoothed and steady offsets
+        // from the pawn, and the pawn's location, for the next frames in first person.
+        const std::size_t frames = std::clamp<std::size_t>(std::strtoul(a[1].c_str(), nullptr, 10), 1, 20000);
+        const std::string path = a[2];
+        return on_game_thread([frames, path]() -> std::string {
+            g_trace.clear();
+            g_trace.reserve(frames);
+            g_trace_path = path;
+            g_trace_start = std::chrono::steady_clock::now();
+            g_trace_want = frames;
+            return std::format("ok tracing {} frames to {}", frames, path);
+        });
     }
     if (a[0] == "boom" && a.size() == 2) {
         s.level_boom = a[1] == "level";
@@ -1011,7 +1074,7 @@ std::string command(const std::string& args) {
         return r;
     }
     return "err fp status|toggle|first|third|available <0|1>|combat <0|1|auto>|offset <fwd> <right> <up>|hide <none|meshes>|"
-           "eye <head|offset>|headoffset <fwd> <right> <up>|boom <level|game>|pivot <cm>|blend <s>|find <name> [outer] [class]|"
+           "bob <0|1>|steady <s>|trace <frames> <csv path>|eye <head|offset>|headoffset <fwd> <right> <up>|boom <level|game>|pivot <cm>|blend <s>|find <name> [outer] [class]|"
            "classes <text>|chain <hex address>|funcs <text> [class text]|props <text> [class text]|call <obj|class> <Class.Function> [hex]|"
            "bones [text]";
 }
