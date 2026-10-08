@@ -9,6 +9,7 @@
 #include "xinput_proxy.h"
 
 #include "ff7vr/core/config.h"
+#include "ff7vr/core/graphics_profile.h"
 #include "ff7vr/core/crash.h"
 #include "ff7vr/core/hook.h"
 #include "ff7vr/core/log.h"
@@ -30,6 +31,7 @@ using namespace ff7vr;
 constexpr char kVersion[] = "0.1.0";
 
 Config g_config;
+std::vector<std::string> g_profile_log;  // [graphics] profile, logged once the log is open
 HANDLE g_bootstrap = nullptr;
 
 // Result of the Direct3D 11 check made in DllMain, logged once the log is open.
@@ -61,6 +63,7 @@ void load_config_early(const std::filesystem::path& ini) {
     }
     CloseHandle(f);
     g_config.load_from_string(text);
+    g_profile_log = graphics_profile::apply(g_config);
 }
 
 // The mod's D3D11 hooks need the engine to choose Direct3D 11; without a
@@ -130,6 +133,7 @@ void log_identity(const std::filesystem::path& dll_dir) {
     }
     log::info("config: {} ({})", log::narrow((dll_dir / L"ff7vr.ini").wstring()),
               g_config.loaded() ? "loaded" : "not found, using defaults");
+    for (const auto& line : g_profile_log) log::info("{}", line);
     for (const auto& line : g_config.dump()) log::info("config:   {}", line);
 }
 

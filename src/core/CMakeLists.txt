@@ -6,6 +6,7 @@ add_library(ff7vr_core STATIC
     hook.cpp
     crash.cpp
     dev_commands.cpp
+    graphics_profile.cpp
 )
 target_include_directories(ff7vr_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(ff7vr_core PUBLIC minhook PRIVATE version)

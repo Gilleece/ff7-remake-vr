@@ -11,6 +11,7 @@ add_library(ff7vr_engine STATIC
     src/rhi_command.cpp
     src/mirror.cpp
     src/cvars.cpp
+    src/graphics.cpp
     src/fixes.cpp
     src/commands.cpp
     src/ui_layer.cpp

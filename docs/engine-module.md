@@ -923,6 +923,52 @@ speed, `r.MotionBlurQuality = 0` (no cost difference) removes the game's camera 
 which in a headset smears the image while the camera turns; not applied either (no capture
 of it in motion yet).
 
+## Graphics profiles
+
+`[graphics] profile = quality | balanced | performance | custom` (default `custom`: nothing
+applied). The bundles are tables in `src/core/graphics_profile.cpp`; the loader applies
+them right after reading the ini (`graphics_profile::apply`), filling only the keys the ini
+does not set, so every module reads them as ordinary ini values and an explicit key always
+wins. The log says `graphics: profile <name>: applied ...` and `... left to the ini ...`.
+
+| Key | quality | balanced | performance |
+|---|---|---|---|
+| `[foveation] preset` | quality | performance | performance |
+| `[stereo] render_scale` | 1.0 | 1.0 | 0.9 |
+| `r.StaticMeshLODDistanceScale`, `r.SkeletalMeshLODBias`, `foliage.LODDistanceScale`, `r.ViewDistanceScale` | 0.5, -1, 2, 1.5 | 0.5, -1, 2, 1.5 | 1, 0, 1, 1 (engine defaults) |
+| `r.Shadow.MaxCSMResolution`, `r.Shadow.CSM.MaxCascades` | - | 2048, 3 | 2048, 3 |
+| `r.TranslucencyLightingVolumeDim` | - | 32 | 32 |
+| `r.VolumetricFog` | - | - | 0 |
+
+The console variables go into `[stereo_cvars]` (held only while stereo renders).
+`r.BloomQuality` is left alone by every profile.
+
+Live: `graphics profile <name>` (dev pipe) holds the profile's console variables through
+`cvar::hold_in_stereo` (saved and put back when stereo stops, like `[stereo_cvars]`), and
+sets foveation and render scale through `fov preset` and `dynres scale`. A variable the
+previous profile held (live, or filled at start-up) and the new one does not list is
+released: its saved game value is put back at once (`cvar::release_in_stereo`). The live
+command overrides explicit ini keys for the session. `graphics status` names the last
+profile applied live.
+
+Measured (`tools/bench/vr-perf-steps/profiles.ps1` through `vr-perf-session.ps1`, Null
+backend at 3072x3264 per eye without pacing, the player's ini plus `r.BloomQuality 0`, the
+latest save in the slums street, standing, profiles switched live in one session; captures
+for each profile beside `results.json` in the run's folder under `captures/perf/`):
+
+| Window | Frame p50 / p95 (ms) | Scene GPU p50 (ms) |
+|---|---|---|
+| custom (the ini: foveation performance, LOD lines) | 8.43 / 14.39 (first window, start-up spikes) | 7.01 |
+| quality | 8.86 / 9.95; repeat 8.85 / 10.20 | 7.68, 7.67 |
+| balanced | 7.91 / 9.14; repeat 8.10 / 11.44 | 6.77, 6.79 |
+| performance | 6.38 / 7.37 | 5.42 |
+
+Checked with `cvar get` after each switch: performance sets `r.VolumetricFog` 0,
+cascades 3, `r.StaticMeshLODDistanceScale` 1; switching back to balanced puts the fog back
+to 1, and then to quality the cascades back to 5 (the game's value). The start-up path is
+covered by `ff7vr_core_tests` (explicit key wins, case-insensitive names, custom applies
+nothing); a start with a profile set in the ini was not run in the game.
+
 ## Flat-screen camera effects
 
 `[stereo] comfort_cvars = 1` (default) holds these console variables while the engine

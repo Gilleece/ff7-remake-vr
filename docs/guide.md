@@ -420,6 +420,24 @@ To narrow a problem down, change one setting at a time and start a new session:
 
 ## Performance
 
+`[graphics] profile` in `ff7vr.ini` picks a bundle of speed settings in one line
+(`custom`, the default, applies nothing). A key you set yourself in the ini always wins
+over the profile; the log's `graphics:` lines say what the profile applied and what it
+left alone. Measured on the development PC (RTX 5080) without a headset, 3072x3264 per
+eye, standing in the slums street, 5-second windows, median frame time:
+
+| Profile | What it sets | Frame time |
+|---|---|---|
+| `custom` (the shipped ini) | foveation `performance`, the four detail-level lines | 8.4 ms |
+| `quality` | foveation `quality`, the four detail-level lines | 8.9 ms |
+| `balanced` | foveation `performance`, the detail-level lines, sun shadows 2048 with 3 cascades, translucency lighting 32 | 7.9 to 8.1 ms |
+| `performance` | `balanced` without volumetric fog and without the far detail levels, `render_scale` 0.9 | 6.4 ms |
+
+With the shipped ini the profile only adds what the ini leaves out: to let it choose the
+foveation preset and the detail levels, put a `;` in front of `[foveation] preset` and the
+four detail lines under `[stereo_cvars]`. Fog and far detail matter more in open or hazy
+places than in this street.
+
 In the first headset session on the development PC (RTX 5080, Ryzen 7 5800X3D;
 Quest 3 through Virtual Desktop, 3072x3264 per eye) frame times were mostly 11.5 to
 14 ms, and 28 ms during one heavy minute: below 90 Hz at full resolution in places.

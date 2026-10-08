@@ -85,6 +85,10 @@ bool Config::has(std::string_view section, std::string_view key) const {
     return values_.contains(make_key(section, key));
 }
 
+bool Config::set_default(std::string_view section, std::string_view key, std::string_view value) {
+    return values_.try_emplace(make_key(section, key), std::string(value)).second;
+}
+
 std::optional<std::string> Config::get(std::string_view section, std::string_view key) const {
     auto it = values_.find(make_key(section, key));
     if (it == values_.end()) return std::nullopt;

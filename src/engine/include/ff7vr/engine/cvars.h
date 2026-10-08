@@ -44,4 +44,13 @@ void apply_pending();
 void set_stereo_overrides(std::vector<std::pair<std::wstring, std::wstring>> overrides);
 void stereo_overrides(bool on);
 
+// Any thread: adds or replaces one stereo override at run time (the live `graphics profile`
+// command). Applied on the game thread with the next frame; while stereo renders the
+// variable's current value is saved first (if it is not already) and put back when stereo
+// stops, like every [stereo_cvars] entry.
+void hold_in_stereo(std::wstring_view name, std::wstring_view value);
+// Any thread: removes a stereo override at run time; while stereo renders the saved value is
+// put back at once.
+void release_in_stereo(std::wstring_view name);
+
 }  // namespace ff7vr::engine::cvar

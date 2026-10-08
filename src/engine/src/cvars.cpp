@@ -6,6 +6,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <format>
 #include <mutex>
 #include <utility>
@@ -118,14 +119,21 @@ bool set(std::wstring_view name, std::wstring_view value) {
     return true;
 }
 
+namespace {
+std::vector<std::pair<std::wstring, std::wstring>> g_pending_holds;  // g_mutex; an empty value releases
+void apply_holds(std::vector<std::pair<std::wstring, std::wstring>>& holds);
+}  // namespace
+
 void apply_pending() {
-    std::vector<std::pair<std::wstring, std::wstring>> work;
+    std::vector<std::pair<std::wstring, std::wstring>> work, holds;
     {
         std::lock_guard lock(g_mutex);
-        if (g_pending.empty()) return;
+        if (g_pending.empty() && g_pending_holds.empty()) return;
         work.swap(g_pending);
+        holds.swap(g_pending_holds);
     }
     for (auto& [n, v] : work) set_now(n, v);
+    if (!holds.empty()) apply_holds(holds);
 }
 
 namespace {
@@ -158,5 +166,47 @@ void stereo_overrides(bool on) {
         g_saved.clear();
     }
 }
+
+void hold_in_stereo(std::wstring_view name, std::wstring_view value) {
+    if (value.empty()) return;
+    std::lock_guard lock(g_mutex);
+    g_pending_holds.emplace_back(std::wstring(name), std::wstring(value));
+}
+
+void release_in_stereo(std::wstring_view name) {
+    std::lock_guard lock(g_mutex);
+    g_pending_holds.emplace_back(std::wstring(name), std::wstring());
+}
+
+namespace {
+bool same_name(const std::wstring& a, const std::wstring& b) { return _wcsicmp(a.c_str(), b.c_str()) == 0; }
+
+// Game thread.
+void apply_holds(std::vector<std::pair<std::wstring, std::wstring>>& holds) {
+    for (auto& [name, value] : holds) {
+        std::erase_if(g_stereo_overrides, [&](const auto& kv) { return same_name(kv.first, name); });
+        if (value.empty()) {
+            const auto it = std::find_if(g_saved.begin(), g_saved.end(), [&](const auto& kv) { return same_name(kv.first, name); });
+            if (it != g_saved.end()) {
+                if (g_overrides_on) set_now(it->first, it->second);
+                g_saved.erase(it);
+            }
+            continue;
+        }
+        g_stereo_overrides.emplace_back(name, value);
+        if (!g_overrides_on) continue;
+        const bool saved = std::any_of(g_saved.begin(), g_saved.end(), [&](const auto& kv) { return same_name(kv.first, name); });
+        if (!saved) {
+            const auto cur = get(name);
+            if (!cur) {
+                log::warn("cvar: {} not found (graphics profile)", log::narrow(name));
+                continue;
+            }
+            g_saved.emplace_back(name, log::widen(std::format("{}", cur->f)));
+        }
+        set_now(name, value);
+    }
+}
+}  // namespace
 
 }  // namespace ff7vr::engine::cvar

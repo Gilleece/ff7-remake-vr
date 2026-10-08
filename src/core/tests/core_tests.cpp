@@ -8,6 +8,7 @@
 
 #include "ff7vr/core/config.h"
 #include "ff7vr/core/crash.h"
+#include "ff7vr/core/graphics_profile.h"
 #include "ff7vr/core/hook.h"
 #include "ff7vr/core/log.h"
 #include "ff7vr/core/module.h"
@@ -31,6 +32,27 @@ static int g_failures = 0;
             ++g_failures;                                                    \
         }                                                                    \
     } while (0)
+
+static void test_graphics_profile() {
+    ff7vr::Config c;
+    c.load_from_string("[graphics]\nprofile = Balanced\n[foveation]\npreset = quality\n[stereo_cvars]\nr.shadow.maxcsmresolution = 4096\n");
+    auto log = ff7vr::graphics_profile::apply(c);
+    CHECK(log.size() == 2);
+    CHECK(c.get_string("foveation", "preset", "") == "quality");                      // explicit key wins
+    CHECK(c.get_string("stereo_cvars", "r.Shadow.MaxCSMResolution", "") == "4096");    // case-insensitive match
+    CHECK(c.get_string("stereo_cvars", "r.Shadow.CSM.MaxCascades", "") == "3");         // filled by the profile
+    CHECK(c.get_string("stereo", "render_scale", "") == "1.0");
+    ff7vr::Config d;
+    d.load_from_string("[graphics]\nprofile = custom\n");
+    ff7vr::graphics_profile::apply(d);
+    CHECK(!d.has("foveation", "preset"));
+    ff7vr::Config e;
+    e.load_from_string("[graphics]\nprofile = performance\n");
+    ff7vr::graphics_profile::apply(e);
+    CHECK(e.get_string("stereo_cvars", "r.VolumetricFog", "") == "0");
+    CHECK(e.get_string("stereo", "render_scale", "") == "0.9");
+    CHECK(ff7vr::graphics_profile::lines("nonsense").empty());
+}
 
 static void test_pattern() {
     auto p = pattern::Pattern::parse("48 8B ?? 05 ? C3");
@@ -182,6 +204,7 @@ int main(int argc, char** argv) {
     }
     if (argc >= 2 && std::strcmp(argv[1], "crash") == 0) return crash_test();
     test_config();
+    test_graphics_profile();
     test_pattern();
     test_hook();
     std::printf(g_failures ? "FAILED (%d)\n" : "ALL PASSED\n", g_failures);

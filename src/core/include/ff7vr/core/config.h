@@ -41,6 +41,10 @@ public:
     // true/false, 1/0, yes/no, on/off
     bool get_bool(std::string_view section, std::string_view key, bool def) const;
 
+    // Sets the value only if the key is absent (a default from a bundle such as
+    // [graphics] profile); returns true if it was set.
+    bool set_default(std::string_view section, std::string_view key, std::string_view value);
+
     // All entries as "section.key = value" lines, for logging the effective config.
     std::vector<std::string> dump() const;
 

@@ -4,6 +4,7 @@
 #include "engine_internal.h"
 #include "fixes.h"
 #include "gpu_trace.h"
+#include "graphics.h"
 #include "rhi_command.h"
 #include "bloom_fix.h"
 #include "distortion_fix.h"
@@ -297,6 +298,7 @@ bool start(const StartupContext& ctx) {
                           [](std::string_view args) { return controls::command(std::string(args)); });
         dev_commands::add("gpu", "gpu status | gpu names on | gpu trace <prefix> [dump <from> <to>] [scale <n>]: one-frame GPU trace",
                           [](std::string_view args) { return gpu_trace::command(std::string(args)); });
+        graphics::register_command();
         dev_commands::add("re", "re peek <rva> <n> | re poke <rva> <hex bytes>: read or patch the game image",
                           [](std::string_view args) {
                               std::string reply;
