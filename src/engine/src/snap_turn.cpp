@@ -1,6 +1,7 @@
 #include "snap_turn.h"
 
-#include "ff7vr/core/dev_commands.h"
+#include "stereo_device.h"
+
 #include "ff7vr/core/log.h"
 #if FF7VR_ENGINE_WITH_RENDER
 #include "ff7vr/render/render.h"
@@ -17,7 +18,6 @@
 #include <format>
 #include <mutex>
 #include <sstream>
-#include <thread>
 #include <vector>
 
 namespace ff7vr::engine::snap_turn {
@@ -90,7 +90,7 @@ void read_config(const Config& cfg) {
 
 void tick() {
     const int keys[2] = {g_left_key.load(), g_right_key.load()};
-    if (g_degrees.load() == 0.0f || (keys[0] == 0 && keys[1] == 0)) return;
+    if (g_degrees.load() == 0.0f || (keys[0] == 0 && keys[1] == 0) || !device::active()) return;
     DWORD pid = 0;
     GetWindowThreadProcessId(GetForegroundWindow(), &pid);
     const bool focus = pid == GetCurrentProcessId();
@@ -108,7 +108,8 @@ void tick() {
 void filter_sticks(unsigned long user, short* lx, short* ly, short* rx, short* ry) {
     (void)ry;
     const float deg = g_degrees.load(std::memory_order_relaxed);
-    if (user >= kPads || !lx || !ly || !rx || deg == 0.0f) return;
+    // Only while 3D renders: menus, movies and the virtual screen get the stick as it is.
+    if (user >= kPads || !lx || !ly || !rx || deg == 0.0f || !device::active()) return;
     const std::int64_t now = now_us();
     // Right stick X: steps, hidden from the game.
     const float x = static_cast<float>(*rx) / 32767.0f;

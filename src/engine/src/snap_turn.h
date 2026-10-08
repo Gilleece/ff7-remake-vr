@@ -2,7 +2,7 @@
 // Snap turn ([comfort] snap_turn): the right stick's X turns the player's view in fixed
 // steps instead of turning the game camera smoothly.
 //
-// While on, the right stick's X is reported to the game as 0. A push beyond
+// While on and 3D renders, the right stick's X is reported to the game as 0. A push beyond
 // `snap_turn_deadzone` turns the view once by `snap_turn` degrees; the next step needs the
 // stick back under half the deadzone (or, with `snap_turn_repeat_ms`, the stick held that
 // long). The turn is the render module's snap yaw (the `snap` command): the views turn on
