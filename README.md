@@ -1,13 +1,10 @@
 # ff7vr: VR for FINAL FANTASY VII REMAKE INTERGRADE (PC)
 
-ff7vr is a VR mod for the Steam version of FINAL FANTASY VII REMAKE INTERGRADE. It
-makes the game's own engine render a separate image for each eye at the headset's
-resolution: first person while exploring, third person in battles, switchable at any
-time. You play with the gamepad or keyboard and mouse; motion controllers are not
-used. It talks to the headset through OpenXR.
+VR mod for FF7 Remake that adds first person, DLSSS and DFR. The main goal here was performance as I found other mods, amazing as they are, to be much more demanding than I would have expected. This is still early days, I made this for myself and am just sharing. This was primarily vibe coded, just for transparency. 
 
-This is an unofficial fan project, not affiliated with or endorsed by Square Enix.
-The game is not included: you need your own copy on Steam.
+To install take a look at the "Playing" section of this readme. 
+
+First person mode can be toggled with home on keyboard or L3 and R3 together on controller. The mod automatically switches to 3rd person for combat. There's a bunch of options to tweak in the ff7vr.ini file with descritions in that file. For me personally I get massively better performance out of this mod than others. I have only played through a few sections so almost certainly some areas will have issues etc, as I play through the game I will try to fix them.
 
 The details (what the launcher does, a first-session checklist, the full lists of
 known problems and untested areas, troubleshooting, performance) are in
@@ -15,12 +12,7 @@ known problems and untested areas, troubleshooting, performance) are in
 
 ## State
 
-Played on a Meta Quest 3 through Virtual Desktop at 3072x3264 pixels per eye, 72 and
-90 Hz, on one PC (RTX 5080), in the first areas of one save game (Sector 7 slums).
-Confirmed there: 3D at the headset's resolution, the HUD on its own floating panel,
-first and third person, and the fixes for a right-eye ghost and for lighting faults
-on skin indoors. Not tried yet: battles, conversations, cutscenes, movies, a real
-gamepad, other headsets and other PCs. Expect rough edges.
+Tested on Quest 3 and Pico 4 ultra so far, any openXR headset should work but if there's specific headsets not working let me know and I will try to address that. 
 
 ## Requirements
 
@@ -36,19 +28,18 @@ gamepad, other headsets and other PCs. Expect rough edges.
 
 ## Playing
 
+Steam only: 
+
 Start your headset's PC app (for example the Virtual Desktop Streamer or SteamVR) and
 connect the headset (this can also be done later), then double-click `start-vr.cmd` in the package folder. The launcher sets
-ReShade/Luma aside, copies the mod into the game folder, starts the game and waits;
-when the game exits it puts everything back and keeps the session's log in `logs\`.
+ReShade/Luma aside (if you have them setup), copies the mod into the game folder, starts the game and waits;
+when the game exits it puts everything back and keeps the session's log in `logs\`. the intention here was to allow people to keep their 2D setup intact.
 Leave its window open while you play.
-
-Title screen, menus and loading screens appear on a flat virtual screen; in the world
-you are in 3D, with the HUD on a panel in front of you. The view is centred when the
-headset connects (End recenters later). While 3D runs, the game on the monitor
-becomes a 1280x720 window for that session only.
 
 If a session was interrupted or anything looks wrong in the game folder, double-click
 `restore.cmd` (harmless when nothing needs doing). Save games are not touched.
+
+Non-steam (or if you want to launch through steam itself):
 
 Without the launcher: unzip the `-dropin.zip` into the game's `End\Binaries\Win64`
 folder (beside `ff7remake_.exe`) and start the game from Steam, or with
@@ -69,60 +60,6 @@ combinations):
 | **End** | hold View/Back + left stick click | **recenter**: the direction you face now becomes forward, and the HUD panel and the virtual screen move in front of you |
 | **Insert** | hold View/Back + Menu/Start | 3D off (the game on the virtual screen) and on again. If the headset has lost the game (for example after Virtual Desktop or SteamVR was closed and opened again), the same key reconnects it |
 | **Page Down** / **Page Up** | hold View/Back + D-pad down / up | HUD/menu panel 0.25 m nearer / farther |
-
-## Settings worth knowing
-
-All settings are in `ff7vr.ini` in the package folder, each with a comment. The
-launcher copies it into the game folder for every session, so edit the one in the
-package folder.
-
-| Setting | Default | What it does |
-|---|---|---|
-| `[stereo] enabled` | `1` | `0` = no 3D: the whole game is shown on the virtual screen. The fallback if 3D misbehaves |
-| `[xr] runtime` | `auto` | which OpenXR runtime drives the headset. `auto` takes the first one with a headset connected (runtimes whose PC app runs first, then the PC's default); pin one with `virtualdesktop`, `steamvr`, `system` or the path of a runtime's `.json` |
-| `[xr] resolution_scale` | `1.0` | per-eye render size relative to what the headset's runtime asks for. `0.8` renders 64 % of the pixels: faster, softer |
-| `[foveation] preset` | `performance` | lower detail at the outer edges of each eye to save GPU time: `performance` (not noticeable on a Quest 3 in play), `balanced`, `quality` (smaller saving), `off` |
-| `[foveation] eye_tracking` | `0` | `1`: the full-detail area follows your eyes on a headset with eye tracking (untested with a real one) |
-| `[ui] distance`, `[ui] size` | `3.0`, `2.0` | distance and height in metres of the HUD/menu panel (Page Down/Up change the distance during play, until the game is restarted). `size = 1.57` lines the markers over enemies up with the enemies; `2.0` is easier to read |
-| `[ui] follow_head` | `0` | `1` = the panel follows your head |
-| `[stereo] world_scale` | `1.0` | above 1 the world looks smaller (you become a giant), below 1 larger |
-| `[first_person] default` | `1` | `0` = third person from the start and after every battle |
-| `[first_person] enabled` | `1` | `0` = first person is off completely (no key, no pad combination, no automatic switch) |
-| `[first_person] auto_combat` | `1` | `0` = no automatic third person in battles |
-| `[first_person] battle_signal` | see the ini | how a battle is detected. Empty (`battle_signal =`) if battles stay in first person or exploration switches to third person by itself |
-| `[first_person] toggle_key`, `[controls] ..._key` | Home, End, Insert, Page Down/Up | the keys of "Controls", as Windows virtual-key codes (0 = none) |
-| `[controls] pad` | `1` | `0` = no gamepad combinations for recenter, 3D on/off and the panel distance |
-| `[controls] fp_toggle_chord` | `L3+R3` | the gamepad buttons pressed together that switch first/third person; empty = off. A single stick click still reaches the game, at most 150 ms (`fp_toggle_chord_ms`) late |
-| `[camera] boom` | `level` | `game` = in third person, follow the game camera's height as it tilts (the eyes rise and sink) |
-| `[stereo] decoupled_pitch` | `1` | `0` = apply the game camera's tilt to the view too (the horizon tilts) |
-| `[screen] distance`, `width` | `2.0`, `1.8` | the virtual screen, in metres |
-| `[stereo] movie_screen` | `0` | `1` = pre-rendered movies on the virtual screen; try it if movies look broken in 3D |
-| `[stereo] ao_fix` | `1` | corrects the right eye's ambient occlusion (without it the right eye shows a dark ghost of nearby objects). `0` only to compare |
-| `[stereo] light_fix` | `1` | corrects indoor lamp lighting in 3D (without it skin shows white blocks indoors). `0` only to compare |
-| `[picture] brightness`, `contrast`, `saturation`, `gamma`, `black_level` | `0`, `1`, `1`, `1`, `0` (no change) | colour of the 3D view and the virtual screen in the headset (the HUD panel stays as drawn). A starting point for a washed-out look: `-0.05`, `1.15`, `1.1`, `1`, `-0.01`. `[controls] brightness_up_key` / `brightness_down_key` change the brightness during play |
-| `[stereo_cvars]` | four level-of-detail lines | the game's console variables, `name = value`, applied only while 3D renders. The shipped lines push the engine's detail levels further out (the wide per-eye view makes it drop detail much nearer than in the flat game). Uncommenting `r.BloomQuality = 0` makes the picture a little less washed out |
-| `[log] level` | `debug` | how much goes into the log; `info` keeps it shorter |
-
-## Known problems
-
-- The picture looks washed out and too bright in the headset; cause unknown. Bloom
-  off (`r.BloomQuality = 0` in `[stereo_cvars]`) helps a little.
-- Smooth turning only; there is no snap turn.
-- Markers over enemies are 3 to 6 degrees off on the default HUD panel size
-  (`[ui] size = 1.57` lines them up).
-- The game window becomes 1280x720 while 3D runs, until the game exits.
-- ReShade/Luma loaded together with the mod is new: the mod corrects Luma's
-  tonemapping for the right eye and turns Luma's own DLSS off for the headset image,
-  checked without a headset only. The launcher still sets Luma aside per session.
-- With DLSS, Virtual Desktop's performance overlay shows 100 % (DLSS's image at the
-  headset's size); the input scale (for example 65 %) shows only at the start, on the
-  title and on loading screens. That is normal.
-- Battle detection has never been seen in a real battle; switch by hand with Home if
-  needed.
-- Pre-rendered movies are very likely wrong (`[stereo] movie_screen = 1` is worth a
-  try).
-- In third person the eyes can end up right behind an obstacle or a person
-  (`[camera] boom = game` is the alternative).
 
 ## If something is wrong
 
