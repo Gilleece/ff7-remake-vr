@@ -1861,10 +1861,13 @@ the situations a real one adds (read from the code, not seen):
 
 Ordered by how much they would bother a player in the headset:
 
-1. **Battle signal unverified in a battle** (see "Combat"). If it is wrong, battles are
-   played in first person (the toggle still works, and the log shows the signal never
-   changing), or exploration in some areas is in third person (the log shows the signal at
-   1 outside a battle).
+1. **Battle signal** (see "Combat"): seen working in headset sessions since 06/10
+   (`battle signal 0 -> 1`, third person during the battle, back afterwards); the
+   follow-camera test flips between "battle" and "the camera does not look at the
+   character" several times per battle (not reported as a problem). If it ever misfires,
+   battles are played in first person (the toggle still works, and the log shows the
+   signal never changing), or exploration in some areas is in third person (the log shows
+   the signal at 1 outside a battle).
 2. **Level boom near obstacles**: the eyes are where the game camera would be at zero pitch,
    at the boom length the game's collision allowed for the pitched camera. Something the
    pitched camera passed over (a counter, a low wall, a person) can then be close in front

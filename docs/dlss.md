@@ -1206,12 +1206,12 @@ always uses AutoExposure"; the mod sets the auto-exposure flag.
   an RTX 5080. Upscale mode from 0.5 costs about what the game's own 100 % costs, with a
   picture close to it (section "The numbers").
 
-A public release with DLSS would need: the NGX static library linked into the released DLL
-(object code, allowed by the licence's grant 1.c), either NVIDIA's `nvngx_dlss.dll` shipped
-next to it under NVIDIA's terms or a note that the player supplies one, the attribution and
-NVIDIA marks of supplement 7.1(b), the DLL's third-party notices (guide 9.6), and a decision
-by the project's maintainers on how an MIT-licensed project and NVIDIA's terms fit together
-(below).
+The public `-dlss` release (08/10) follows the "NVIDIA DLSS SDK" entry of
+`THIRD-PARTY-NOTICES.md`: the NGX static library is linked into the released DLL as object
+code under NVIDIA's licence (its grant 1.c), those parts are outside the MIT licence,
+`nvngx_dlss.dll` is not shipped (the player obtains it from NVIDIA's SDK repository or
+through the NVIDIA App's override; without it the mod renders without DLSS, checked), and
+the attribution of supplement 7.1(b) is in that file and the README.
 
 ## Settings (`[dlss]` in `ff7vr.ini`)
 
@@ -1358,15 +1358,18 @@ The conditions that matter for this project, quoted:
   applications."
 - Programming guide 4.2.3: the DLSS DLL "includes third party code that needs to be
   acknowledged in the public documentation of the final product"; the texts are in the
-  guide's section 9.6 (curl, an SGI bitmap font, d3dx12.h).
+  guide's section 9.6 (curl, an SGI 8x13 bitmap font, d3dx12.h, pugixml, libnpy, stb,
+  DirectX-Graphics-Samples, Vulkan-Headers). The mod does not ship the DLL, so the
+  notices file only points there.
 
 What follows for this repository (an MIT-licensed project): the SDK's headers, libraries
 and DLLs must not be committed (they would become source-distributed under MIT, 4.b and
 4.e), which is why the build fetches them and why the code builds without them. The mod's
 own source that calls the SDK is not "source code provided by NVIDIA" (the calls follow the
-SDK's documented helper functions; no SDK source was copied into it). Whether a binary
-release that links the NGX library and ships `nvngx_dlss.dll` is compatible with releasing
-the mod under MIT is a question for the project's maintainers (4.e names "redistributable at no
-charge" as an example of a licence condition it forbids for the SDK itself; the SDK parts
-would have to be under NVIDIA's terms in such a release, not MIT). A release would also
-need the attribution of 7.1(b) and the DLL's third-party notices.
+SDK's documented helper functions; no SDK source was copied into it). The binary release
+that links the NGX library keeps the SDK parts under NVIDIA's terms, not MIT (4.e names
+"redistributable at no charge" as an example of a licence condition it forbids for the SDK
+itself), states so in `THIRD-PARTY-NOTICES.md` and the README, does not ship
+`nvngx_dlss.dll`, and carries the attribution of 7.1(b) there. Supplement 4's notification
+applies to commercial releases; this free mod is not one (a free notification through
+NVIDIA's form would remove any doubt).

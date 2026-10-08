@@ -145,9 +145,10 @@ that folder (Steam must be running). Either way the mod loads by itself.
   simulated headset only so far; if the right eye looks wrong with Luma loaded, rename
   `dxgi.dll` to `dxgi.dll.vr-disabled` for VR and say so.
 - A `-dlss` drop-in needs an NVIDIA RTX graphics card and NVIDIA's DLSS model file,
-  which is not part of the package: `nvngx_dlss.dll` beside `ff7remake_.exe`, or the
-  model the NVIDIA App's DLSS override provides (see "DLSS" below). `[dlss] enabled`
-  in `ff7vr.ini` switches it on.
+  which is not part of the package: `nvngx_dlss.dll` beside `ff7remake_.exe` (see
+  "DLSS" below; if the NVIDIA App's DLSS override is set for this game, the driver's own
+  copy of the model is used instead). DLSS is on in the `-dlss` package (`[dlss]
+  enabled = 0` in `ff7vr.ini` switches it off).
 
 **Log:** `ff7vr.log` in `End\Binaries\Win64`. The logs and crash dumps of the five
 sessions before it are kept in `ff7vr-logs\` there (`[log] keep_sessions`); older ones
@@ -176,8 +177,9 @@ while an `xinput1_3.dll` it did not put there is in the folder.
   stick clicks together) switches to third person, behind the character at
   shoulder height. The horizon stays level: the game camera turns you left and
   right, but looking up and down is done with your head. Leaning moves the view.
-- **In a battle** the view should switch to third person by itself and back to first
-  person afterwards (this has not been seen in a real battle yet).
+- **In a battle** the view switches to third person by itself and back to first
+  person afterwards (seen working in play; the camera can flip between the game's own
+  shot and third person a few times during a battle).
 - **Conversations and cutscenes** that use their own camera shots are shown from the
   game's camera, as the game frames them (not seen in testing either).
 - **HUD and menus in the world:** on a flat panel about 3 m in front of you, 3.56 x
@@ -283,12 +285,11 @@ session it is `ff7vr.log` in the game's `End\Binaries\Win64` folder).
   cards have not been tried. The automatic runtime choice was tested with SteamVR's
   virtual headset and with Virtual Desktop without a headset; other runtimes are
   recognised by their file names and install folders but have not been tried.
-- **Combat, conversations, real-time cutscenes, loading screens between areas,
-  pre-rendered movies, the pause menu.** None of these has been tried yet. What to
-  look for: a battle should switch to third person and back (the battle detection is
-  an educated guess: it reads a battle scene ID that is empty outside battles, but it
-  has never been seen in a battle); scripted camera shots should be shown as the game
-  frames them (the mod then uses the game's camera); the camera may cut between
+- **Conversations, real-time cutscenes, loading screens between areas, the pause
+  menu.** Not tried with scripted input; battles and pre-rendered movies have been
+  played (the switch to third person and back works; movies are listed under "Known
+  problems in full"). What to look for: scripted camera shots should be shown as the
+  game frames them (the mod then uses the game's camera); the camera may cut between
   shots, which can be uncomfortable in a headset.
 - **Pre-rendered movies** are shown on the virtual screen (`[stereo] movie_screen = 1`,
   the default). A movie that plays at a few frames per second is most likely the slow graphics-driver
@@ -297,10 +298,10 @@ session it is `ff7vr.log` in the game's `End\Binaries\Win64` folder).
   a minute and a half, start again. The log's `movie: stopped ... fps` line gives the
   frame rate over each movie, and `game copy engine` at 40 % or more in the timing lines
   confirms the state.
-- **A connected gamepad.** The gamepad combinations were tested only with simulated
-  button states (no pad was connected; the game reads the pad only while one is),
-  so what the game does with the View/Back press handed over on release, and with a
-  single stick click handed over up to 150 ms late, is not known. The keys (Home, End, Insert, Page Down/Up) were tested in the game.
+- **The View/Back gamepad combinations.** The L3+R3 chord has been used with a real
+  XInput pad in play. The View/Back combinations were tested only with simulated
+  button states, so what the game does with the View/Back press handed over on
+  release is not known. The keys (Home, End, Insert, Page Down/Up) were tested in the game.
 - **The headset's own recenter** (holding the Meta button) on a real headset. It is
   handled and was tested with a simulated headset, as was the mod's own recenter (End).
 - **Lost tracking** (covering the headset's cameras, a dark room): the mod holds the
@@ -336,13 +337,15 @@ session it is `ff7vr.log` in the game's `End\Binaries\Win64` folder).
   for quitting in 3D, quitting from the virtual screen and the game being killed. Not
   checked: changing the game's graphics options while the window is switched; leave
   them alone during a VR session.
-- **ReShade/Luma together with the mod** does not work yet: with `-KeepLuma` the game
-  ran flat on the monitor and the mod never reached the headset. The launcher
-  sets ReShade/Luma aside for every session and puts it back afterwards.
-- **Battle detection unverified.** If battles stay in first person, switch with Home
-  or both stick clicks (L3+R3), and send the log. If it misfires outside battles,
-  set `battle_signal =` (empty) and `default = 0`.
-- **First person:** the whole character is hidden, probably its shadow too; the view
+- **ReShade/Luma together with the mod** has been checked without a headset only: Luma
+  can stay in place (the mod corrects Luma's tonemapping for the right eye and turns
+  Luma's own DLSS off for the headset image). The launcher still sets ReShade/Luma
+  aside for every session and puts it back afterwards; `-KeepLuma` keeps it loaded.
+- **Battle detection** has worked in play so far. If a battle stays in first person,
+  switch with Home or both stick clicks (L3+R3), and send the log. If it misfires
+  outside battles, set `battle_signal =` (empty) and `default = 0`.
+- **First person:** the character is left out of the picture (its shadow and footsteps
+  stay; `[first_person] hide = meshes` hides it completely); the view
   stays level and, with `head_bob = 0` (the default), does not bob with the steps;
   climbing, squeezing through gaps and other special animations were not tried.
 - **Third person near obstacles:** the eyes are where the game camera would be at
@@ -444,9 +447,15 @@ Desktop's video encoding comes on top.
 
 A package whose folder name ends in `-dlss` can use NVIDIA DLSS: each eye is rendered at
 a fraction of its size and DLSS rebuilds the full-size image from it and from the
-previous frames, in place of the game's own anti-aliasing. To try it, set `enabled = 1`
-under `[dlss]` in `ff7vr.ini`; `input_scale` sets the rendered share of each eye's width
-and height (0.5 = a quarter of the pixels). On the development PC (RTX 5080, no headset,
+previous frames, in place of the game's own anti-aliasing. The DLSS model, NVIDIA's
+`nvngx_dlss.dll`, is not part of the package: download it from NVIDIA's DLSS SDK repository
+(https://github.com/NVIDIA/DLSS, folder `lib/Windows_x86_64/rel`) and put it beside
+`ff7remake_.exe` in `End\Binaries\Win64`, or keep the one another DLSS mod (Luma) installed
+there; without it the mod renders without DLSS (checked: the log says `NGX is not
+available` and both eyes are rendered at the headset's full size). In the `-dlss` package DLSS is on
+(`enabled = 1` under `[dlss]` in `ff7vr.ini`; `enabled = 0` turns it off); `input_scale`
+sets the rendered share of each eye's width and height (0.65 in the package; 0.5 = a
+quarter of the pixels). On the development PC (RTX 5080, no headset,
 DLSS model L) 0.5 cost about as much as the game at full size (5 % more at 3072x3264 per
 eye, between 9 % less and 4 % more at 3600x3600), with detail close to it and far sharper
 than rendering at 0.5 without DLSS; hair and soft shadow edges are grainier than at full
@@ -462,9 +471,8 @@ detailed than the game's own at that size. Earlier `-dlss` packages could hang
 the graphics card (within seconds at the title screen); that was a fault in the mod, fixed
 in commit `ef2688a` (a package's folder name contains the commit it was built from; any
 later one has the fix). It needs an NVIDIA RTX graphics
-card with a current driver: the DLSS model comes with the driver (or from an
-`nvngx_dlss.dll` in the game folder), and if the NVIDIA App's DLSS override is set for
-this game, the App's choice of model applies, not `[dlss] preset`. The App's
+card with a current driver and the model file above. If the NVIDIA App's DLSS override
+is set for this game, the App's model and preset apply instead of `[dlss] preset`. The App's
 "DLSS override - Super Resolution" for this game must stay at the application's choice: if
 it forces DLAA, DLSS cannot upscale and you see the game's own image (the log says why).
 Packages without `-dlss` ignore the `[dlss]` section.
