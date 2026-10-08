@@ -76,7 +76,10 @@ void set_ssr_poison(int mode);  // test: 1 fills the half a run skipped with a l
 // screen-space reflections. With it, that draw renders into a scratch target half as wide
 // (the half at the origin) and the result is copied into the right half. Works with and
 // without ssr_per_eye. docs/engine-module.md, "Reflections per eye".
-void set_ssr_fix(bool on);
+// Mode 2 (`ssr fix 2`) instead clears both views' reflection runs: no screen-space reflections
+// in either eye, so the eyes match (the fixed right view's reflections are not the right view's
+// own; docs/engine-module.md, "The right eye's reflections are not its own").
+void set_ssr_fix(int mode);  // 0 off, 1 on, 2 both eyes without
 bool ssr_fix();
 bool ssr_wants_hooks();  // either switch on: the context hooks are needed
 // RHI thread, before every DrawIndexed: places a fixed right-eye result once the draw that

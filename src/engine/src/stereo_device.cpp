@@ -808,13 +808,13 @@ void configure_render_scale(const Config& cfg) {
                       [](std::string_view args) { return dynres_command(args); });
     // Reflections per eye (fixes.h); its draw hook belongs to the post-process fixes.
     fixes::set_ssr_per_eye(cfg.get_bool("stereo", "ssr_per_eye", true));
-    fixes::set_ssr_fix(cfg.get_bool("stereo", "ssr_fix", true));
-    dev_commands::add("ssr", "ssr [status] | on | off | fix 0|1 | poison 0-3: screen-space reflections per eye half, right-eye reflections fix",
+    fixes::set_ssr_fix(static_cast<int>(cfg.get_int("stereo", "ssr_fix", 1)));
+    dev_commands::add("ssr", "ssr [status] | on | off | fix 0-2 | poison 0-3: screen-space reflections per eye half, right-eye reflections fix",
                       [](std::string_view args) {
                           if (args == "on" || args == "off") fixes::set_ssr_per_eye(args == "on");
-                          else if (args == "fix 0" || args == "fix 1") fixes::set_ssr_fix(args == "fix 1");
+                          else if (args == "fix 0" || args == "fix 1" || args == "fix 2") fixes::set_ssr_fix(args[4] - '0');
                           else if (args.size() == 8 && args.substr(0, 7) == "poison " && args[7] >= '0' && args[7] <= '3') fixes::set_ssr_poison(args[7] - '0');
-                          else if (!args.empty() && args != "status") return std::string("err usage: ssr [status] | on | off | fix 0|1 | poison 0-3");
+                          else if (!args.empty() && args != "status") return std::string("err usage: ssr [status] | on | off | fix 0-2 | poison 0-3");
                           return "ok " + fixes::ssr_status();
                       });
     fixes::set_hzb_skip(static_cast<int>(cfg.get_int("stereo", "hzb_skip", 0)));

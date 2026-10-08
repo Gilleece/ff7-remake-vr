@@ -313,8 +313,10 @@ namespace {
 // writes relative to the origin) and leaves its own half at zero, which is the half its
 // composite reads. The fix runs that draw into a scratch target of half the width (so only
 // the half at the origin is computed) and copies the result into the view's own half.
-std::atomic<bool> g_ssr_fix{false};
-std::atomic<std::uint64_t> g_ssr_fixed{0}, g_ssr_fix_failed{0};
+// 0 off, 1 the right view's run into a scratch target, 2 no screen-space reflections in
+// either eye (each run is replaced by clearing its target, so both eyes match).
+std::atomic<int> g_ssr_fix{0};
+std::atomic<std::uint64_t> g_ssr_fixed{0}, g_ssr_fix_failed{0}, g_ssr_cleared{0};
 struct SsrScratch {
     ID3D11Texture2D* tex = nullptr;
     ID3D11RenderTargetView* rtv = nullptr;
@@ -489,18 +491,22 @@ void set_ssr_per_eye(bool on) {
 }
 bool ssr_per_eye() { return g_ssr_on.load(); }
 void set_ssr_poison(int mode) { g_ssr_poison = mode; }
-void set_ssr_fix(bool on) {
-    g_ssr_fix = on;
-    log::info("fixes: right-eye reflections fix {}", on ? "on" : "off ([stereo] ssr_fix = 0)");
+void set_ssr_fix(int mode) {
+    mode = mode < 0 ? 0 : (mode > 2 ? 2 : mode);
+    g_ssr_fix = mode;
+    log::info("fixes: right-eye reflections fix {}", mode == 0   ? "off ([stereo] ssr_fix = 0)"
+                                                     : mode == 1 ? "on"
+                                                                 : "replaced: no screen-space reflections in either eye ([stereo] ssr_fix = 2)");
 }
-bool ssr_fix() { return g_ssr_fix.load(); }
-bool ssr_wants_hooks() { return g_ssr_on.load(std::memory_order_relaxed) || g_ssr_fix.load(std::memory_order_relaxed); }
+bool ssr_fix() { return g_ssr_fix.load() != 0; }
+bool ssr_wants_hooks() { return g_ssr_on.load(std::memory_order_relaxed) || g_ssr_fix.load(std::memory_order_relaxed) != 0; }
 
 bool ssr_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base,
               void(STDMETHODCALLTYPE* original)(ID3D11DeviceContext*, UINT, UINT, INT)) {
     const bool per_eye = g_ssr_on.load(std::memory_order_relaxed);
-    const bool fix = g_ssr_fix.load(std::memory_order_relaxed);
-    if (count != 3 || (!per_eye && !fix)) return false;
+    const int fix_mode = g_ssr_fix.load(std::memory_order_relaxed);
+    const bool fix = fix_mode == 1;
+    if (count != 3 || (!per_eye && fix_mode == 0)) return false;
     ID3D11RenderTargetView* rtvs[2]{};
     ID3D11DepthStencilView* dsv = nullptr;
     ctx->OMGetRenderTargets(2, rtvs, &dsv);
@@ -538,6 +544,26 @@ bool ssr_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base,
     if (!hzb) return false;
     if (index >= 2) {
         ++g_ssr_extra;
+        return false;
+    }
+    if (fix_mode == 2) {
+        // Both eyes without screen-space reflections: the run's target is cleared instead of
+        // drawn, so the composite adds nothing in either eye (the colour copies stay as they are).
+        ID3D11RenderTargetView* rtv = nullptr;
+        ctx->OMGetRenderTargets(1, &rtv, nullptr);
+        ID3D11DeviceContext1* ctx1 = nullptr;
+        bool cleared = false;
+        if (rtv && SUCCEEDED(ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&ctx1))) && ctx1) {
+            const float zero[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            ctx1->ClearView(rtv, zero, nullptr, 0);
+            ctx1->Release();
+            cleared = true;
+        }
+        if (rtv) rtv->Release();
+        if (cleared) {
+            ++g_ssr_cleared;
+            return true;
+        }
         return false;
     }
     // Views are rendered left eye first; `stereo swap` puts the left eye into the right half.
@@ -754,10 +780,10 @@ void ssr_frame() {
 
 std::string ssr_status() {
     return std::format("reflections per eye {}: runs limited {} in {} frames, extra runs left alone {}, colour copies halved {}; "
-                       "right-eye fix {}: applied {} failed {} at x {} (moved {}, not read {})",
+                       "right-eye fix {}: applied {} failed {} at x {} (moved {}, not read {}); runs cleared (ssr_fix 2) {}",
                        g_ssr_on.load() ? "on" : "off", g_ssr_limited.load(), g_ssr_frames.load(), g_ssr_extra.load(), g_ssr_copies_halved.load(),
-                       g_ssr_fix.load() ? "on" : "off", g_ssr_fixed.load(), g_ssr_fix_failed.load(), g_ssr_last_x.load(), g_ssr_moved.load(),
-                       g_ssr_unread.load());
+                       g_ssr_fix.load() == 0 ? "off" : (g_ssr_fix.load() == 1 ? "on" : "replaced (both eyes without)"), g_ssr_fixed.load(), g_ssr_fix_failed.load(), g_ssr_last_x.load(), g_ssr_moved.load(),
+                       g_ssr_unread.load(), g_ssr_cleared.load());
 }
 
 }  // namespace ff7vr::engine::fixes
