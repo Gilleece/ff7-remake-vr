@@ -43,7 +43,7 @@ struct Options {
     bool start_in_stereo = true;
     bool allow_unknown_build = false;
     bool light_fix = true;
-    bool movie_screen = false;
+    bool movie_screen = true;
     bool bloom_fix = true;
     bool ao_fix = true;
     std::string host;  // render | fixed
@@ -235,7 +235,7 @@ bool start(const StartupContext& ctx) {
         g_opt.start_in_stereo = cfg.get_bool("stereo", "start_in_stereo", true);
         g_opt.allow_unknown_build = cfg.get_bool("stereo", "allow_unknown_build", false);
         g_opt.light_fix = cfg.get_bool("stereo", "light_fix", true);
-        g_opt.movie_screen = cfg.get_bool("stereo", "movie_screen", false);
+        g_opt.movie_screen = cfg.get_bool("stereo", "movie_screen", true);
         g_opt.bloom_fix = cfg.get_bool("stereo", "bloom_fix", true);
         g_opt.ao_fix = cfg.get_bool("stereo", "ao_fix", true);
         fixes::set_vr_window_size(cfg.get_string("stereo", "vr_window", "1280x720"));

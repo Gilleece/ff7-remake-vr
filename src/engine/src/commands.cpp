@@ -229,6 +229,7 @@ std::string stereo_command(const std::vector<std::string>& a) {
     if (c == "movie") {
         if (a.size() == 3 && (a[2] == "on" || a[2] == "off")) movie::set_enabled(a[2] == "on");
         if (a.size() == 4 && a[2] == "menu") movie::set_include_menu(a[3] == "1");
+        if (a.size() == 4 && a[2] == "simulate") movie::set_simulate(a[3] == "on" || a[3] == "1");
         return "ok " + movie::status();
     }
     if (c == "window") {

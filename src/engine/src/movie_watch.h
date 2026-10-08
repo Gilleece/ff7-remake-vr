@@ -24,7 +24,7 @@ struct Addresses {
     std::uint8_t* FNamePool = nullptr;
 };
 
-// [stereo] movie_screen (default 0 until verified on a movie).
+// [stereo] movie_screen (default 1: detection verified on a movie in a headset session).
 void init(const Addresses& a, bool enabled);
 // Game thread, once per engine frame, before the frame's stereo decision.
 void tick();
@@ -33,5 +33,7 @@ std::string status();
 void set_enabled(bool on);
 // Test: count the menu background players as movies too.
 void set_include_menu(bool on);
+// Test: behave as if a movie played (stereo off, the virtual screen) until switched off again.
+void set_simulate(bool on);
 
 }  // namespace ff7vr::engine::movie

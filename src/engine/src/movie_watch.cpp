@@ -32,6 +32,9 @@ Addresses g_a;
 std::atomic<bool> g_enabled{true};
 std::atomic<bool> g_include_menu{false};  // test: menu players count too
 std::atomic<bool> g_playing{false};
+std::atomic<bool> g_simulate{false};  // test: behave as if a movie played (the switch to the screen and back)
+ULONGLONG g_started_ms = 0;           // when the current movie started
+std::uint64_t g_movie_frames = 0;     // engine frames while it played
 bool g_suppressing = false;  // we switched stereo off for a movie
 void* g_player_class = nullptr;
 void* g_is_playing = nullptr;
@@ -192,12 +195,43 @@ void set_enabled(bool on) {
 
 bool playing() { return g_playing.load(); }
 
-void tick() {
-    if (!g_enabled.load()) {
-        if (g_suppressing) {
+// Game thread: the playing state changed or not; switches stereo off for a movie and back.
+static void update(bool any, const std::string& current) {
+    if (any && g_playing.load()) ++g_movie_frames;
+    if (any != g_playing.load()) {
+        g_playing = any;
+        if (any) {
+            g_started_ms = GetTickCount64();
+            g_movie_frames = 0;
+            log::info("movie: playing {}", current);
+        } else {
+            // The game's frame rate during the movie: far below the movie's own 30 fps means the
+            // uploads of its frames were slow (docs/engine-module.md, "Movies").
+            const double s = (GetTickCount64() - g_started_ms) / 1000.0;
+            log::info("movie: stopped {} (after {:.1f} s, {} engine frames, {:.1f} fps)", g_current, s, g_movie_frames,
+                      s > 0 ? g_movie_frames / s : 0.0);
+        }
+        if (any && device::wanted()) {
+            g_suppressing = true;
+            device::request_active(false);
+        } else if (!any && g_suppressing) {
             g_suppressing = false;
             device::request_active(true);
         }
+    }
+    std::lock_guard lock(g_status_mutex);
+    g_current = any ? current : std::string();
+}
+
+void set_simulate(bool on) { g_simulate = on; }
+
+void tick() {
+    if (g_simulate.load()) {
+        update(true, "(simulated: movie simulate on)");
+        return;
+    }
+    if (!g_enabled.load()) {
+        if (g_playing.load() || g_suppressing) update(false, {});
         return;
     }
     ++g_ticks;
@@ -231,19 +265,7 @@ void tick() {
             ++it;
         }
         g_player_count = g_players.size();
-        if (any != g_playing.load()) {
-            g_playing = any;
-            log::info("movie: {} {}", any ? "playing" : "stopped", any ? current : g_current);
-            if (any && device::wanted()) {
-                g_suppressing = true;
-                device::request_active(false);
-            } else if (!any && g_suppressing) {
-                g_suppressing = false;
-                device::request_active(true);
-            }
-        }
-        std::lock_guard lock(g_status_mutex);
-        g_current = any ? current : std::string();
+        update(any, current);
     } catch (...) {
     }
 }
