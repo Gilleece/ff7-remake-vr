@@ -736,6 +736,7 @@ of Square Enix's passes do not: they put every view's data at the origin of thei
 | Ambient occlusion (full-size setup at the view's rectangle; three half-size passes, pooled under names shared with the subsurface targets, `SubsurfaceBlurY` / `SubsurfaceBlurX` / `AmbientOcclusionDownsample`; resolve into `ScreenSpaceAO` + `AmbientOcclusionResolve` at the view's rectangle) | half-size passes at the origin | **no** (fixed by the mod), see below |
 | Ray-traced shadows (compute, `RayTracedShadows`, 3072x1632 at eyes 3072x3264, one 192x204-group dispatch per view, consumed by a per-view instanced draw into `CapsuleShadow`) | each view at the origin quarter | yes as far as checked: the two views' results differ (mean difference 3.3 of 255) |
 | Screen-space reflections (Square Enix's, before the reflection composite) | each view's draw covers the whole double-wide target and writes its result at the origin; the right view's draw leaves the right half at 0 | consistent per view as far as checked (the right view's result holds the right eye's objects); the left view's draw also writes meaningless values into the right half, which the right view's draw then overwrites |
+| Distortion (heat haze, refraction: `Distortion` full size, `DistortDirection`, `DistortHistory`, two `DistortBlurred` at half size, then a composite into the scene colour) | half-size passes at the view's own half-size rectangle (stock layout); the composite's draw is given the view's size as its target size inside a viewport covering the whole double-wide target | **no** (fixed by the mod): the left view's composite covers both eyes and the right view's composite draws nothing, see below |
 
 ### The right-eye ghost: the bloom's first pass (LIVE, fixed)
 
@@ -806,13 +807,73 @@ Found at eyes 3072x3264 in the street next to the sandwich board outside the fir
   target was never allocated and the combine never ran. A fix would give each view its own
   region (or target) the same way as the bloom fix; needs a scene with glare primitives to
   verify.
+- STATIC: the combine is added only on the bloom path. In `FPostProcessing::Process` the
+  bloom chain (`call 0x2287ba0` at `0x251d868`) and the combine (`call 0x251b380` at
+  `0x251d8cd`, taken only when the scene targets' `CustomGlare` pointer `0x5923be8` is set)
+  both sit behind `comiss xmm9, [rsi+0xE70]` / `jae 0x251d933` at `0x251d847`, and
+  `r.BloomQuality 0` sets the view's bloom intensity (`+0xE70`) to 0 (UE 4.18
+  `FSceneView::EndFinalPostprocessSettings`). With `r.BloomQuality 0` the glare primitives
+  are still drawn into `CustomGlare` but nothing reads it, so the glare pass cannot change
+  the picture in that configuration.
+
+### Distortion: the right eye gets the left view's composite (STATIC + LIVE, forced)
+
+Square Enix replaced UE 4.18's distortion with a pipeline of its own (shaders
+`DistortAccumulatePS/VS`, `DistortAntiAlias`, `DistortApplyScreenPS`). It runs only while
+something distorts the view (heat haze over fire, refraction), so the scenes traced before
+never ran it.
+
+- STATIC. Called from the scene renderer `0x21e64a0` at `0x21e7dbf`, after translucency and
+  before post-processing, when `r.RefractionQuality > 0` (helper `0x2202df0`) and
+  `r.DisableDistortion != 1` (read at `0x21e7d83`). The renderer `0x2202e90` first checks the
+  views (stride `0x28B0`): it runs if a view has `+0x118C > 0` and either distortion
+  primitives (count `+0x1780`, next to the custom glare list) or `+0x1190 > 0` (a
+  screen-wide distortion; per view it adds a full-screen accumulate `0x220b1d0`). It
+  allocates `Distortion` (full size, `R16G16_FLOAT`), `DistortDirection`, `DistortHistory`
+  and two `DistortBlurred` (half size), and `ExtraSceneColor` when a view's flag `+0x22A0` or
+  `+0x22A7` is set. Per view (loop at `0x22037d0`): direction / temporal pass (`0x220b870`
+  with the view state's history at `+0x1270`, `0x220bf20` on a camera cut, `0x220c5d0`
+  without a view state; chosen by `+0x13D0 == 2` and `+0xBF4`), two blur passes
+  (`0x220cbf0`/`0x220d260`, `0x220d8d0`/`0x220df40`), then the composite `0x220e5b0`
+  (`rcx` the RHI command list, `rdx` the scene targets `0x5923ad0`, `r8` the view, `r9` the
+  blurred target), signature "Distortion composite".
+- LIVE, forced (no distortion in the reachable scenes): `re poke 2202f62` (the "any view
+  distorts" `je`, 6 bytes) and `re poke 22034a2` (the "something was accumulated" `je`,
+  6 bytes) to `90`s run the whole pipeline with an empty accumulate
+  (`captures/fire/r2/tr1`..`tr3`; `22037f3` (2 bytes) also forces the full-screen
+  accumulate). Per view, eyes 2064x2208, left view first:
+
+  | Pass | Draw | Viewport | DrawRectangle constants (vertex `cb0`) |
+  |---|---|---|---|
+  | half-size passes, left view | `DrawIndexed 3 6 0` (one triangle) | `0 0 2064 1104` (whole half-size target) | `Pos 1032 1104 0 0`, target 2064x1104: the triangle covers the whole target |
+  | half-size passes, right view | `DrawIndexed 6 0 0` | `0 0 2064 1104` | `Pos 1032 1104 1032 0`: the right view's own half (stock layout); overwrites what the left view's triangle wrote there |
+  | composite, left view | `DrawIndexed 3 6 0` into the scene colour (4128x2208) | `0 0 4128 2208` | `Pos 2064 2208 0 0`, **target size 2064x2208** (`InvTargetSize` = 1/2064): the view's rectangle spans the whole viewport, both eyes |
+  | composite, right view | `DrawIndexed 6 0 0` | `0 0 4128 2208` | `Pos 2064 2208 2064 0`, target 2064: clip x 1 to 3, **outside the viewport, no pixels** |
+
+  With `render_scale 0.65` the same (`Pos 1344 1432 2064 0`, `InvTargetSize` 1/1344, viewport
+  still the whole 4128x2208 target). In mono the view is the whole target, so the size
+  passed is right there. UE's `DrawRectangle` only uses the single triangle for a rectangle
+  at the origin, which is why the two views differ in index count.
+- Consequence: whenever distortion renders, the right eye's scene colour is what the left
+  view's composite wrote over it (the left view's parameters and history, stretched over
+  both halves), and the right view's own distortion never appears. A headset report of a
+  right eye made of horizontal blurry lines while a real-time fire is on screen matches this
+  (inferred: the blurred half-size inputs sampled for right-half pixels with the left view's
+  rectangle, clamped at its edge); not reproduced with a real fire.
+- `r.DisableDistortion 1` (or `r.RefractionQuality 0`) switches the whole pipeline off.
+- Measured with pipeline statistics queries around the composite's draw (forced pipeline,
+  `captures/fire/r3/session.txt`): the left composite shaded 9 114 624 pixels (the whole
+  4128x2208 target), the right composite 0; at `render_scale 0.65` the same.
+- Fix: `src/engine/src/distortion_fix.cpp`, `docs/engine-module.md` "Right-eye distortion
+  fix" (with it: 4 557 312 pixels per eye, 1 924 608 at 0.65).
 
 ### Other FViewInfo fields seen (STATIC + LIVE)
 
 `+0x70` the rectangle post-processing reads the view from (equals the view rect at 100 %
 screen percentage), `+0xA0` view rect, `+0x970` stereo pass, `+0xE70` bloom/glare enable
 (float), `+0xF44` / `+0xF48` bloom parameters, `+0x10AC` another post-processing enable
-(float), `+0x1768` custom glare primitives.
+(float), `+0x1768` custom glare primitives, `+0x1780` distortion primitive count, `+0x118C` / `+0x1190`
+distortion enable and screen-wide distortion (floats).
 
 ## 11. The player's character and the camera (reflection, LIVE)
 

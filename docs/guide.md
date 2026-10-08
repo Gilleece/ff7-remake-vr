@@ -353,7 +353,14 @@ session it is `ff7vr.log` in the game's `End\Binaries\Win64` folder).
   and the game's depth of field in cutscenes. Camera motion blur and chromatic
   aberration are switched off while 3D runs.
 - **Square Enix's lens glare effect** may appear in the wrong eye in scenes that use
-  it (not seen in testing).
+  it (not seen in testing). With bloom off (`r.BloomQuality = 0`) the game does not
+  draw it at all.
+- **Fire, heat haze and refraction:** the right eye showed the left eye's distortion
+  pass stretched over it (reported as horizontal blurry lines over the whole right eye
+  near a fire). Fixed by `[stereo] distortion_fix`, on by default; checked without a
+  headset only. If the right eye still breaks up near fire or hot air, set
+  `r.DisableDistortion = 1` under `[stereo_cvars]` (no heat haze or refraction at all)
+  and send the log.
 - Frame pacing with Virtual Desktop has not been measured beyond the mod's own frame
   times (see "Performance"). With SteamVR's virtual headset the runtime sometimes
   blocked for 6 to 7 ms per frame during the first 15 to 20 seconds of a session.
@@ -394,6 +401,7 @@ To narrow a problem down, change one setting at a time and start a new session:
 | first person at the wrong height or inside the head | `[first_person] eye = offset` (a fixed height above the character's position instead of its eyes) |
 | first person: the view lags when Cloud crouches or climbs | `[first_person] steady_seconds = 0.15` (follows faster, a little more step motion), or `head_bob = 1` |
 | anything else in first person | `[first_person] enabled = 0` |
+| the right eye breaks up (smears, lines) near fire, hot air or glass | `[stereo] distortion_fix = 1` (default); if it persists, `r.DisableDistortion = 1` under `[stereo_cvars]` |
 | stutter or low frame rate | `[xr] resolution_scale = 0.8` |
 | the headset stays on its runtime's own view although the game runs | look in the log for `OpenXR runtime (auto)`: if it chose another runtime than the headset's, pin the right one with `[xr] runtime`. Otherwise quit the game, wait for the launcher window to finish (it closes by itself), start again; if that does not help, restart the headset's PC app (for example the Virtual Desktop Streamer) |
 | the game does not start or crashes at once | `restore.cmd`, then start the game from Steam without the mod to rule out the game itself |

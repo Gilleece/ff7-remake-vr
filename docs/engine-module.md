@@ -23,6 +23,7 @@ global are written, and two single bytes of code can be changed:
 | the game window's mode | `r.SetRes` | the first time stereo becomes active in exclusive or windowed fullscreen: switched to a normal window (`[stereo] vr_window`), back when stereo is switched off (see "Window modes") |
 | light sort-key immediate | one byte in `FDeferredShadingSceneRenderer::RenderLights` | only while stereo renders, with `[stereo] light_fix = 1` (default): the skin lighting fix (below); the game's byte is put back in mono |
 | Square Enix's bloom reduce pass (`Process`) | inline hook, render thread | `[stereo] bloom_fix` (default on): for the first level of a view that does not start at the origin, an RHI command arms the right-eye bloom fix (below) |
+| Square Enix's distortion composite (`0x220e5b0`) | inline hook, render thread | always installed; runs only while heat haze or refraction renders: appends an RHI command with the view's rectangle that arms the right-eye distortion fix (below) on the composite's draw |
 | D3D11 immediate context draw/dispatch/clear/copy functions | inline hooks, RHI thread | installed at the first stereo frame when the bloom fix or the ambient occlusion fix is on (they act on single DrawIndexed calls), or by the first GPU trace; otherwise not installed |
 | `FRenderTargetPool::FindFreeElement` | inline hook, render thread | only after `gpu names on` (GPU trace labels) |
 | the object array and name pool | read on the game thread | only with `[stereo] movie_screen = 1`: movie detection (below) |
@@ -562,6 +563,7 @@ XInput pad, and whether Steam Input is on for the game on the player's PC.
 | `ao_fix` | `1` | right-eye ambient occlusion fix (below) |
 | `ssr_per_eye` | `1` | each eye's screen-space reflection run limited to its half of the target, and the per-view colour copy for it halved (see "Reflections per eye"); same image, about 0.45 ms less per frame at 2 x 3072x3264 |
 | `ssr_fix` | `1` | right-eye screen-space reflections: without it the right eye has none (see "Right-eye reflections fix") |
+| `distortion_fix` | `1` | heat haze and refraction per eye: without it the left view's distortion composite covers both eyes and the right view's draws nothing (see "Right-eye distortion fix") |
 | `hzb_skip` | `0` | `1` leaves out the further mips of the hierarchical depth chain nothing reads, while `r.HZBOcclusion` is 0 (see "Volumes and hierarchical depth per view"); gain within noise |
 | `tonemap_shift` | `auto` | with ReShade's Luma add-on loaded, the right view's bloom-combine input shifted to the origin (Luma's shader reads it there; without it both eyes show the left eye's image). `auto`: only while Luma is loaded; `0` off; `1` always (breaks the right eye without Luma). See "ReShade and Luma: the tonemapping shift and Luma's DLSS" |
 | `luma_dlss` | `0` | `0`: while stereo renders, Luma's own DLSS calls into NGX are refused (Luma's DLSS takes the double-wide target for a 50 % frame and leaves the right eye a squeezed quarter); `1`: allowed, for comparison. No effect without Luma; the mod's own DLSS is not affected |
@@ -1005,6 +1007,54 @@ there the difference the fix makes in the final image is small, at the level of 
 animation between two captures; the ghost in the headset session was seen in shade. The left
 eye is the same with the fix on and off (differences at the level of two captures without
 any change).
+
+## Right-eye distortion fix
+
+Square Enix's distortion (heat haze over fire and hot air, refraction through glass) ends with
+a composite into the scene colour, once per view. Its draw (UE's `DrawRectangle`) is given the
+view's size as the target size, while its viewport is the whole double-wide scene colour
+target. In mono the two are the same. In stereo the left view's rectangle is stretched over
+both eyes (its pixel shader ran for all 4128x2208 pixels at eyes 2064x2208) and the right
+view's rectangle lands at clip x 1 to 3, outside the viewport (no pixels). So whenever
+distortion renders, the right eye shows the left view's composite stretched over it, and its
+own distortion never appears. Details: `docs/re/engine.md`, section 10, "Distortion". A
+report from the headset of a right eye made entirely of horizontal blurry lines while a
+real-time fire was on screen fits this (inferred, not reproduced with a real fire: no fire
+or heat haze in the save used for testing).
+
+`src/engine/src/distortion_fix.cpp`: a hook on the composite function (render thread, signature
+"Distortion composite") appends an RHI command with the view's rectangle (`FViewInfo+0x70`).
+On the RHI thread the next `DrawIndexed` is checked (3 or 6 indices, render target of the scene
+buffer's size, viewport covering the whole target) and drawn with the viewport and scissor at
+the view's rectangle; for a view that does not start at the origin the vertex shader's
+`cb0` is replaced by a constant buffer of the same size holding the `DrawRectangle`
+parameters without the position bias (`PosScaleBias = w h 0 0`, `UVScaleBias = w h x y`,
+`InvTargetSizeAndTextureSize = 1/w 1/h 1/buffer`), so the view's rectangle maps onto its own
+viewport. The engine's buffers are not changed and the state is put back after the draw.
+Nothing happens while no distortion renders (the composite function is not called).
+`stereo distortfix [0|1]` switches it and shows its counters, including the number of pixels
+the composite shaded per eye (pipeline statistics queries, also with the fix off).
+
+Cost: none without distortion; with it, one small constant buffer update per frame.
+
+Evidence (Null backend, eyes 2064x2208, no distortion in the scene, the pipeline forced with
+`re poke 2202f62 90 90 90 90 90 90` and `re poke 22034a2 90 90 90 90 90 90`;
+`captures/fire/r3/session.txt`):
+
+| | Left composite shaded | Right composite shaded |
+|---|---|---|
+| fix off | 9 114 624 px (4128x2208, both eyes) | 0 |
+| fix on | 4 557 312 px (2064x2208) | 4 557 312 px (2064x2208) |
+| fix off, `dynres scale 0.65` | 9 114 624 px | 0 |
+| fix on, `dynres scale 0.65` | 1 924 608 px (1344x1432) | 1 924 608 px |
+
+Shape mismatches 0, failures 0 over 2988 corrected composites; before forcing, the composite
+never ran (`composites 0`), so the fix is idle in scenes without distortion. Both eyes'
+pictures with the fix on and off differ by capture noise only (mean 1.0 to 2.3 of 255, the
+same in both eyes; the forced pipeline has nothing to distort, so this shows the fix leaves
+the picture intact, not that it corrects a real effect): `captures/fire/r3/*.png`. Not yet
+seen with real heat haze; `r.DisableDistortion 1` (under `[stereo_cvars]`) switches the whole
+pipeline off as a fallback.
 
 ## Skin lighting fix
 
@@ -1733,7 +1783,9 @@ Ordered by how much they would bother a player in the headset:
 6. **Smooth camera yaw** is applied as the game does it (no snap turn option).
 7. Square Enix's custom glare (`docs/re/engine.md`, section 10) puts both views' glare at the
    same place of one target; in a scene with glare primitives the left eye would get the
-   right eye's glare. Not seen yet (no glare primitives in the scenes tested).
+   right eye's glare. Not seen yet (no glare primitives in the scenes tested). With
+   `r.BloomQuality 0` its combine pass is not added at all (it is built only on the bloom
+   path), so it cannot affect the picture then.
 8. **Posters on the sandwich board** outside the first room looked different between the
    eyes in a headset session (missing in the left eye with the board off-centre, a
    translucent offset copy in the right eye). With the Null backend at 3072x3264 the posters
