@@ -703,6 +703,7 @@ view turned right), the HUD panel stayed at the same place in the image. A first
 had the turn's sign reversed; the capture showed it. Not tested: a real pad, the snap
 keys, comfort in a headset.
 
+## ini keys (`[stereo]` in `ff7vr.ini`)
 
 | Key | Default | Meaning |
 |---|---|---|
