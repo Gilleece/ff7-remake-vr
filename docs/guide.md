@@ -212,7 +212,8 @@ in XInput mode); a DualSense or a pad in DirectInput mode is read by the game it
 the combinations do not apply to it (use the keys).
 
 3D starts in first person outside battles. First person puts the view between the
-character's eyes, hides the character and the sword, and blends over in about a
+character's eyes, leaves Cloud's body out of the picture (his shadow and footsteps stay;
+the sword is hidden), and blends over in about a
 third of a second. The view does not bob with Cloud's steps: it follows his movement at
 once and slow changes of his head's height (crouching, climbing) about half a second
 late. `[first_person] head_bob = 1` brings the step motion back. It only applies while the game's normal follow camera is active:

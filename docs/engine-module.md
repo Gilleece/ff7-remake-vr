@@ -250,7 +250,13 @@ captures after the toggles (`h05_third_toggled`, `h08_third_after_toggles`,
   Both filters run all the time, so `fp bob 0|1` switches without a jump. `head_offset`
   (forward, right, up, in the camera's yaw frame) is added. When the bone cannot be read (no such bone, a call fails, a location more than
   2.5 m from the pawn) the eyes go to the pawn's location plus `eye_offset` for that frame.
-- **Body**: with `hide = meshes` (default) every skeletal mesh component owned by the pawn
+- **Body**: with `hide = pass` (default since 08/10) the character's own skeletal meshes stay
+  visible to the engine but are left out of the main pass
+  (`PrimitiveComponent.SetRenderInMainPass(false)`, set again every 30 frames because there is
+  no getter), so the body is not drawn but its shadow stays and the game's footstep sounds keep
+  playing (confirmed in the headset on 08/10: "works perfectly"; with `meshes` the owner heard
+  no footsteps). The attached meshes are hidden as below. With `hide = meshes` (the default
+  before) every skeletal mesh component owned by the pawn
   that is visible is hidden (`SetVisibility(false)`, not propagated to attached components),
   and so is every mesh component of another actor attached to those meshes (Cloud's sword
   is one: `SceneComponent.GetChildrenComponents(true)`), when the first-person blend passes
@@ -261,12 +267,9 @@ captures after the toggles (`h05_third_toggled`, `h08_third_after_toggles`,
   of a few milliseconds on the game thread), so meshes added since the last time (equipment)
   are included. When the game exits nothing needs restoring (visibility is not saved).
 - **Other ways of hiding (experimental, dev pipe `fp hide <mode>` or `[first_person] hide`)**:
-  - `pass`: the character's own skeletal meshes stay visible to the engine but are left out
-    of the main pass (`PrimitiveComponent.SetRenderInMainPass(false)`, set again every 30
-    frames because there is no getter); the attached meshes are hidden as with `meshes`.
-    Seen (`captures/fp/run2/p2_pass_down`): looking down, no body, but the character's
-    shadow (the feet) stays on the floor; looking ahead (`p1_pass_ahead`) the same as
-    `meshes`.
+  - `pass` (now the default, above). Seen headless (`captures/fp/run2/p2_pass_down`): looking down,
+    no body, but the character's shadow (the feet) stays on the floor; looking ahead
+    (`p1_pass_ahead`) the same as `meshes`.
   - `bones`: the root bone (`Trans`) of each of the character's skeletal meshes is hidden
     with `SkinnedMeshComponent.HideBoneByName(name, PBO_None)` (`UnHideBoneByName` when
     first person ends, `IsBoneHiddenByName` checked every frame); attached meshes as with
@@ -617,7 +620,7 @@ XInput pad, and whether Steam Input is on for the game on the player's PC.
 | `head_offset` | `2 0 0` | forward, right, up in cm from the eye bones (or head bone), turned with the camera's yaw |
 | `eye_offset` | `10 0 75` | forward, right, up in cm from the pawn's location (capsule centre), turned with the camera's yaw; used with `eye = offset` and whenever the head bone cannot be read |
 | `battle_signal` | `EndBattleAPI.GetBattleSceneID result=0:4` | `Class.Function [world] [result=<offset>:<size>]`: a reflected function read every frame on a live object of that class (or its class default object for a static function); a non-zero result means a battle; empty = no automatic switch (see "Combat") |
-| `hide` | `meshes` | `meshes`: hide the character's skeletal meshes, and the mesh components of other actors attached to them (the sword), while in first person; `none`: hide nothing |
+| `hide` | `pass` | `pass`: the character's own meshes are left out of the main pass (shadow and footsteps kept) and the mesh components of other actors attached to them (the sword) are hidden, while in first person; `meshes`: hide all of them (footsteps go silent); `none`: hide nothing; `bones`, `head`: experimental |
 | `toggle_key` | `36` | virtual-key code of the keyboard toggle (36 = Home); `0` = none |
 | `pad_toggle` | `1` | View/Back + right stick click toggles, and is hidden from the game |
 | `blend_seconds` | `0.35` | duration of the move between third and first person |
@@ -1867,11 +1870,11 @@ Ordered by how much they would bother a player in the headset:
    pitched camera passed over (a counter, a low wall, a person) can then be close in front
    of the eyes or, possibly, around them (`e05_level_pdown`: an NPC's back fills the view).
    Not seen inside a wall; not tested against one on purpose.
-3. **First person**: the whole character is hidden, its shadow too (`hide = pass` keeps
-   the shadow); the view stays level and, with `head_bob = 0`, does not bob with the steps
-   (with `head_bob = 1` the eye bones' offset is smoothed over 80 ms only); footsteps may be
-   quieter or missing while the character is hidden (see "Footsteps" under "First person",
-   not established); interacting, climbing or squeezing animations were
+3. **First person**: the character is left out of the picture (`hide = pass`, the default:
+   its shadow and footsteps stay; `hide = meshes` hides it completely and the owner heard no
+   footsteps with it); the view stays level and, with `head_bob = 0`, does not bob with the steps
+   (with `head_bob = 1` the eye bones' offset is smoothed over 80 ms only); interacting,
+   climbing or squeezing animations were
    not tried. The eyes are 2 cm in front of the eye bones, about 75 cm above the pawn's
    location; with `hide = none` the inside of the face is visible.
 4. **Not exercised with scripted input**: conversations (camera cuts and scripted camera

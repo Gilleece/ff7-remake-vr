@@ -179,7 +179,7 @@ void read_camera_settings(const Config& cfg) {
     p.auto_combat = cfg.get_bool("first_person", "auto_combat", p.auto_combat.load());
     p.blend_seconds = static_cast<float>(cfg.get_float("first_person", "blend_seconds", p.blend_seconds.load()));
     p.toggle_key = static_cast<int>(cfg.get_int("first_person", "toggle_key", p.toggle_key.load()));
-    const std::string hide = cfg.get_string("first_person", "hide", "meshes");
+    const std::string hide = cfg.get_string("first_person", "hide", "pass");
     p.hide = hide == "none" ? 0 : hide == "head" ? 2 : hide == "bones" ? 3 : hide == "pass" ? 4 : 1;
     p.head_bob = cfg.get_bool("first_person", "head_bob", p.head_bob.load());
     p.steady_seconds = std::clamp(static_cast<float>(cfg.get_float("first_person", "steady_seconds", p.steady_seconds.load())), 0.01f, 5.0f);
