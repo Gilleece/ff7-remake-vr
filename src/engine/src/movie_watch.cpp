@@ -35,7 +35,9 @@ std::atomic<bool> g_playing{false};
 std::atomic<bool> g_simulate{false};  // test: behave as if a movie played (the switch to the screen and back)
 ULONGLONG g_started_ms = 0;           // when the current movie started
 std::uint64_t g_movie_frames = 0;     // engine frames while it played
-bool g_suppressing = false;  // we switched stereo off for a movie
+bool g_suppressing = false;  // we switched stereo off (for a movie or a cutscene)
+bool g_want_off = false;     // last frame's request: a movie plays or a cutscene is on the screen
+std::string g_off_reason;    // what switched stereo off
 void* g_player_class = nullptr;
 void* g_is_playing = nullptr;
 int g_scan_pos = 0;
@@ -44,6 +46,25 @@ std::uint64_t g_ticks = 0;
 std::uint64_t g_calls = 0, g_call_failures = 0;
 std::string g_current;  // path of the playing movie
 std::mutex g_status_mutex;
+
+// Cutscenes on the virtual screen ([stereo] cutscene_screen): an authored camera outside a
+// battle for longer than the delay holds stereo off like a movie; the follow camera back
+// for the hold time ends it. The camera state comes from the player module once per frame.
+std::atomic<bool> g_cut_enabled{false};
+std::atomic<int> g_cut_delay_ms{500};
+std::atomic<int> g_cut_hold_ms{300};
+std::atomic<bool> g_cam_authored{false};
+std::atomic<bool> g_cam_combat{false};
+std::atomic<void*> g_cam_target{nullptr};
+std::atomic<bool> g_cut_simulate{false};  // test: behave as if the view target were an authored camera
+std::atomic<int> g_cut_simulate_ms{0};     // test: for this long from the next frame (0 = until switched off)
+ULONGLONG g_cut_simulate_until = 0;
+bool g_cut_active = false;
+ULONGLONG g_authored_since = 0;  // first frame of the current authored-camera run (0 = none)
+ULONGLONG g_follow_since = 0;    // first frame of the follow camera while a cutscene is on the screen
+ULONGLONG g_cut_started = 0;
+std::uint64_t g_cut_count = 0, g_cut_frames = 0, g_authored_runs = 0, g_short_runs = 0;
+std::string g_cut_target;  // name and class of the authored view target that started it
 
 struct Player {
     void* obj;
@@ -227,13 +248,6 @@ static void update(bool any, const std::string& current) {
             log::info("movie: stopped {} (after {:.1f} s, {} engine frames, {:.1f} fps)", g_current, s, g_movie_frames,
                       s > 0 ? g_movie_frames / s : 0.0);
         }
-        if (any && device::wanted()) {
-            g_suppressing = true;
-            device::request_active(false);
-        } else if (!any && g_suppressing) {
-            g_suppressing = false;
-            device::request_active(true);
-        }
     }
     std::lock_guard lock(g_status_mutex);
     g_current = any ? current : std::string();
@@ -241,13 +255,157 @@ static void update(bool any, const std::string& current) {
 
 void set_simulate(bool on) { g_simulate = on; }
 
+namespace {
+
+std::string target_text(void* o) {
+    if (g_cut_simulate.load()) return "(simulated: stereo cutscene simulate on)";
+    if (!o) return "none";
+    return object_name(o) + " (" + object_name(class_of(o)) + ")";
+}
+
+// Game thread, once per frame after the movie state: the cutscene screen's own state.
+void cutscene_tick(ULONGLONG now) {
+    if (g_playing.load()) return;  // the movie owns the switch; the cutscene state waits
+    const bool authored = g_cam_authored.load();
+    if (!g_cut_enabled.load() || g_cam_combat.load()) {
+        if (g_cut_active) {
+            g_cut_active = false;
+            log::info("cutscene: ended after {:.1f} s ({})", (now - g_cut_started) / 1000.0,
+                      g_cut_enabled.load() ? "battle" : "cutscene_screen off");
+        }
+        g_authored_since = 0;
+        g_follow_since = 0;
+        return;
+    }
+    if (authored) {
+        g_follow_since = 0;
+        if (!g_authored_since) {
+            g_authored_since = now;
+            ++g_authored_runs;
+        }
+        if (g_cut_active) {
+            ++g_cut_frames;
+        } else if (now - g_authored_since >= static_cast<ULONGLONG>(std::max(0, g_cut_delay_ms.load()))) {
+            g_cut_active = true;
+            g_cut_started = now;
+            g_cut_frames = 0;
+            ++g_cut_count;
+            {
+                std::lock_guard lock(g_status_mutex);
+                g_cut_target = target_text(g_cam_target.load());
+            }
+            log::info("cutscene: authored camera {} for {} ms (delay {} ms): stereo held off, the scene plays on the screen",
+                      g_cut_target, now - g_authored_since, g_cut_delay_ms.load());
+        }
+        return;
+    }
+    if (g_authored_since && !g_cut_active) {
+        ++g_short_runs;
+        log::info("cutscene: authored camera for {} ms only (delay {} ms): stays in 3D", now - g_authored_since,
+                  g_cut_delay_ms.load());
+    }
+    g_authored_since = 0;
+    if (!g_cut_active) return;
+    if (!g_follow_since) g_follow_since = now;
+    if (now - g_follow_since >= static_cast<ULONGLONG>(std::max(0, g_cut_hold_ms.load()))) {
+        g_cut_active = false;
+        log::info("cutscene: follow camera back for {} ms (hold {} ms) after {:.1f} s, {} frames: ended", now - g_follow_since,
+                  g_cut_hold_ms.load(), (now - g_cut_started) / 1000.0, g_cut_frames);
+        g_follow_since = 0;
+    }
+}
+
+// The one owner of the stereo switch for movies and cutscenes: switches stereo off when
+// either starts (only when it was on) and back on when neither holds it any more.
+void arbitrate() {
+    const bool want_off = g_playing.load() || g_cut_active;
+    if (want_off && !g_want_off && device::wanted()) {
+        g_suppressing = true;
+        {
+            std::lock_guard lock(g_status_mutex);
+            g_off_reason = g_playing.load() ? "movie" : "cutscene";
+        }
+        log::info("movie/cutscene: stereo held off for a {}", g_off_reason);
+        device::request_active(false);
+    } else if (!want_off && g_suppressing) {
+        g_suppressing = false;
+        log::info("movie/cutscene: stereo released (was held off for a {})", g_off_reason);
+        {
+            std::lock_guard lock(g_status_mutex);
+            g_off_reason.clear();
+        }
+        device::request_active(true);
+    } else if (want_off && g_suppressing && g_playing.load() && g_off_reason != "movie") {
+        log::info("movie/cutscene: a movie started during a cutscene; the movie holds stereo off now");
+        std::lock_guard lock(g_status_mutex);
+        g_off_reason = "movie";
+    }
+    g_want_off = want_off;
+}
+
+}  // namespace
+
+void note_camera(void* view_target, bool authored, bool combat) {
+    g_cam_target = view_target;
+    if (const int ms = g_cut_simulate_ms.exchange(0); ms > 0) g_cut_simulate_until = GetTickCount64() + static_cast<ULONGLONG>(ms);
+    if (g_cut_simulate_until && GetTickCount64() >= g_cut_simulate_until) {
+        g_cut_simulate_until = 0;
+        g_cut_simulate = false;
+        log::info("cutscene: simulated authored camera off (timed)");
+    }
+    g_cam_authored = authored || g_cut_simulate.load();
+    g_cam_combat = combat;
+}
+
+void set_cutscene(bool on) {
+    if (g_cut_enabled.exchange(on) != on) log::info("cutscene: screen {}", on ? "on" : "off");
+}
+
+void set_cutscene_times(int delay_ms, int hold_ms) {
+    if (delay_ms >= 0) g_cut_delay_ms = std::min(delay_ms, 60000);
+    if (hold_ms >= 0) g_cut_hold_ms = std::min(hold_ms, 60000);
+}
+
+bool cutscene_active() { return g_cut_active; }
+
+void set_cutscene_simulate(bool on, int ms) {
+    if (on && ms > 0) g_cut_simulate_ms = ms;
+    if (g_cut_simulate.exchange(on) != on)
+        log::info("cutscene: simulated authored camera {}{}", on ? "on" : "off", on && ms > 0 ? std::format(" for {} ms", ms) : std::string());
+}
+
+// Game thread or the pipe thread: approximate values are fine for a status line.
+std::string cutscene_status() {
+    const ULONGLONG now = GetTickCount64();
+    const ULONGLONG since = g_authored_since;
+    std::lock_guard lock(g_status_mutex);
+    return std::format(
+        "cutscene screen {} delay {} ms hold {} ms: active {} ({}{}) authored now {} ({} ms) combat {} target {} | cutscenes {} "
+        "authored runs {} short runs {} | stereo held off {} ({})",
+        g_cut_enabled.load() ? "on" : "off", g_cut_delay_ms.load(), g_cut_hold_ms.load(), g_cut_active ? 1 : 0,
+        g_cut_active ? g_cut_target : std::string("-"),
+        g_cut_active ? std::format(", {:.1f} s", (now - g_cut_started) / 1000.0) : std::string(), g_cam_authored.load() ? 1 : 0,
+        since ? now - since : 0, g_cam_combat.load() ? 1 : 0, g_cam_authored.load() ? target_text(g_cam_target.load()) : "-",
+        g_cut_count, g_authored_runs, g_short_runs, g_suppressing ? 1 : 0, g_off_reason.empty() ? std::string("-") : g_off_reason);
+}
+
 void tick() {
+    // The cutscene state and the switch run every frame, after the movie state.
+    struct After {
+        ~After() {
+            try {
+                cutscene_tick(GetTickCount64());
+                arbitrate();
+            } catch (...) {
+            }
+        }
+    } after;
     if (g_simulate.load()) {
         update(true, "(simulated: movie simulate on)");
         return;
     }
     if (!g_enabled.load()) {
-        if (g_playing.load() || g_suppressing) update(false, {});
+        if (g_playing.load()) update(false, {});
         return;
     }
     ++g_ticks;

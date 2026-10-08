@@ -891,6 +891,16 @@ void request_active(bool on) {
     if (g_wanted.exchange(on) != on) log::info("stereo: switched {} (from the next frame)", on ? "on" : "off");
 }
 bool active() { return g_active.load(); }
+
+bool last_listener_pose(FVector& location, FRotator& rotation, std::uint64_t& frame) {
+    std::lock_guard lock(g_diag_mutex);
+    if (g.stereo_draws == 0) return false;
+    location = FVector{(g.eye_loc[0].X + g.eye_loc[1].X) * 0.5f, (g.eye_loc[0].Y + g.eye_loc[1].Y) * 0.5f,
+                       (g.eye_loc[0].Z + g.eye_loc[1].Z) * 0.5f};
+    rotation = g.eye_rot[0];
+    frame = g.stereo_draws;
+    return true;
+}
 bool wanted() { return g_wanted.load(); }
 
 void tick_begin() {

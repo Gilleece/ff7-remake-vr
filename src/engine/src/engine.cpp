@@ -4,6 +4,7 @@
 #include "engine_internal.h"
 #include "fixes.h"
 #include "gpu_trace.h"
+#include "audio_listener.h"
 #include "graphics.h"
 #include "rhi_command.h"
 #include "bloom_fix.h"
@@ -248,6 +249,10 @@ bool start(const StartupContext& ctx) {
         g_opt.allow_unknown_build = cfg.get_bool("stereo", "allow_unknown_build", false);
         g_opt.light_fix = cfg.get_bool("stereo", "light_fix", true);
         g_opt.movie_screen = cfg.get_bool("stereo", "movie_screen", true);
+        movie::set_cutscene(cfg.get_bool("stereo", "cutscene_screen", false));
+        movie::set_cutscene_times(static_cast<int>(cfg.get_int("stereo", "cutscene_screen_delay_ms", 500)),
+                                  static_cast<int>(cfg.get_int("stereo", "cutscene_screen_hold_ms", 300)));
+        audio_listener::set_enabled(cfg.get_bool("first_person", "audio_listener", true));
         g_opt.bloom_fix = cfg.get_bool("stereo", "bloom_fix", true);
         g_opt.ao_fix = cfg.get_bool("stereo", "ao_fix", true);
         g_opt.distortion_fix = cfg.get_bool("stereo", "distortion_fix", true);
@@ -301,7 +306,12 @@ bool start(const StartupContext& ctx) {
             return reply;
         });
         dev_commands::add("fp", "fp status|toggle|first|third|combat <0|1|auto>|offset|eye|hide|boom|pivot|bones|funcs|call (fp help): camera modes",
-                          [](std::string_view args) { return player::command(std::string(args)); });
+                          [](std::string_view args) {
+                              std::string reply = player::command(std::string(args));
+                              if (args.empty() || args.starts_with("status")) reply += " | " + audio_listener::status();
+                              if (args.starts_with("audio")) reply = audio_listener::command(std::string(args.substr(5)));
+                              return reply;
+                          });
         dev_commands::add("controls", "controls status | pad <hex buttons> | recenter | stereo | nearer | farther: the player's keys and gamepad combinations",
                           [](std::string_view args) { return controls::command(std::string(args)); });
         dev_commands::add("snapturn", "snapturn status | snap <deg>|off | deadzone | repeat | log | stick <lx> <ly> <rx> <ry>: snap turn ([comfort] snap_turn)",

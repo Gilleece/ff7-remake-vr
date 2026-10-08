@@ -183,6 +183,8 @@ while an `xinput1_3.dll` it did not put there is in the folder.
   shot glides over a third of a second instead of jumping (`[camera] blend_seconds`).
 - **Conversations and cutscenes** that use their own camera shots are shown from the
   game's camera, as the game frames them (not seen in testing either).
+  `[stereo] cutscene_screen = 1` shows them flat on the virtual screen instead, like a
+  movie, if the game camera's cuts and pans in 3D are uncomfortable.
 - **HUD and menus in the world:** on a flat panel about 3 m in front of you, 3.56 x
   2 m, that stays in place when you turn your head. Whatever the game shows full
   screen (main menu, command menu, dialogue) is on that panel too.
@@ -219,7 +221,8 @@ character's eyes, leaves Cloud's body out of the picture (his shadow and footste
 the sword is hidden), and blends over in about a
 third of a second. The view does not bob with Cloud's steps: it follows his movement at
 once and slow changes of his head's height (crouching, climbing) about half a second
-late. `[first_person] head_bob = 1` brings the step motion back. It only applies while the game's normal follow camera is active:
+late. `[first_person] head_bob = 1` brings the step motion back. In first person the game's
+sound is heard from your head, so it turns with you (`[first_person] audio_listener = 0` leaves it at the game camera). It only applies while the game's normal follow camera is active:
 during a scripted camera shot the game's camera is used as it is. A battle switches
 to third person and its end back to first person; a manual switch lasts until the
 next battle starts or ends.

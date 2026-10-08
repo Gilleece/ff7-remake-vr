@@ -56,6 +56,10 @@ FixedStereoHost* fixed_host();  // the built-in host (for dev commands)
 void request_active(bool on);
 bool wanted();  // switched on
 bool active();  // the current frame renders in stereo (wanted and the host can show it)
+// The last stereo frame's listener pose: the centre between the two eye cameras and the
+// left eye camera's rotation (headset included); `frame` counts stereo frames. False
+// before the first stereo frame.
+bool last_listener_pose(ue::FVector& location, ue::FRotator& rotation, std::uint64_t& frame);
 
 // Game thread, from the UGameEngine::Tick hook.
 void tick_begin();

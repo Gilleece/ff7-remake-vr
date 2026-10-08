@@ -13,6 +13,13 @@
 // the game thread. While a non-menu player plays, stereo is switched off, so the engine
 // renders the normal window and the render module shows it on the virtual screen; stereo
 // comes back when no movie plays any more.
+//
+// Cutscenes ([stereo] cutscene_screen, off by default): while the player module reports an
+// authored camera (a view target that is neither the pawn nor the game's EndCameraActor)
+// outside a battle for longer than cutscene_screen_delay_ms, stereo is held off the same
+// way and the scene plays flat on the virtual screen; it comes back once the follow camera
+// has been back for cutscene_screen_hold_ms. The watcher is the one owner of that switch:
+// a movie takes precedence, and stereo returns only when neither holds it.
 
 #include <cstdint>
 #include <string>
@@ -35,5 +42,16 @@ void set_enabled(bool on);
 void set_include_menu(bool on);
 // Test: behave as if a movie played (stereo off, the virtual screen) until switched off again.
 void set_simulate(bool on);
+
+// Game thread, once per frame (end of player::tick): the camera state of this frame.
+void note_camera(void* view_target, bool authored, bool combat);
+// [stereo] cutscene_screen, cutscene_screen_delay_ms, cutscene_screen_hold_ms (-1 keeps a value).
+void set_cutscene(bool on);
+void set_cutscene_times(int delay_ms, int hold_ms);
+bool cutscene_active();
+// Test: behave as if the view target were an authored camera until switched off again, or
+// for `ms` milliseconds from the next frame (ms > 0).
+void set_cutscene_simulate(bool on, int ms = 0);
+std::string cutscene_status();
 
 }  // namespace ff7vr::engine::movie

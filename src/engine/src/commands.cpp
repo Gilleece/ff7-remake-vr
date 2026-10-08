@@ -19,6 +19,7 @@
 //   stereo aofix [0|1]            right-eye ambient occlusion fix (bloom_fix.h), with its counters
 //   stereo distortfix [0|1]       right-eye distortion (heat haze) fix (distortion_fix.h), with its counters
 //   stereo movie [on|off]         movie detection (movie_watch.h), with its state
+//   stereo cutscene [on|off|status|delay <ms>|hold <ms>|simulate on|off|<ms>]   cutscenes on the virtual screen (movie_watch.h)
 //   stereo window [<w>x<h>|0]     game window size while VR renders in a fullscreen mode (fixes.h)
 //   stereo frametime <s>          frame time window length in seconds; restarts the window
 //   stereo swap <0|1>             test: right eye rendered into the left half and vice versa, to tell
@@ -238,6 +239,14 @@ std::string stereo_command(const std::vector<std::string>& a) {
         if (a.size() == 4 && a[2] == "menu") movie::set_include_menu(a[3] == "1");
         if (a.size() == 4 && a[2] == "simulate") movie::set_simulate(a[3] == "on" || a[3] == "1");
         return "ok " + movie::status();
+    }
+    if (c == "cutscene") {
+        if (a.size() == 3 && (a[2] == "on" || a[2] == "off")) movie::set_cutscene(a[2] == "on");
+        if (a.size() == 4 && a[2] == "simulate")
+            movie::set_cutscene_simulate(a[3] != "off" && a[3] != "0", to_float(a[3], v[0]) && v[0] > 1 ? static_cast<int>(v[0]) : 0);
+        if (a.size() == 4 && (a[2] == "delay" || a[2] == "hold") && to_float(a[3], v[0]) && v[0] >= 0)
+            movie::set_cutscene_times(a[2] == "delay" ? static_cast<int>(v[0]) : -1, a[2] == "hold" ? static_cast<int>(v[0]) : -1);
+        return "ok " + movie::cutscene_status();
     }
     if (c == "window") {
         if (a.size() == 3) fixes::set_vr_window_size(a[2]);

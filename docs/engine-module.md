@@ -434,6 +434,27 @@ captures after the toggles (`h05_third_toggled`, `h08_third_after_toggles`,
   offset and size in the parameter block default to 0 and 1 byte), or `fp signal ...` on the
   dev pipe.
 
+### Audio listener at the head
+
+`[first_person] audio_listener = 1` (default): the game's audio listener follows the game
+camera (behind the character) and ignores the headset. While first person applies (stereo,
+follow camera, the blend past half way), `audio_listener.cpp` calls
+`PlayerController.SetAudioListenerOverride(nullptr, location, rotation)` once per frame
+through `ProcessEvent`: the location is the centre between the last stereo frame's two eye
+cameras, the rotation the left eye camera's (headset yaw, pitch and roll included;
+`device::last_listener_pose`, one frame old). The parameter block is
+`{USceneComponent*, FVector at 8, FRotator at 20}` (UE4.18 float vectors). It calls
+`PlayerController.ClearAudioListenerOverride` when first person stops applying, stereo goes
+off, `audio_listener` is switched off, or the controller or pawn changes (log line
+`audio: listener back at the game camera (<reason>)`). Both functions are found by name
+(`audio: ... found`). Counters: `fp status` (appended) or `fp audio [on|off]`.
+
+Status (08/10, Null backend, headless): both functions found at start, 1164 and 2867 calls
+without a failure over the first runs, the pose at the head (about 1 m above the pawn's
+location, yaw of the eyes), cleared on the first/third person toggle, on `fp audio off` and
+on stereo off, set again when first person returned. Whether the sound now turns with the
+head can only be heard in a headset.
+
 ### Gamepad toggle
 
 The loader passes every successful `XInputGetState` result the game receives through
@@ -682,7 +703,6 @@ view turned right), the HUD panel stayed at the same place in the image. A first
 had the turn's sign reversed; the capture showed it. Not tested: a real pad, the snap
 keys, comfort in a headset.
 
-## ini keys (`[stereo]` in `ff7vr.ini`)
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -1759,6 +1779,44 @@ movies are WebM files (VP9 video at 1920x1080 and 59.94 fps, Opus audio, read fr
 header of `MV_TOWN7_2250_US.emov`; `.emov` is only the extension): the exe carries the engine's
 WebMMedia plugin, so every movie frame is most likely decoded on the CPU and uploaded to the card
 (inferred from the plugin name; the decoder was not traced).
+
+### Cutscenes on the virtual screen
+
+`[stereo] cutscene_screen = 1` (default 0) treats a scripted camera shot like a movie.
+At the end of every `player::tick` (game thread) `audio_listener::player_frame` hands the
+watcher the frame's camera state: the view target counts as an **authored camera** when it
+is neither the pawn nor the game's `EndCameraActor` (a `CineCameraActor` or any other
+actor; no pawn is needed, since a cutscene may leave the controller without one), plus the
+battle flag (`player`'s combat state, which follows the battle signal while
+`[first_person] auto_combat = 1`). The watcher (`movie_watch.cpp`, start of the next frame):
+
+- an authored camera outside a battle for `cutscene_screen_delay_ms` (default 500) starts
+  a cutscene: `cutscene: authored camera <name> (<class>) for N ms (delay D ms): stereo held off`;
+  shorter runs (the opening shot after a load, brief misses) log
+  `cutscene: authored camera for N ms only (delay D ms): stays in 3D`;
+- the cutscene ends once the view target has been the pawn or `EndCameraActor` (or none)
+  for `cutscene_screen_hold_ms` (default 300): `cutscene: follow camera back for N ms ...`;
+  a battle or `cutscene_screen = 0` ends it at once;
+- one arbitration owns `device::request_active` for movies and cutscenes: stereo goes off
+  when either starts (only if it was on) and comes back only when neither holds it; a movie
+  that starts during a cutscene takes over (`movie/cutscene: ...` lines), and the cutscene
+  state waits while a movie plays.
+
+The scripted moves of the game's own `EndCameraActor` (the camera turned away from the
+character) are not detected: in flat mode the camera modes' aim test does not run
+(`adjust_camera` is only called for stereo views), so only the view target can tell.
+Live: `stereo cutscene on|off|status|delay <ms>|hold <ms>`; `stereo cutscene simulate on|off|<ms>`
+treats the view target as an authored camera (test; `<ms>`: for that long).
+
+Status (08/10, Null backend, headless): with the simulated authored camera, a 297 ms run
+at the default delay stayed in 3D (`authored camera for 297 ms only`), a 3 s run switched
+to the screen after 500 ms and back 313 ms after the camera returned, delay 0 switched at
+once, and a movie started during a cutscene took over the switch and released it when it
+stopped; a capture while held off showed the flat game on the virtual screen. Frame-time
+windows around a switch pair: max 72 to 76 ms (the eye target's reallocation, as for
+movies). The game's opening shot after Continue is not detected: it is the game's own
+`EndCameraActor` moved by script (the view target never changed in three runs). No real
+conversation or cutscene was reached headless.
 
 ### Frame rate during movies
 
