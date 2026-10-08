@@ -647,8 +647,8 @@ XInput pad, and whether Steam Input is on for the game on the player's PC.
 
 How it works. The loader's XInput wrapper calls a stick filter after the button filter
 (`xinput::set_stick_filter`, the same call path as the pad filter, so it also applies
-after the Steam overlay's hook). While snap turn is on, the right stick's X reaches the
-game as 0, so the game camera never yaws from the stick (its Y, the camera pitch, passes).
+after the Steam overlay's hook). While snap turn is on and 3D renders (menus, movies and
+the virtual screen get the stick unchanged), the right stick's X reaches the game as 0, so the game camera never yaws from the stick (its Y, the camera pitch, passes).
 A push beyond the deadzone asks the render module for one step
 (`render::RequestSnapTurn`, lock-free; the `snap <deg>` dev command does the same). The
 XR library applies it in the next `WaitFrame` as a yaw on top of the recenter
@@ -666,6 +666,21 @@ Dev commands: `snapturn status` (setting, turn in effect, steps, polls with the 
 stick hidden, last left stick in/out), `snapturn snap <deg>|off`, `deadzone`, `repeat`,
 `log <n>|on`, `snapturn stick <lx> <ly> <rx> <ry>` (one stick state, -1..1, through the
 filter without a pad), and in the render module `snap <deg>`.
+
+Checked on the Null backend (08/10, `snap_turn = 45`, `[dev] virtual_pad = 1`, first
+area): the virtual pad's `stick R 0.9 0 300` went through the game's own XInput poll and
+gave one step (`comfort: snap turn +45 deg (right stick)`, then
+`xr: snap turn: -45.0 deg -> view turned -45.0 deg from the recenter`, the library's
+yaw being positive to the left) and `right stick X hidden in 55 polls (last 29490)`. A
+second `stick R` sent straight after the first gave no step: the game never polled a
+released stick between them, so the step stayed disarmed; `snapturn stick 0 0 0.9 0`
+then `0.95` gave one step, not two. With the view turned 45 degrees right, `snapturn
+stick 0 1 0 0` (forward) came out as `(23170, 23170)` (forward-right); at 90 degrees the
+pad's `stick L 0 1` reached the game as `(32767, 0)`. A recenter set the turn back to 0.
+Eye captures before and after a 45 degree step: the scene moved left in the image (the
+view turned right), the HUD panel stayed at the same place in the image. A first build
+had the turn's sign reversed; the capture showed it. Not tested: a real pad, the snap
+keys, comfort in a headset.
 
 ## ini keys (`[stereo]` in `ff7vr.ini`)
 

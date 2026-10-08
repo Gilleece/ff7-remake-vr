@@ -313,8 +313,8 @@ session is created on the game's adapter.
 `[xr] pause_on_remove = 1` (default) and `pause_key = 77` (M, the game's menu, which
 pauses it); `src/render/src/pause_on_remove.cpp`. When the session leaves FOCUSED for
 VISIBLE or SYNCHRONIZED (the headset taken off, the runtime's own menu opened) while 3D
-runs, the key is sent once with `SendInput` (a press and a release, as the dev harness
-sends keys), only if a window of the game has the focus (otherwise the log says it was
+runs, the key is sent once with `SendInput` (scan codes, held for 80 ms on a worker
+thread, as the dev harness sends keys), only if a window of the game has the focus (otherwise the log says it was
 skipped), and at most once per 5 s. Nothing is sent when the focus returns: the player
 closes the menu. The state is read from every frame's `FrameInfo::state` in
 `XrController::WaitOne`, so it works with any backend. When the runtime offers
