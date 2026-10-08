@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -808,7 +809,18 @@ void configure_render_scale(const Config& cfg) {
                       [](std::string_view args) { return dynres_command(args); });
     // Reflections per eye (fixes.h); its draw hook belongs to the post-process fixes.
     fixes::set_ssr_per_eye(cfg.get_bool("stereo", "ssr_per_eye", true));
-    fixes::set_ssr_fix(static_cast<int>(cfg.get_int("stereo", "ssr_fix", 1)));
+    {
+        // 0 (off, false, no): the right eye has no screen-space reflections; 1 (on, true, yes):
+        // the right view's run is moved into place (its reflections are wrong, see
+        // docs/engine-module.md); 2: no screen-space reflections in either eye (the default).
+        std::string v = cfg.get_string("stereo", "ssr_fix", "2");
+        for (char& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        int mode = 2;
+        if (v == "0" || v == "off" || v == "false" || v == "no") mode = 0;
+        else if (v == "1" || v == "on" || v == "true" || v == "yes") mode = 1;
+        else if (v != "2") log::warn("stereo: ssr_fix = '{}' not understood; using 2", v);
+        fixes::set_ssr_fix(mode);
+    }
     dev_commands::add("ssr", "ssr [status] | on | off | fix 0-2 | poison 0-3: screen-space reflections per eye half, right-eye reflections fix",
                       [](std::string_view args) {
                           if (args == "on" || args == "off") fixes::set_ssr_per_eye(args == "on");
