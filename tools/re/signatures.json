@@ -886,6 +886,18 @@
       "howto": "The chain builder 0x2287ba0 (called from FPostProcessing::Process when view+0xE70 > 0) allocates ten passes with this vtable and nine with 0x4d5fe18; slot 5 of the vtable is Process. The function checks +0x85 (level/first-level loads) and +0xD5 (`mov r10d,[r9+0x70]`)."
     },
     {
+      "name": "Distortion composite",
+      "kind": "function",
+      "pattern": "48 89 5C 24 10 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 30 FF FF FF 48 81 EC D0 01 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 C0 00 00 00 33 FF",
+      "resolve": {
+        "type": "match",
+        "offset": 0
+      },
+      "expect": "0x220e5b0",
+      "desc": "Last pass of Square Enix's distortion (heat haze, refraction): composites the half-size 'DistortBlurred' result into the scene colour, once per view. rcx = RHI command list, rdx = scene render targets (0x5923ad0), r8 = view (FViewInfo*), r9 = blurred target. Its DrawRectangle gets the view's size as target size inside a viewport covering the whole scene colour target: in stereo the left view's composite covers both eyes and the right view's lands outside the viewport.",
+      "howto": "Called once from the distortion renderer 0x2202e90 (string L\"Distortion\", L\"DistortBlurred\", L\"DistortHistory\"; called from the scene renderer at 0x21e7dbf after the r.DisableDistortion check), the last call of its per-view loop. The mod checks +0x3E: mov r12,[r8+0x2880]; mov r13,r8; mov r15,rcx."
+    },
+    {
       "name": "FRenderTargetPool::FindFreeElement",
       "kind": "function",
       "pattern": "40 55 53 41 56 41 57 48 8D AC 24 D8 FE FF FF",

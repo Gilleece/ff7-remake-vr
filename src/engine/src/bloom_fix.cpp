@@ -1,5 +1,7 @@
 #include "bloom_fix.h"
 
+#include "distortion_fix.h"
+
 #if FF7VR_ENGINE_WITH_DLSS
 #include "dlss.h"
 #endif
@@ -416,6 +418,7 @@ bool tonemap_shift(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, g
 
 bool on_draw_indexed(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_trace::DrawIndexedFn original) {
     fixes::ssr_before_draw(ctx);
+    if (distortion_fix::on_draw_indexed(ctx, count, start, base, original)) return true;
     if (count == 3 && g_tonemap_shift.load(std::memory_order_relaxed) && device::active() && tonemap_shift(ctx, count, start, base, original))
         return true;
 #if FF7VR_ENGINE_WITH_DLSS
@@ -471,9 +474,10 @@ void frame(ID3D11Texture2D* any_texture) {
     g_armed.active = false;
     g_last = LastFullscreen{};
     fixes::ssr_frame();
+    distortion_fix::frame();
     update_tonemap_shift();
     bool hooks = g_enabled.load(std::memory_order_relaxed) || g_ao_enabled.load(std::memory_order_relaxed) || fixes::ssr_wants_hooks() ||
-                 fixes::hzb_skip() != 0;
+                 fixes::hzb_skip() != 0 || distortion_fix::wants_hooks();
 #if FF7VR_ENGINE_WITH_DLSS
     dlss::frame(any_texture);
     hooks = hooks || dlss::wants_hooks();

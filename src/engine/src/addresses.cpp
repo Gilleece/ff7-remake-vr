@@ -90,6 +90,14 @@ constexpr Sig kBloomReduceProcess{"Bloom reduce pass Process",
                                   Rule::Match, 0, 0, 0, 0x22861b0};
 constexpr std::uint8_t kBloomReduceFields[] = {0x41, 0x8b, 0x8e, 0xa8, 0x00, 0x00, 0x00, 0x45, 0x0f, 0xb6, 0xae, 0xac, 0x00, 0x00, 0x00};
 constexpr std::uint8_t kBloomReduceRect[] = {0x45, 0x8b, 0x51, 0x70};
+// Square Enix's distortion composite (the last pass of the heat haze / refraction pipeline,
+// called once per view from the distortion renderer 0x2202e90). Its argument layout (r8 = the
+// view, rcx = the RHI command list) is checked at +0x3E.
+constexpr Sig kDistortionComposite{"Distortion composite",
+                                   "48 89 5C 24 10 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 30 FF FF FF 48 81 EC D0 01 00 00 48 8B 05 "
+                                   "?? ?? ?? ?? 48 33 C4 48 89 85 C0 00 00 00 33 FF",
+                                   Rule::Match, 0, 0, 0, 0x220e5b0};
+constexpr std::uint8_t kDistortionCompositeArgs[] = {0x4d, 0x8b, 0xa0, 0x80, 0x28, 0x00, 0x00, 0x4d, 0x8b, 0xe8, 0x4c, 0x8b, 0xf9};
 constexpr Sig kFindFreeElement{"FRenderTargetPool::FindFreeElement", "40 55 53 41 56 41 57 48 8D AC 24 D8 FE FF FF", Rule::Match, 0, 0, 0,
                                0x253d6b0};
 
@@ -330,6 +338,12 @@ Addresses resolve_addresses(bool allow_unknown_build, const void* hmd_detour) {
             a.BloomReduceProcess = p;
         else
             log::warn("engine: bloom reduce pass found, but its field offsets differ from this build's");
+    }
+    if (std::uintptr_t p = addr(kDistortionComposite, false)) {
+        if (std::memcmp(reinterpret_cast<const void*>(p + 0x3e), kDistortionCompositeArgs, sizeof(kDistortionCompositeArgs)) == 0)
+            a.DistortionComposite = p;
+        else
+            log::warn("engine: distortion composite found, but its argument layout differs from this build's");
     }
 
     a.stereo_ok = a.failure.empty();

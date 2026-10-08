@@ -17,6 +17,7 @@ add_library(ff7vr_engine STATIC
     src/gpu_trace.cpp
     src/movie_watch.cpp
     src/bloom_fix.cpp
+    src/distortion_fix.cpp
     src/uobj.cpp
     src/player.cpp
     src/controls.cpp

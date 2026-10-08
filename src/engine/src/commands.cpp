@@ -17,6 +17,7 @@
 //   stereo host <render|fixed>    switch where eye size and views come from
 //   stereo bloomfix [0|1]         right-eye bloom fix (bloom_fix.h), with its counters
 //   stereo aofix [0|1]            right-eye ambient occlusion fix (bloom_fix.h), with its counters
+//   stereo distortfix [0|1]       right-eye distortion (heat haze) fix (distortion_fix.h), with its counters
 //   stereo movie [on|off]         movie detection (movie_watch.h), with its state
 //   stereo window [<w>x<h>|0]     game window size while VR renders in a fullscreen mode (fixes.h)
 //   stereo frametime <s>          frame time window length in seconds; restarts the window
@@ -30,6 +31,7 @@
 #include "ff7vr/engine/engine.h"
 
 #include "bloom_fix.h"
+#include "distortion_fix.h"
 #include "engine_internal.h"
 #include "fixes.h"
 #include "movie_watch.h"
@@ -225,6 +227,10 @@ std::string stereo_command(const std::vector<std::string>& a) {
     if (c == "aofix") {
         if (a.size() == 3) bloom_fix::set_ao_enabled(a[2] == "1");
         return "ok " + bloom_fix::ao_status();
+    }
+    if (c == "distortfix") {
+        if (a.size() == 3) distortion_fix::set_enabled(a[2] == "1");
+        return "ok " + distortion_fix::status();
     }
     if (c == "movie") {
         if (a.size() == 3 && (a[2] == "on" || a[2] == "off")) movie::set_enabled(a[2] == "on");
