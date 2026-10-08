@@ -326,6 +326,15 @@ headset as a focus loss is not known yet.
 Dev commands: `xr-pause status | on | off | key <vk> | send`; with the Null backend
 `xr-sim focus 0|1` (VISIBLE / FOCUSED) and `xr-sim presence 0|1|off` simulate the events.
 
+Checked on the Null backend (08/10, first area, game window in the foreground):
+`xr-sim focus 0` logged `xr: session Focused -> Visible (headset off or the runtime's
+menu)` and `xr: focus lost: pause key 77 sent`, and the eye capture 1.5 s later showed
+the game's main menu on the panel (the game paused). A second focus loss 1.7 s after the
+first was skipped (`pause key not sent (one was sent 1719 ms ago)`). A first version that
+sent the key without scan codes and without a hold reached SendInput but the game did not
+react. Not tested: a real runtime's state changes when the headset comes off (Virtual
+Desktop, SteamVR), XR_EXT_user_presence with a real runtime.
+
 ### The headset's own recenter
 
 The mod's recenter (End, `recenter`, and once at session start with
