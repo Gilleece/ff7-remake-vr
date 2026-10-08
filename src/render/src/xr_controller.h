@@ -105,6 +105,11 @@ public:
     std::string VideoMemoryStatus();
     std::string Capture(const std::string& prefix, uint32_t timeoutMs);
     std::string Recenter();
+    // Snap turn: turns the views by `degrees` (positive = right) on top of the recenter, from
+    // the next frame. Any thread, lock-free (the pad's poll thread calls it).
+    std::string SnapTurn(float degrees);
+    // Any thread, lock-free: the snap turn in effect for the latest frame (degrees, positive = right).
+    float SnapYawDeg() const { return snapYawDeg_.load(std::memory_order_relaxed); }
     std::string Restart();
     std::string SetModeCommand(const std::string& mode);
     std::string StereoTestCommand(const std::string& args);
@@ -188,6 +193,8 @@ private:
     // Backend. Published under rtMutex_; frame calls only while ready_.
     std::unique_ptr<xr::IXrBackend> backend_;
     std::atomic<bool> ready_{false};
+    std::atomic<float> snapYawDeg_{0.0f};
+    std::atomic<float> snapPendingDeg_{0.0f};  // requested, handed to the backend before the next WaitFrame
     std::atomic<bool> stopping_{false};
     std::mutex rtMutex_;    // RT XR work vs. publish/teardown
     std::mutex waitMutex_;  // one WaitFrame at a time

@@ -39,6 +39,8 @@ public:
     SessionState GetState() const override { return state_.load(std::memory_order_acquire); }
     void Recenter() override { recenterRequest_.store(1, std::memory_order_release); }
     void ResetRecenter() override { recenterRequest_.store(2, std::memory_order_release); }
+    void AddSnapYaw(float radians) override;
+    float SnapYaw() const override { return snapYaw_.load(std::memory_order_acquire); }
     void RequestCapture(const CaptureRequest& req) override { capture_.Request(req); }
     std::vector<CaptureResult> WaitForCaptures(uint32_t timeoutMs) override { return capture_.Wait(timeoutMs); }
     FrameStats GetStats() const override;
@@ -65,7 +67,8 @@ protected:
         bool posesUsable = false;  // raw/rawHead hold real or held poses (false: neutral stand-ins, nothing seen yet)
         View raw[2]{};     // views in the runtime's LOCAL space (what goes into the layer)
         Pose rawHead{};    // head pose in LOCAL space
-        Pose recenter{};   // recenter transform in effect for this frame
+        Pose recenter{};   // recenter transform in effect for this frame (views: includes the snap turn)
+        Pose layerRecenter{};  // the same without the snap turn (world-locked quad layers)
     };
     static constexpr size_t kRing = 8;
 
@@ -84,6 +87,8 @@ protected:
     FrameRecord* FindFrameLocked(uint64_t id);
 
     // GT: consume a pending recenter request using the raw head pose; returns the active recenter pose.
+    // Also applies pending snap turns: the returned pose is for the views (recenter_
+    // followed by the snap turn); recenter_ itself stays the quad layers' transform.
     Pose UpdateRecenter(const Pose& rawHead, bool headValid);
 
     // GT: makes r.raw / r.rawHead usable whatever the runtime reported (see POSE
@@ -175,6 +180,9 @@ protected:
 
     std::atomic<int> recenterRequest_{0};
     Pose recenter_{};  // GT only
+    // Snap turn (AddSnapYaw): requested turns not applied yet, and the turn in effect.
+    std::atomic<float> snapRequest_{0.0f};
+    std::atomic<float> snapYaw_{0.0f};
 
     // Pose filter state (GT only), see SanitizePoses.
     struct PoseTrack {

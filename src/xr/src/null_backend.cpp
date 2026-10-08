@@ -270,6 +270,7 @@ public:
             ApplySpaceChange(r.displayTime, r.id, r.rawHead, o && p);
             SanitizePoses(r, o, p, o, p);
             r.recenter = UpdateRecenter(r.rawHead, r.orientationValid);
+            r.layerRecenter = recenter_;
             lastRawHead_ = r.rawHead;
             lastTracker_ = tracker;
             lastRecenter_ = r.recenter;
@@ -462,7 +463,7 @@ public:
         const char* usage =
             "err usage: xr-sim status | head <yaw deg> [pitch deg] [x y z m] | recenter-event [nopose] [delay <frames>] | lose "
             "orientation|position <frames> | gaze <yaw> <pitch> | gaze off | gaze sweep [radius deg] [period s] | gaze blink <frames> | "
-            "motion static|yaw|sway|yawsway|ini";
+            "motion static|yaw|sway|yawsway|ini | focus 0|1 | presence 0|1|off";
         if (!initialized_) return "err null backend not initialised";
         if (a.empty() || a[0] == "status") {
             std::lock_guard lk(frameMutex_);
@@ -513,6 +514,19 @@ public:
             const NullMotion now = m >= 0 ? static_cast<NullMotion>(m) : opt_.motion;
             log_.Info("null backend: scripted head motion now {}", MotionName(now));
             return std::format("ok motion {}", MotionName(now));
+        }
+        if (a[0] == "focus" && a.size() == 2) {
+            // The runtime's session state: focus 0 = VISIBLE (headset off, the runtime's menu), 1 = FOCUSED.
+            const bool f = a[1] == "1";
+            state_ = f ? SessionState::Focused : SessionState::Visible;
+            log_.Info("null backend: session state {} simulated", f ? "FOCUSED" : "VISIBLE");
+            return std::string("ok session ") + (f ? "FOCUSED" : "VISIBLE");
+        }
+        if (a[0] == "presence" && a.size() == 2) {
+            // XR_EXT_user_presence: presence 0 | 1 | off (off = the extension's events never came).
+            simPresence_ = a[1] == "off" ? -1 : a[1] == "1" ? 1 : 0;
+            log_.Info("null backend: user presence {} simulated", a[1]);
+            return "ok user presence " + a[1];
         }
         if (a[0] == "recenter-event") {
             bool poseValid = true;
@@ -612,6 +626,12 @@ private:
         int motion = -1;                                     // `motion`: replaces [xr] null_motion (-1 = the ini's)
     };
     bool gazeEnabled_ = false;
+    std::atomic<int> simPresence_{-1};
+
+public:
+    int UserPresence() const override { return simPresence_.load(); }
+
+private:
     GazeSample lastGaze_{};  // GT, read by `gaze status` under frameMutex_
 
     static Vec3 GazeDirection(double yawDeg, double pitchDeg) {

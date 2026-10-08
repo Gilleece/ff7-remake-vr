@@ -141,6 +141,12 @@ private:
     enum class GazeSource { None, Ext, Fb };
     bool wantGaze_ = false;
     bool hasEyeGazeExt_ = false, hasEyeTrackingFb_ = false;  // extensions enabled
+    std::atomic<int> userPresence_{-1};                       // XR_EXT_user_presence: -1 no event yet, 0 absent, 1 present
+
+public:
+    int UserPresence() const override { return userPresence_.load(std::memory_order_acquire); }
+
+private:
     bool extSupported_ = false, fbSupported_ = false;        // system properties
     GazeSource gazeSource_ = GazeSource::None;
     XrActionSet gazeSet_ = XR_NULL_HANDLE;
@@ -354,6 +360,10 @@ Result OpenXrBackend::InitImpl(const InitDesc& desc) {
     if (has(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME)) {
         enable.push_back(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
         hasRefreshRate_ = true;
+    }
+    if (has(XR_EXT_USER_PRESENCE_EXTENSION_NAME)) {
+        enable.push_back(XR_EXT_USER_PRESENCE_EXTENSION_NAME);  // headset on/off events ([xr] pause_on_remove)
+        log_.Info("{} offered: the user's presence is reported", XR_EXT_USER_PRESENCE_EXTENSION_NAME);
     }
     if (has(XR_KHR_VISIBILITY_MASK_EXTENSION_NAME)) {
         enable.push_back(XR_KHR_VISIBILITY_MASK_EXTENSION_NAME);
@@ -728,6 +738,12 @@ void OpenXrBackend::PollEvents() {
                 if (e.viewIndex < 2) QueryHiddenArea(e.viewIndex);
                 break;
             }
+            case XR_TYPE_EVENT_DATA_USER_PRESENCE_CHANGED_EXT: {
+                const auto& e = reinterpret_cast<const XrEventDataUserPresenceChangedEXT&>(ev);
+                userPresence_ = e.isUserPresent ? 1 : 0;
+                log_.Info("user presence: {}", e.isUserPresent ? "present" : "absent");
+                break;
+            }
             case XR_TYPE_EVENT_DATA_EVENTS_LOST: {
                 const auto& e = reinterpret_cast<const XrEventDataEventsLost&>(ev);
                 log_.Warn("OpenXR: {} events lost", e.lostEventCount);
@@ -1075,6 +1091,7 @@ Result OpenXrBackend::WaitFrame(FrameInfo& info) {
         ApplySpaceChange(fs.predictedDisplayTime, r.id, rawHead, headO && headP);
         SanitizePoses(r, ov, pv, headO, headP);
         r.recenter = UpdateRecenter(r.rawHead, r.orientationValid);
+        r.layerRecenter = recenter_;
         FillFrameInfo(r, info);
     }
     info.gaze = gaze;
@@ -1384,7 +1401,7 @@ Result OpenXrBackend::SubmitFrame(uint64_t frameId, const SubmitDesc& desc) {
             l.subImage.imageRect.offset = {0, 0};
             l.subImage.imageRect.extent = {static_cast<int32_t>(slot->sc.lastW), static_cast<int32_t>(slot->sc.lastH)};
             l.subImage.imageArrayIndex = 0;
-            l.pose = ToXr(q.space == LayerSpace::Head ? q.pose : PoseMultiply(rec.recenter, q.pose));
+            l.pose = ToXr(q.space == LayerSpace::Head ? q.pose : PoseMultiply(rec.layerRecenter, q.pose));
             l.size = XrExtent2Df{q.width, q.height};
             layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&l);
         }

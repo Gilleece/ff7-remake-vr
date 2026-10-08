@@ -5,6 +5,7 @@
 #include "foveation.h"
 #include "ui_battle.h"
 #include "xr_controller.h"
+#include "pause_on_remove.h"
 
 #include "ff7vr/core/dev_commands.h"
 #include "ff7vr/core/hook.h"
@@ -86,6 +87,7 @@ RenderConfig LoadConfig(const StartupContext& ctx) {
     r.screenOffsetY = static_cast<float>(std::clamp(c.get_float("screen", "offset_y", r.screenOffsetY), -10.0, 10.0));
     r.screenFollowHead = c.get_bool("screen", "follow_head", r.screenFollowHead);
     r.recenterOnStart = c.get_bool("screen", "recenter_on_start", r.recenterOnStart);
+    pause_on_remove::read_config(c);
 
     r.uiLayer = c.get_bool("ui", "layer", r.uiLayer);
     r.uiDistance = static_cast<float>(std::clamp(c.get_float("ui", "distance", r.uiDistance), 0.3, 50.0));
@@ -170,6 +172,14 @@ void RegisterCommands() {
                       });
     dev_commands::add("vram", "vram: the game's video memory usage against the budget Windows grants it (card and shared system memory)",
                       [](std::string_view) { return XrController::Get().VideoMemoryStatus(); });
+    dev_commands::add("xr-pause", "xr-pause status | on | off | key <vk> | send: the pause key sent when the headset comes off",
+                      [](std::string_view args) { return pause_on_remove::command(std::string(args)); });
+    dev_commands::add("snap", "snap <deg>: turn the view by <deg> (positive = right) on top of the recenter (snap turn)",
+                      [](std::string_view args) {
+                          const std::string a(args);
+                          if (a.empty()) return std::string("err usage: snap <deg>");
+                          return XrController::Get().SnapTurn(std::strtof(a.c_str(), nullptr));
+                      });
     dev_commands::add("recenter","recenter: the current head position and yaw become the origin", [](std::string_view) {
         return XrController::Get().Recenter();
     });
@@ -254,6 +264,10 @@ void stop() {
 void SetMode(Mode mode) { XrController::Get().SetMode(mode); }
 Mode GetMode() { return XrController::Get().GetMode(); }
 bool GetEyeSetup(EyeSetup* out) { return XrController::Get().GetEyeSetup(out); }
+void RequestSnapTurn(float degrees) {
+    if (g_started.load(std::memory_order_relaxed)) XrController::Get().SnapTurn(degrees);
+}
+float GetSnapYawDeg() { return g_started.load(std::memory_order_relaxed) ? XrController::Get().SnapYawDeg() : 0.0f; }
 StereoFrame BeginGameFrame() { return XrController::Get().BeginGameFrame(); }
 void SubmitStereoFrame(const StereoSubmit& submit) { XrController::Get().SubmitStereoFrame(submit); }
 bool UiLayerWanted() { return g_started.load(std::memory_order_relaxed) && XrController::Get().UiLayerWanted(); }

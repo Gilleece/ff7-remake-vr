@@ -79,6 +79,12 @@ struct EyeSetup {
 // Any thread. False while no XR session is initialised.
 bool GetEyeSetup(EyeSetup* out);
 
+// Any thread, lock-free. The snap turn in effect (the `snap` dev command; degrees,
+// positive = right of the recenter's forward; 0 after any recenter).
+float GetSnapYawDeg();
+// Any thread, lock-free. Turns the view by `degrees` (positive = right) from the next frame.
+void RequestSnapTurn(float degrees);
+
 struct StereoFrame {
     bool stereo = false;      // false: render mono this frame
     uint64_t frameId = 0;     // pass to SubmitStereoFrame

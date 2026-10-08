@@ -22,6 +22,7 @@ add_library(ff7vr_engine STATIC
     src/uobj.cpp
     src/player.cpp
     src/controls.cpp
+    src/snap_turn.cpp
 )
 target_include_directories(ff7vr_engine
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include

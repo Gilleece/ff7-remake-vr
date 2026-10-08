@@ -43,7 +43,7 @@ View BackendBase::SubmittedView(const FrameRecord& r, const SubmitDesc& desc, in
 
 Pose BackendBase::QuadPoseLocal(const FrameRecord& r, const QuadLayer& q) {
     if (q.space == LayerSpace::Head) return PoseMultiply(r.rawHead, q.pose);
-    return PoseMultiply(r.recenter, q.pose);  // undo the recenter: tracking space after recenter -> LOCAL
+    return PoseMultiply(r.layerRecenter, q.pose);  // undo the recenter: tracking space after recenter -> LOCAL
 }
 
 static bool RegionInside(const Rect& r, uint32_t w, uint32_t h) {
@@ -203,13 +203,25 @@ BackendBase::FrameRecord* BackendBase::FindFrameLocked(uint64_t id) {
     return r.id == id ? &r : nullptr;
 }
 
+void BackendBase::AddSnapYaw(float radians) {
+    float cur = snapRequest_.load(std::memory_order_relaxed);
+    while (!snapRequest_.compare_exchange_weak(cur, cur + radians, std::memory_order_acq_rel)) {
+    }
+}
+
 Pose BackendBase::UpdateRecenter(const Pose& rawHead, bool headValid) {
     const int req = recenterRequest_.exchange(0, std::memory_order_acq_rel);
+    const float snapBefore = snapYaw_.load(std::memory_order_relaxed);
     if (req == 2) {
         recenter_ = Pose{};
+        snapYaw_.store(0.0f, std::memory_order_release);
+        snapRequest_.store(0.0f, std::memory_order_release);
         log_.Info("recenter reset");
     } else if (req == 1) {
         if (headValid) {
+            // The current heading becomes forward: a snap turn in effect or pending ends here.
+            snapYaw_.store(0.0f, std::memory_order_release);
+            snapRequest_.store(0.0f, std::memory_order_release);
             const float yaw = QuatYaw(rawHead.orientation);
             recenter_.orientation = QuatFromAxisAngle(Vec3{0, 1, 0}, yaw);
             recenter_.position = rawHead.position;
@@ -219,7 +231,22 @@ Pose BackendBase::UpdateRecenter(const Pose& rawHead, bool headValid) {
             recenterRequest_.store(1);  // retry when tracking is valid
         }
     }
-    return recenter_;
+    const float add = snapRequest_.exchange(0.0f, std::memory_order_acq_rel);
+    if (add != 0.0f) {
+        float y = snapYaw_.load(std::memory_order_relaxed) + add;
+        constexpr float kPi = 3.14159265f;
+        while (y > kPi) y -= 2.0f * kPi;
+        while (y <= -kPi) y += 2.0f * kPi;
+        snapYaw_.store(y, std::memory_order_release);
+        log_.Info("snap turn: {:+.1f} deg -> view turned {:.1f} deg from the recenter (was {:.1f})", add * kRadToDeg, y * kRadToDeg,
+                  snapBefore * kRadToDeg);
+    }
+    const float snap = snapYaw_.load(std::memory_order_relaxed);
+    if (snap == 0.0f) return recenter_;
+    // Views = inverse(recenter * turn) * raw = Yaw(snap) * (recenter^-1 * raw): the view turns by +snap (left).
+    Pose turn;
+    turn.orientation = QuatFromAxisAngle(Vec3{0, 1, 0}, -snap);
+    return PoseMultiply(recenter_, turn);
 }
 
 // ---- pose validity ----
@@ -348,6 +375,8 @@ bool BackendBase::ApplySpaceChange(int64_t displayTime, uint64_t frameId, const 
     // which undoes the user's recenter; it is cleared instead. World-locked quads
     // (screen, UI) are placed relative to it, so they come back in front of the user.
     recenter_ = Pose{};
+    snapYaw_.store(0.0f, std::memory_order_release);
+    snapRequest_.store(0.0f, std::memory_order_release);
     if (spaceChange_.poseValid) {
         // Poses the filter may still repeat (held or 3DoF frames) move into the new space.
         const Pose inv = PoseInverse(spaceChange_.pose);

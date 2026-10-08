@@ -34,6 +34,9 @@ VirtualPad virtual_pad();
 // virtual pad is merged): it may change the buttons. Set once at start-up; nullptr = none.
 using PadFilter = void (*)(unsigned long user, unsigned short* buttons);
 void set_pad_filter(PadFilter filter);
+// Stick filter, applied after the pad filter: it may change the thumbstick axes (snap turn).
+using StickFilter = void (*)(unsigned long user, short* lx, short* ly, short* rx, short* ry);
+void set_stick_filter(StickFilter filter);
 // Deflection of the left and right sticks (0..1) in the last successful poll of user 0,
 // virtual pad included.
 void stick_magnitudes(float* left, float* right);

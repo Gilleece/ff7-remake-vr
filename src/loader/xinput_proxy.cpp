@@ -101,6 +101,7 @@ SHORT add_axis(SHORT a, SHORT b) {
 }
 
 std::atomic<PadFilter> g_pad_filter{nullptr};
+std::atomic<StickFilter> g_stick_filter{nullptr};
 
 // Stick deflection of the last successful poll (0..1 each), for the comfort vignette.
 std::atomic<float> g_stick_left{0.0f}, g_stick_right{0.0f};
@@ -117,6 +118,9 @@ DWORD filtered(DWORD user, XINPUT_STATE* state, DWORD rc) {
     }
     const PadFilter f = g_pad_filter.load(std::memory_order_relaxed);
     if (f && rc == ERROR_SUCCESS && state) f(user, &state->Gamepad.wButtons);
+    const StickFilter sf = g_stick_filter.load(std::memory_order_relaxed);
+    if (sf && rc == ERROR_SUCCESS && state)
+        sf(user, &state->Gamepad.sThumbLX, &state->Gamepad.sThumbLY, &state->Gamepad.sThumbRX, &state->Gamepad.sThumbRY);
     return rc;
 }
 
@@ -439,6 +443,7 @@ VirtualPad virtual_pad() {
 }
 std::uint64_t get_state_calls() { return g_get_state_calls.load(); }
 void set_pad_filter(PadFilter filter) { g_pad_filter = filter; }
+void set_stick_filter(StickFilter filter) { g_stick_filter = filter; }
 
 void stick_magnitudes(float* left, float* right) {
     if (left) *left = g_stick_left.load(std::memory_order_relaxed);

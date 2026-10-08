@@ -596,6 +596,40 @@ Tested 2026-10-07 (Null backend, Sector 7 save, no physical pad; `captures/chord
 **Not tested**: a physical pad (none connected); what the overlay's hook returns for a real
 XInput pad, and whether Steam Input is on for the game on the player's PC.
 
+## Snap turn
+
+`src/engine/src/snap_turn.cpp`, `[comfort]` in `ff7vr.ini`:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `snap_turn` | 0 | degrees per step (30 or 45 typical); 0 = off, the right stick turns the game camera smoothly as in the flat game |
+| `snap_turn_deadzone` | 0.6 | right stick X deflection (0.1 to 0.95) that makes a step; the next step needs the stick back under half of it |
+| `snap_turn_repeat_ms` | 0 | above 0: another step every that many ms while the stick stays pushed |
+| `snap_left_key`, `snap_right_key` | 0 | optional virtual-key codes for a step left / right |
+| `snap_log` | 0 | log the next N left stick rotations (at most one line per 500 ms) |
+
+How it works. The loader's XInput wrapper calls a stick filter after the button filter
+(`xinput::set_stick_filter`, the same call path as the pad filter, so it also applies
+after the Steam overlay's hook). While snap turn is on, the right stick's X reaches the
+game as 0, so the game camera never yaws from the stick (its Y, the camera pitch, passes).
+A push beyond the deadzone asks the render module for one step
+(`render::RequestSnapTurn`, lock-free; the `snap <deg>` dev command does the same). The
+XR library applies it in the next `WaitFrame` as a yaw on top of the recenter
+(`IXrBackend::AddSnapYaw`): the eye views turn about the vertical axis through the
+recenter origin; the quad layers (HUD panel, virtual screen) keep the recenter without
+the turn, so the HUD stays in front of the player. The game moves the character
+relative to its own camera, so the left stick is rotated by the turn in effect
+(`render::GetSnapYawDeg`, positive = right): forward on the stick moves the character
+where the player looks. Keyboard movement (W/A/S/D) is not rotated; snap turn is for pad
+players. Any recenter (End, View + left stick click, `recenter`, the runtime's own
+recenter) makes the current heading forward and clears the turn (the left stick is no
+longer rotated from the next poll).
+
+Dev commands: `snapturn status` (setting, turn in effect, steps, polls with the right
+stick hidden, last left stick in/out), `snapturn snap <deg>|off`, `deadzone`, `repeat`,
+`log <n>|on`, `snapturn stick <lx> <ly> <rx> <ry>` (one stick state, -1..1, through the
+filter without a pad), and in the render module `snap <deg>`.
+
 ## ini keys (`[stereo]` in `ff7vr.ini`)
 
 | Key | Default | Meaning |

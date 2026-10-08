@@ -308,6 +308,24 @@ SteamVR names its adapter (`xrGetD3D11GraphicsRequirementsKHR` LUID) only
 once its compositor runs. A LUID of 0 is asked again for up to 2 s, then the
 session is created on the game's adapter.
 
+### Pausing when the headset comes off
+
+`[xr] pause_on_remove = 1` (default) and `pause_key = 77` (M, the game's menu, which
+pauses it); `src/render/src/pause_on_remove.cpp`. When the session leaves FOCUSED for
+VISIBLE or SYNCHRONIZED (the headset taken off, the runtime's own menu opened) while 3D
+runs, the key is sent once with `SendInput` (a press and a release, as the dev harness
+sends keys), only if a window of the game has the focus (otherwise the log says it was
+skipped), and at most once per 5 s. Nothing is sent when the focus returns: the player
+closes the menu. The state is read from every frame's `FrameInfo::state` in
+`XrController::WaitOne`, so it works with any backend. When the runtime offers
+`XR_EXT_user_presence`, the extension is enabled; from its first presence event on, the
+user-absent event replaces the focus loss (`xr: the runtime reports the user's presence
+...` in the log). Whether Virtual Desktop offers the extension or reports a removed
+headset as a focus loss is not known yet.
+
+Dev commands: `xr-pause status | on | off | key <vk> | send`; with the Null backend
+`xr-sim focus 0|1` (VISIBLE / FOCUSED) and `xr-sim presence 0|1|off` simulate the events.
+
 ### The headset's own recenter
 
 The mod's recenter (End, `recenter`, and once at session start with

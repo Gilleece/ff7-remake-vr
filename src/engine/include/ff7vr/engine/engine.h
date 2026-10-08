@@ -46,5 +46,7 @@ void request_stereo(bool on);
 // held back while down and handed to the game as a short press on release
 // ([controls] pad_hold_view). See docs/engine-module.md, "Player controls".
 void filter_pad(unsigned long user, unsigned short* buttons);
+// Stick filter, same call path: snap turn ([comfort] snap_turn, src/engine/src/snap_turn.h).
+void filter_sticks(unsigned long user, short* lx, short* ly, short* rx, short* ry);
 
 }  // namespace ff7vr::engine

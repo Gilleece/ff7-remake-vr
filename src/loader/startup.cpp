@@ -52,7 +52,10 @@ void start_modules(const StartupContext& ctx) {
 #if FF7VR_HAVE_ENGINE
     // Stereo device in the engine ([stereo] keys, gated by [stereo] enabled inside the module).
     // The gamepad's first-person toggle (View/Back + right stick click) only with stereo enabled.
-    if (ff7vr::engine::start(ctx)) xinput::set_pad_filter(&ff7vr::engine::filter_pad);
+    if (ff7vr::engine::start(ctx)) {
+        xinput::set_pad_filter(&ff7vr::engine::filter_pad);
+        xinput::set_stick_filter(&ff7vr::engine::filter_sticks);
+    }
     ff7vr::engine::start_ui_layer(ctx);  // in-game UI on its own layer in stereo ([ui] keys)
 #endif
 #if FF7VR_HAVE_RENDER

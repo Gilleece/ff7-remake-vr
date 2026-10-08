@@ -34,6 +34,8 @@ add_library(ff7vr_render STATIC
     src/d3d11_hooks.cpp
     src/foveation.h
     src/foveation.cpp
+    src/pause_on_remove.h
+    src/pause_on_remove.cpp
     src/timing.h
     src/timing.cpp
     src/ui_battle.h

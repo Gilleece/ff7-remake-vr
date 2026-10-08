@@ -540,6 +540,10 @@ public:
     virtual void AddSnapYaw(float radians) { (void)radians; }
     virtual float SnapYaw() const { return 0.0f; }
 
+    // Any thread. Whether the user wears the headset, from XR_EXT_user_presence events:
+    // -1 = not reported (extension not offered, or no event yet), 0 = absent, 1 = present.
+    virtual int UserPresence() const { return -1; }
+
     // Any thread. Development aid: drives the Null backend's emulated headset
     // (head pose, runtime recenter events, tracking loss, eye gaze); see the Null backend for
     // the commands. Returns "ok ..." or "err ...". Other backends do not support it.

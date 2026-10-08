@@ -230,6 +230,15 @@ and the virtual screen come back in front of you. It was tested with a simulated
 headset but not yet seen on a real one; if it ever leaves the view turned, End does
 the same job.
 
+Snap turn (gamepad): `[comfort] snap_turn = 45` (or 30) makes the right stick turn your
+view in steps of that many degrees instead of smoothly; push it again after letting go
+for the next step. The left stick then moves Cloud where you look; keyboard movement is
+not turned with it. Recenter makes the way you face forward again.
+
+Taking the headset off (or opening the headset's own menu) while 3D runs pauses the game:
+the mod presses M, the game's menu, once (`[xr] pause_on_remove = 0` turns this off,
+`pause_key` changes the key). It only does so while the game window has the focus.
+
 ## First-session checklist
 
 Check in this order; each step depends on the ones before it. The log is

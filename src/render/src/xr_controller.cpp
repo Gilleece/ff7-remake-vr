@@ -1,5 +1,7 @@
 #include "xr_controller.h"
 
+#include "pause_on_remove.h"
+
 #include "comfort.h"
 #include "foveation.h"
 #include "ui_battle.h"
@@ -273,6 +275,8 @@ bool XrController::GameThreadPaces() const {
 
 bool XrController::WaitOne(bool fromGameThread, xr::FrameInfo* out) {
     const int64_t t0 = QpcNow();
+    if (const float snap = snapPendingDeg_.exchange(0.0f, std::memory_order_acq_rel); snap != 0.0f)
+        backend_->AddSnapYaw(-snap / xr::kRadToDeg);  // the backend's yaw is +Y (left); applied by this WaitFrame
     const xr::Result r = backend_->WaitFrame(*out);
     const int64_t t1 = QpcNow();
     if (r != xr::Result::Ok) {
@@ -288,6 +292,8 @@ bool XrController::WaitOne(bool fromGameThread, xr::FrameInfo* out) {
         log::info("xr: frame loop running (state {}, frame wait on the {} thread)", xr::ToString(out->state),
                   fromGameThread ? "game" : (waitOnPresent_.load() ? "present" : "xr"));
     }
+    snapYawDeg_.store(-backend_->SnapYaw() * xr::kRadToDeg, std::memory_order_relaxed);
+    pause_on_remove::note(out->state, backend_->UserPresence(), mode_.load() == Mode::Stereo);
     lastOrientationValid_ = out->orientationValid;
     lastPositionValid_ = out->positionValid;
     if (!out->orientationValid)
@@ -1147,6 +1153,14 @@ std::string XrController::Recenter() {
     if (!ready_.load() || !backend_) return "err xr session not running";
     backend_->Recenter();
     return "ok recenter requested (applied with the next frame that has valid tracking)";
+}
+
+std::string XrController::SnapTurn(float degrees) {
+    if (!ready_.load()) return "err xr session not running";
+    float cur = snapPendingDeg_.load(std::memory_order_relaxed);
+    while (!snapPendingDeg_.compare_exchange_weak(cur, cur + degrees, std::memory_order_acq_rel)) {
+    }
+    return std::format("ok snap turn {:+.1f} deg requested (view {:.1f} deg from the recenter before it)", degrees, SnapYawDeg());
 }
 
 std::string XrController::SimulateCommand(const std::string& args) {

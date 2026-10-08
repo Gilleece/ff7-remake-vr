@@ -9,6 +9,7 @@
 #include "bloom_fix.h"
 #include "distortion_fix.h"
 #include "controls.h"
+#include "snap_turn.h"
 #include "movie_watch.h"
 #include "player.h"
 #include "stereo_device.h"
@@ -149,6 +150,7 @@ void __fastcall tick_detour(void* engine, float delta_seconds, bool idle) {
         device::tick_begin();
         player::tick(device::active(), delta_seconds);
         controls::tick();
+        snap_turn::tick();
         if (!g_view_states_logged) log_view_states(engine);
     }
     g_tick_hook->original<TickFn>()(engine, delta_seconds, idle);
@@ -260,6 +262,7 @@ bool start(const StartupContext& ctx) {
         fixed_options() = FixedStereoHost::from_config(cfg);
         read_camera_settings(cfg);
         controls::read_config(cfg);
+        snap_turn::read_config(cfg);
         device::configure_render_scale(cfg);
         std::vector<std::pair<std::wstring, std::wstring>> stereo_cvars;
         if (cfg.get_bool("stereo", "comfort_cvars", true))
@@ -301,6 +304,8 @@ bool start(const StartupContext& ctx) {
                           [](std::string_view args) { return player::command(std::string(args)); });
         dev_commands::add("controls", "controls status | pad <hex buttons> | recenter | stereo | nearer | farther: the player's keys and gamepad combinations",
                           [](std::string_view args) { return controls::command(std::string(args)); });
+        dev_commands::add("snapturn", "snapturn status | snap <deg>|off | deadzone | repeat | log | stick <lx> <ly> <rx> <ry>: snap turn ([comfort] snap_turn)",
+                          [](std::string_view args) { return snap_turn::command(std::string(args)); });
         dev_commands::add("gpu", "gpu status | gpu names on | gpu trace <prefix> [dump <from> <to>] [scale <n>]: one-frame GPU trace",
                           [](std::string_view args) { return gpu_trace::command(std::string(args)); });
         graphics::register_command();
@@ -352,5 +357,6 @@ bool stereo_installed() { return g_installed.load(); }
 bool stereo_active() { return g_installed.load() && device::active(); }
 void request_stereo(bool on) { device::request_active(on); }
 void filter_pad(unsigned long user, unsigned short* buttons) { controls::filter_pad(user, buttons); }
+void filter_sticks(unsigned long user, short* lx, short* ly, short* rx, short* ry) { snap_turn::filter_sticks(user, lx, ly, rx, ry); }
 
 }  // namespace ff7vr::engine
