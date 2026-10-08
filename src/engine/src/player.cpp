@@ -1,11 +1,15 @@
 #include "player.h"
 
+#include "audio_listener.h"
 #include "controls.h"
 
 #include "ue_math.h"
 #include "uobj.h"
 
 #include "ff7vr/core/log.h"
+#if FF7VR_ENGINE_WITH_RENDER
+#include "ff7vr/render/render.h"
+#endif
 
 #include <windows.h>
 
@@ -34,9 +38,9 @@ using ue::FVector;
 constexpr std::size_t kGameInstance = 0x1070;   // UGameEngine::GameInstance
 constexpr std::size_t kLocalPlayers = 0x38;     // UGameInstance::LocalPlayers (TArray)
 constexpr std::size_t kPlayerController = 0x30; // ULocalPlayer::PlayerController
-// Hysteresis of the follow camera test, in frames (about 0.25 s at 120 fps, 0.33 s at 90).
-constexpr int kOrbitFramesIn = 30;
-constexpr int kOrbitFramesOut = 30;
+// Hysteresis of the follow camera test: the camera must look at the pivot this long before
+// the camera modes apply again; how long it may look away is [camera] miss_seconds.
+constexpr double kOrbitSecondsIn = 0.25;
 
 enum Fn : std::size_t {
     kGetPawn,
@@ -93,6 +97,22 @@ struct State {
     bool combat = false;
     bool target_ok = false;     // the view target is the pawn or the game's camera actor
     int orbit_frames = 0;       // consecutive frames the camera looked at the pivot (negative: away)
+    double orbit_time = 0.0;    // the same in seconds
+    bool in_battle = false;     // the battle signal (or its test override), whatever first person does
+    bool battle_hold = false;   // this frame the level boom holds through a battle camera (combat = level)
+    std::uint64_t follow_flips = 0;
+    // Moves between the camera modes: the eyes start where they were and reach the new mode's
+    // position over [camera] blend_seconds (an offset that decays with a smoothstep).
+    int cam_kind = -1;          // 0 game camera, 1 level boom, 2 game boom, 3 first person or its blend
+    void* cam_target = nullptr; // view target of the last frame's eyes
+    bool cam_target_ok = false;
+    bool cam_out_valid = false;
+    std::uint64_t cam_frame = ~0ull;
+    FVector cam_out{};          // last frame's eye base (after the offset)
+    FVector cam_offset{};       // offset at the start of the current move
+    FVector cam_apply{};        // offset applied this frame
+    float cam_t = 1.0f;         // progress of the current move (1 = done)
+    std::uint64_t cam_blends = 0, cam_cuts = 0;
     double aim_miss = 0.0;      // last distance of the pivot from the camera's line of sight (cm)
     bool follow_camera = false; // the game uses its follow camera
     bool fresh = false;         // stereo just started: no follow-camera history yet
@@ -804,8 +824,10 @@ void tick(bool stereo, float delta_seconds) {
         // taken at once instead of after the hysteresis (no game-camera frames at the start).
         g.follow_camera = false;
         g.orbit_frames = 0;
+        g.orbit_time = 0.0;
         g.fresh = true;
         g.snap_first = false;
+        g.cam_out_valid = false;  // no move from where the eyes were before stereo
     }
     g.stereo = stereo;
     g.pc = local_player_controller();
@@ -839,7 +861,13 @@ void tick(bool stereo, float delta_seconds) {
     if (req >= 0) g.first_person = req == 1;
 
     // Battle: third person for its duration, the default mode afterwards.
-    const bool combat = s.fp_available.load() && s.auto_combat.load() && combat_now();
+    // The battle signal is read whatever first person does: the camera modes use it too
+    // ([camera] combat).
+    g.in_battle = (s.fp_available.load() && s.auto_combat.load()) || s.combat_level.load() ? combat_now() : false;
+    const bool combat = s.fp_available.load() && s.auto_combat.load() && g.in_battle;
+#if FF7VR_ENGINE_WITH_RENDER
+    render::SetBattleActive(combat);  // HUD panel size in battles ([ui] battle_size)
+#endif
     if (combat != g.combat) {
         g.combat = combat;
         ++g.auto_switches;
@@ -854,11 +882,15 @@ void tick(bool stereo, float delta_seconds) {
     if (!g.target_ok) {
         g.follow_camera = false;
         g.orbit_frames = 0;
+        g.orbit_time = 0.0;
     }
     const bool fp_target = stereo && s.fp_available.load() && g.first_person && g.follow_camera;
     const float step = s.blend_seconds.load() > 0.0f ? delta_seconds / s.blend_seconds.load() : 1.0f;
     if (!g.follow_camera || !stereo) g.blend = 0.0f;  // authored camera: cut, no blend
-    else if (g.snap_first && fp_target) g.blend = 1.0f;  // stereo starts in first person
+    else if (g.snap_first && fp_target) {
+        g.blend = 1.0f;            // stereo starts in first person
+        g.cam_out_valid = false;   // at once, without a move from the third-person frames before
+    }
     else g.blend = std::clamp(g.blend + (fp_target ? step : -step), 0.0f, 1.0f);
     // A switch into first person starts the head filters from the head's current offset
     // (they are not updated in third person, so they would still hold the last first-person
@@ -870,18 +902,21 @@ void tick(bool stereo, float delta_seconds) {
     const bool hide = stereo && hide_mode != 0 && g.blend > 0.5f && g.pawn;
     if (hide) hide_meshes(g.pawn, hide_mode);
     else if (!g.hidden.empty() || !g.hidden_bones.empty() || !g.hidden_pass.empty() || g.hidden_pawn) restore_meshes();
+    audio_listener::player_frame({g.pc, g.pawn, g.view_target, g.combat, stereo, stereo && g.follow_camera && g.blend > 0.5f});
 
     std::lock_guard lock(g_status_mutex);
     g_status_line = std::format(
         "pc {} pawn {} ({}) view_target {} ({}) target_ok {} aim_miss {:.1f} orbit_frames {} follow {} stereo {} first_person {} combat {} blend {:.2f} hidden {} "
         "bones {} pass {} bob {} toggles {} (pad {} of {} polls) auto {} calls {} failed {} pawn_loc ({:.1f} {:.1f} {:.1f}) head {} {} ({:.1f} {:.1f} {:.1f}) failures {} "
-        "battle_signal {} raw {} value {:#x} reads {} changes {} mode {}",
+        "battle_signal {} raw {} value {:#x} reads {} changes {} in_battle {} hold {} orbit_s {:.2f} flips {} cam_kind {} cam_t {:.2f} cam_off {:.1f} "
+        "blends {} cuts {} mode {}",
         g.pc, g.pawn, g.pawn ? uobj::object_name(uobj::class_of(g.pawn)) : "", g.view_target,
         g.view_target ? uobj::object_name(g.view_target) : "", g.target_ok ? 1 : 0, g.aim_miss, g.orbit_frames, g.follow_camera ? 1 : 0, stereo ? 1 : 0, g.first_person ? 1 : 0,
         g.combat ? 1 : 0, g.blend, g.hidden.size(), g.hidden_bones.size(), g.hidden_pass.size(), s.head_bob.load() ? 1 : 0, g.toggles, g_pad_toggles.load(), controls::pad_polls(), g.auto_switches, g.calls, g.call_failures, g.pawn_loc.X,
         g.pawn_loc.Y, g.pawn_loc.Z, g.head_bone.empty() ? "-" : g.head_bone, g.head_ok ? "ok" : "no", g.head_loc.X, g.head_loc.Y,
         g.head_loc.Z, g.head_failures, g_battle_class.empty() ? std::string("none") : g_battle_class + "." + g_battle_function, g.battle_raw,
-        g.battle_value, g.battle_reads, g.battle_changes, g.last_mode);
+        g.battle_value, g.battle_reads, g.battle_changes, g.in_battle ? 1 : 0, g.battle_hold ? 1 : 0, g.orbit_time, g.follow_flips, g.cam_kind,
+        g.cam_t, dist(g.cam_apply, FVector{}), g.cam_blends, g.cam_cuts, g.last_mode);
 }
 
 // Logs every change of the camera mode with its reason (one line per change).
@@ -892,8 +927,11 @@ void note_mode(const char* mode, const std::string& reason) {
     g.logged_mode = mode;
 }
 
-bool adjust_camera(FRotator& rotation, FVector& location, bool decoupled, bool& force_decouple) {
+// The camera mode's eye base. `kind`: 0 game camera, 1 level boom, 2 game boom, 3 first
+// person or the blend into it.
+static bool mode_camera(FRotator& rotation, FVector& location, bool decoupled, bool& force_decouple, int& kind) {
     force_decouple = false;
+    kind = 0;
     if (!g_lookup || !g_lookup->ready() || !g.pawn) {
         note_mode("game camera", "no controlled pawn");
         return false;
@@ -918,17 +956,27 @@ bool adjust_camera(FRotator& rotation, FVector& location, bool decoupled, bool& 
         const double along = to.x * fwd.x + to.y * fwd.y + to.z * fwd.z;
         const double d2 = to.x * to.x + to.y * to.y + to.z * to.z;
         g.aim_miss = std::sqrt(std::max(0.0, d2 - along * along));
-        const bool orbit = g.target_ok && along > 0.0 && std::sqrt(d2) < s.follow_distance.load() && g.aim_miss < s.aim_tolerance.load();
+        const bool within = std::sqrt(d2) < s.follow_distance.load();
+        const bool aimed = along > 0.0 && g.aim_miss < s.aim_tolerance.load();
+        // In a battle the camera frames the enemies as well as the character, so it often
+        // misses the pivot; with combat = level the level boom holds as long as the view
+        // target is still the game's camera (a cutscene's camera fails target_ok) and the
+        // character is near.
+        g.battle_hold = g.target_ok && within && !aimed && g.in_battle && s.combat_level.load();
+        const bool orbit = g.target_ok && within && (aimed || g.battle_hold);
         if (orbit) g.orbit_frames = std::max(1, g.orbit_frames + 1);
         else g.orbit_frames = std::min(-1, g.orbit_frames - 1);
+        if (orbit) g.orbit_time = std::max(0.0, g.orbit_time) + g.dt;
+        else g.orbit_time = std::min(0.0, g.orbit_time) - g.dt;
         const bool was = g.follow_camera;
-        if (g.follow_camera && g.orbit_frames <= -kOrbitFramesOut) g.follow_camera = false;
-        else if (!g.follow_camera && (g.orbit_frames >= kOrbitFramesIn || (g.fresh && orbit))) {
+        if (g.follow_camera && g.orbit_time <= -static_cast<double>(s.miss_seconds.load())) g.follow_camera = false;
+        else if (!g.follow_camera && (g.orbit_time >= kOrbitSecondsIn || (g.fresh && orbit))) {
             g.follow_camera = true;
             g.snap_first = g.fresh;
         }
         g.fresh = false;
         if (!g.target_ok) g.follow_camera = false;
+        if (was != g.follow_camera) ++g.follow_flips;
         if (was != g.follow_camera)
             log::info("player: follow camera {} (view target {} class {}, pivot {:.0f} cm from the line of sight, {:.0f} cm away, {})",
                       g.follow_camera ? "on" : "off", g.view_target ? uobj::object_name(g.view_target) : std::string("none"),
@@ -950,10 +998,13 @@ bool adjust_camera(FRotator& rotation, FVector& location, bool decoupled, bool& 
     }
     if (g.blend <= 0.0f) {
         location = third;
+        kind = level ? 1 : 2;
         note_mode(level ? "third person (level boom)" : "third person (game boom)",
-                  g.combat ? "battle" : (g.first_person && g_settings.fp_available.load() ? "first person blending" : "third person selected"));
+                  g.combat ? (g.battle_hold ? "battle, held through the battle camera" : "battle")
+                           : (g.first_person && g_settings.fp_available.load() ? "first person blending" : "third person selected"));
         return level;
     }
+    kind = 3;
     // First-person eye: the head bone plus head_offset, or the pawn's location plus eye_offset.
     FVector base = g.pawn_loc;
     math::Vec local{s.eye_forward.load(), s.eye_right.load(), s.eye_up.load()};
@@ -973,6 +1024,70 @@ bool adjust_camera(FRotator& rotation, FVector& location, bool decoupled, bool& 
     if (g.blend >= 1.0f) note_mode(g.head_used ? "first person (head bone)" : "first person (eye_offset)", "first person selected, follow camera");
     else note_mode("blend", g.first_person ? "to first person" : "to third person");
     return true;
+}
+
+static const char* kind_name(int k) {
+    switch (k) {
+    case 0: return "game camera";
+    case 1: return "level boom";
+    case 2: return "game boom";
+    case 3: return "first person";
+    default: return "none";
+    }
+}
+
+// A change of camera mode while the game keeps its own camera (the view target stays the
+// pawn or EndCameraActor) moves the eyes over [camera] blend_seconds instead of cutting:
+// the offset from where the eyes were decays with a smoothstep while the new mode's
+// position goes on moving with the character. A change of view target, or one to or from
+// an authored camera, stays a cut (the game itself cuts there). Once per frame (first eye);
+// the second eye gets the same offset.
+static void move_between_modes(FVector& location, int kind) {
+    const Settings& s = g_settings;
+    if (g.cam_frame != g.frame) {
+        const bool contiguous = g.cam_out_valid && g.cam_frame + 1 == g.frame;
+        g.cam_frame = g.frame;
+        const float secs = s.camera_blend_seconds.load();
+        if (!contiguous) {
+            g.cam_t = 1.0f;
+        } else if (kind != g.cam_kind) {
+            const bool same_camera = g.target_ok && g.cam_target_ok && g.view_target == g.cam_target;
+            const FVector off{g.cam_out.X - location.X, g.cam_out.Y - location.Y, g.cam_out.Z - location.Z};
+            const double len = dist(off, FVector{});
+            if (same_camera && secs > 0.0f) {
+                g.cam_offset = off;
+                g.cam_t = 0.0f;
+                ++g.cam_blends;
+                log::info("player: camera move {} -> {} over {:.2f} s ({:.0f} cm)", kind_name(g.cam_kind), kind_name(kind), secs, len);
+            } else {
+                g.cam_t = 1.0f;
+                ++g.cam_cuts;
+                log::info("player: camera cut {} -> {} ({:.0f} cm, {})", kind_name(g.cam_kind), kind_name(kind), len,
+                          same_camera ? "blend_seconds = 0" : "the view target changed or is not the game's camera");
+            }
+        } else if (g.cam_t < 1.0f) {
+            g.cam_t = secs > 0.0f ? std::min(1.0f, g.cam_t + g.dt / secs) : 1.0f;
+        }
+        const double t = g.cam_t;
+        const double k = g.cam_t >= 1.0f ? 0.0 : 1.0 - t * t * (3.0 - 2.0 * t);  // 1 at the start of the move, 0 at its end
+        g.cam_apply = FVector{static_cast<float>(g.cam_offset.X * k), static_cast<float>(g.cam_offset.Y * k),
+                              static_cast<float>(g.cam_offset.Z * k)};
+        g.cam_kind = kind;
+        g.cam_target = g.view_target;
+        g.cam_target_ok = g.target_ok;
+        g.cam_out = FVector{location.X + g.cam_apply.X, location.Y + g.cam_apply.Y, location.Z + g.cam_apply.Z};
+        g.cam_out_valid = true;
+    }
+    location.X += g.cam_apply.X;
+    location.Y += g.cam_apply.Y;
+    location.Z += g.cam_apply.Z;
+}
+
+bool adjust_camera(FRotator& rotation, FVector& location, bool decoupled, bool& force_decouple) {
+    int kind = 0;
+    const bool changed = mode_camera(rotation, location, decoupled, force_decouple, kind);
+    move_between_modes(location, kind);
+    return changed || g.cam_t < 1.0f;
 }
 
 void request_toggle() { ++g_toggle_requests; }
@@ -1065,6 +1180,22 @@ std::string command(const std::string& args) {
     if (a[0] == "pivot" && a.size() == 2) {
         s.pivot_height = static_cast<float>(std::atof(a[1].c_str()));
         return std::format("ok pivot height {}", s.pivot_height.load());
+    }
+    if (a[0] == "camblend" && a.size() == 2) {
+        s.camera_blend_seconds = std::max(0.0f, static_cast<float>(std::atof(a[1].c_str())));
+        return std::format("ok camera blend {} s", s.camera_blend_seconds.load());
+    }
+    if (a[0] == "combatcam" && a.size() == 2) {
+        s.combat_level = a[1] != "game";
+        return std::format("ok combat camera {}", s.combat_level.load() ? "level" : "game");
+    }
+    if (a[0] == "aim" && a.size() == 2) {
+        s.aim_tolerance = static_cast<float>(std::atof(a[1].c_str()));
+        return std::format("ok aim tolerance {} cm", s.aim_tolerance.load());
+    }
+    if (a[0] == "miss" && a.size() == 2) {
+        s.miss_seconds = std::clamp(static_cast<float>(std::atof(a[1].c_str())), 0.0f, 30.0f);
+        return std::format("ok miss {} s", s.miss_seconds.load());
     }
     if (a[0] == "blend" && a.size() == 2) {
         s.blend_seconds = static_cast<float>(std::atof(a[1].c_str()));
@@ -1242,7 +1373,7 @@ std::string command(const std::string& args) {
         return r;
     }
     return "err fp status|toggle|first|third|available <0|1>|combat <0|1|auto>|offset <fwd> <right> <up>|hide <none|meshes|head|bones|pass>|"
-           "bob <0|1>|steady <s>|trace <frames> <csv path>|headbone <name|auto>|eye <head|offset>|headoffset <fwd> <right> <up>|boom <level|game>|pivot <cm>|blend <s>|find <name> [outer] [class]|"
+           "bob <0|1>|steady <s>|trace <frames> <csv path>|headbone <name|auto>|eye <head|offset>|headoffset <fwd> <right> <up>|boom <level|game>|pivot <cm>|blend <s>|camblend <s>|combatcam <level|game>|aim <cm>|miss <s>|find <name> [outer] [class]|"
            "classes <text>|chain <hex address>|funcs <text> [class text]|props <text> [class text]|call <obj|class> <Class.Function> [hex]|"
            "bones [text]";
 }

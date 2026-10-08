@@ -178,8 +178,9 @@ while an `xinput1_3.dll` it did not put there is in the folder.
   shoulder height. The horizon stays level: the game camera turns you left and
   right, but looking up and down is done with your head. Leaning moves the view.
 - **In a battle** the view switches to third person by itself and back to first
-  person afterwards (seen working in play; the camera can flip between the game's own
-  shot and third person a few times during a battle).
+  person afterwards (seen working in play). You stay behind the character while the
+  game's battle camera frames the enemies (`[camera] combat = level`); any change of
+  shot glides over a third of a second instead of jumping (`[camera] blend_seconds`).
 - **Conversations and cutscenes** that use their own camera shots are shown from the
   game's camera, as the game frames them (not seen in testing either).
 - **HUD and menus in the world:** on a flat panel about 3 m in front of you, 3.56 x

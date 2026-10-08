@@ -169,8 +169,9 @@ actor (the actor named `EndCameraActor`, of the engine's class `CameraActor` exa
 target in normal play; a cutscene's `CineCameraActor` does not count), and the camera looks
 at the pivot above the pawn (the pivot is in front of the camera, within `follow_distance`,
 and no more than `aim_tolerance` from its line of sight; the follow camera misses it by
-30 to 50 cm in the street, depending on the pitch). The test has a hysteresis of 30 frames each way, so a short scripted move does
-not flip the mode. A camera that looks elsewhere (an authored shot of a conversation or a
+30 to 50 cm in the street, depending on the pitch). The test has a hysteresis: the camera must look at the pivot for
+0.25 s before the modes apply again, and away from it for `[camera] miss_seconds` (1.5 s) before the game camera takes
+over, so a short scripted move or a second of a battle shot does not flip the mode. A camera that looks elsewhere (an authored shot of a conversation or a
 cutscene, a scripted pan) or another view target makes the module use the game's camera as
 it is, in both modes. Whether every authored camera fails the test has not been checked:
 no conversation or cutscene has been reached yet.
@@ -183,6 +184,35 @@ height behind the character at the boom's current length (shortened by the game'
 collision as before) while the right stick or mouse orbits; pitch input only changes where
 the game camera points, which decoupled pitch drops, so looking up and down is done with the
 head. Measured: see "Camera modes: evidence" below.
+
+### Battle camera
+
+In a battle the game's camera stays `EndCameraActor` but frames the enemies as well as the
+character, so it often fails the aim test; in play the mode flipped between the level boom
+and the game camera several times per battle, and each flip moved the eyes by up to a couple
+of metres in one frame. Two things change that:
+
+- `[camera] combat = level` (default): while the battle signal (or `fp combat 1`) says a
+  battle is in progress, the aim test is waived as long as the view target is still the
+  game's camera actor or the pawn and the pivot is within `follow_distance`; the eyes stay on
+  the level boom around the character. A cutscene camera in a battle (a `CineCameraActor`)
+  fails the view-target test and still gets the game camera. `combat = game` keeps the aim
+  test in battles. The status shows `in_battle` and `hold` (1 = the aim test failed and was
+  waived this frame); the mode line reads `third person (level boom)` with the reason
+  `battle, held through the battle camera`.
+- Every change between the level boom, the game boom, first person and the game camera,
+  while the view target stays the same game camera actor, moves the eyes over
+  `[camera] blend_seconds` (0.35 s, smoothstep): the offset between where the eyes were and
+  the new mode's position decays to zero while the new position keeps following the
+  character (`move_between_modes`). A change of view target, or a switch to or from an
+  authored camera, stays a cut, as the game cuts there. The log has one line per change,
+  `player: camera move <from> -> <to> over <s> s (<cm> cm)` or `player: camera cut ...`;
+  the status shows `cam_kind`, `cam_t`, `cam_off` (cm still to go), `blends`, `cuts` and
+  `flips` (changes of the follow-camera test).
+
+Dev commands: `fp combatcam level|game`, `fp camblend <s>`, `fp miss <s>`, and
+`fp aim <cm>` (the aim tolerance; `fp aim 1` makes every frame miss, which is how the
+transitions were tested without a battle).
 
 ### Camera modes: evidence
 
@@ -608,6 +638,9 @@ XInput pad, and whether Steam Input is on for the game on the player's PC.
 | `pivot_height` | `55` | cm above the pawn's location: the pivot of the game's camera boom (measured 55.4, `docs/re/engine.md` section 11) |
 | `follow_distance` | `1500` | cm; a camera farther than this from the pivot is not treated as the follow camera |
 | `aim_tolerance` | `75` | cm; largest distance of the pivot from the camera's line of sight for the follow camera |
+| `miss_seconds` | `1.5` | seconds the camera must look away from the pivot before the game camera takes over |
+| `combat` | `level` | `level`: in a battle the level boom holds while the battle camera frames the enemies (see "Battle camera"); `game`: the aim test as outside battles |
+| `blend_seconds` | `0.35` | seconds a change between the camera modes takes (0 = cut); a change of view target is always a cut |
 
 `[first_person]`:
 

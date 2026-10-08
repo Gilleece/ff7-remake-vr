@@ -175,6 +175,11 @@ void read_camera_settings(const Config& cfg) {
     p.pivot_height = static_cast<float>(cfg.get_float("camera", "pivot_height", p.pivot_height.load()));
     p.follow_distance = static_cast<float>(cfg.get_float("camera", "follow_distance", p.follow_distance.load()));
     p.aim_tolerance = static_cast<float>(cfg.get_float("camera", "aim_tolerance", p.aim_tolerance.load()));
+    p.camera_blend_seconds = std::max(0.0f, static_cast<float>(cfg.get_float("camera", "blend_seconds", p.camera_blend_seconds.load())));
+    p.combat_level = cfg.get_string("camera", "combat", "level") != "game";
+    p.miss_seconds = std::clamp(static_cast<float>(cfg.get_float("camera", "miss_seconds", p.miss_seconds.load())), 0.0f, 30.0f);
+    p.collision = cfg.get_bool("camera", "collision", p.collision.load());
+    p.collision_margin = std::max(0.0f, static_cast<float>(cfg.get_float("camera", "collision_margin", p.collision_margin.load())));
     p.fp_available = cfg.get_bool("first_person", "enabled", p.fp_available.load());
     p.fp_default = cfg.get_bool("first_person", "default", p.fp_default.load());
     p.auto_combat = cfg.get_bool("first_person", "auto_combat", p.auto_combat.load());
