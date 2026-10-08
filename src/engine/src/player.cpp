@@ -860,6 +860,10 @@ void tick(bool stereo, float delta_seconds) {
     if (!g.follow_camera || !stereo) g.blend = 0.0f;  // authored camera: cut, no blend
     else if (g.snap_first && fp_target) g.blend = 1.0f;  // stereo starts in first person
     else g.blend = std::clamp(g.blend + (fp_target ? step : -step), 0.0f, 1.0f);
+    // A switch into first person starts the head filters from the head's current offset
+    // (they are not updated in third person, so they would still hold the last first-person
+    // posture and slide to the right place over the next second).
+    if (fp_target && g.blend > 0.0f && g.blend <= step) g.head_rel_valid = false;
     g.snap_first = false;
 
     const int hide_mode = s.hide.load();
