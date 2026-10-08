@@ -197,7 +197,23 @@ bool playing() { return g_playing.load(); }
 
 // Game thread: the playing state changed or not; switches stereo off for a movie and back.
 static void update(bool any, const std::string& current) {
-    if (any && g_playing.load()) ++g_movie_frames;
+    if (any && g_playing.load()) {
+        ++g_movie_frames;
+        // Every 10 s while a movie plays: its frame rate so far, so a slow movie shows in the
+        // log while it runs (the timing block's copy engine line tells whether uploads are slow).
+        static ULONGLONG window_ms = 0;
+        static std::uint64_t window_frames = 0;
+        const ULONGLONG now = GetTickCount64();
+        if (g_movie_frames == 1) window_ms = now, window_frames = 0;
+        ++window_frames;
+        if (now - window_ms >= 10000) {
+            const double fps = window_frames * 1000.0 / static_cast<double>(now - window_ms);
+            log::info("movie: {:.1f} fps over the last {:.1f} s{}", fps, (now - window_ms) / 1000.0,
+                      fps < 30.0 ? " (slow: the movies run at 60; see the copy engine in the timing block)" : "");
+            window_ms = now;
+            window_frames = 0;
+        }
+    }
     if (any != g_playing.load()) {
         g_playing = any;
         if (any) {
@@ -205,7 +221,7 @@ static void update(bool any, const std::string& current) {
             g_movie_frames = 0;
             log::info("movie: playing {}", current);
         } else {
-            // The game's frame rate during the movie: far below the movie's own 30 fps means the
+            // The game's frame rate during the movie: far below the movie's own 60 fps means the
             // uploads of its frames were slow (docs/engine-module.md, "Movies").
             const double s = (GetTickCount64() - g_started_ms) / 1000.0;
             log::info("movie: stopped {} (after {:.1f} s, {} engine frames, {:.1f} fps)", g_current, s, g_movie_frames,

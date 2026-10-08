@@ -1396,13 +1396,15 @@ the render module shows it on the virtual screen (the automatic fallback of ster
 stereo comes back when no movie plays. The switch reallocates the eye target (a short
 hitch at the start and end of a movie). When a movie ends the log gets
 `movie: stopped <path> (after S s, N engine frames, F fps)`: the game's frame rate over the
-movie (the movies run at 30 fps; far below that, the movie's frames were slow to reach the
-card, see below).
+movie, and every 10 s while it plays `movie: F fps over the last 10.0 s`, marked slow below
+30 fps (the movie runs at 59.94 fps; far below that, its frames were slow to reach the card,
+see below).
 
 Status: on by default since 08/10. Detection was seen working in a headset session on
 08/10 (`MV_TOWN7_2250_US_MediaPlayer_VP9`: `movie: playing` when the movie started,
 `movie: stopped` 112 s later, the virtual screen in between, stereo back afterwards). The
-movies are WebM files (VP9 video at 1920x1080, Opus audio; `.emov` is only the extension):
+movies are WebM files (VP9 video at 1920x1080 and 59.94 fps, Opus audio, read from the file
+header of `MV_TOWN7_2250_US.emov`; `.emov` is only the extension):
 every movie frame is decoded on the CPU and uploaded to the card.
 
 ### Frame rate during movies
@@ -1423,7 +1425,8 @@ swap chain, so its Present waits only when the GPU's queue is full: the frame ti
 work the game itself had queued while the mod's 3D work was nil, that is the movie frames'
 uploads. In the slow state after a quick restart (`docs/benchmarking.md`, slow state 3)
 uploads to the card run at 0.03-0.2 GB/s instead of 7-14 GB/s; a 1080p movie frame is 3 MB
-(YUV) to 8 MB (RGBA), 15 to 270 ms per frame at those rates, which matches 12 fps and 2.9 fps.
+(YUV) to 8 MB (RGBA), 15 to 270 ms per frame at those rates: the order of the 80-350 ms
+frames seen (inferred; the copy engine's load was not logged by that package).
 Session B started 5 s after A's exit (the package predates the 90-s wait). Stereo rendering
 uploads little and recovered to 72 fps inside the state, so the state went unnoticed until
 the movie. Session A was not a quick restart; what slowed it before the movie is not known
