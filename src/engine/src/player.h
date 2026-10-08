@@ -40,7 +40,9 @@ struct Settings {
     std::atomic<float> eye_forward{10.0f}, eye_right{0.0f}, eye_up{75.0f};  // [first_person] eye_offset (cm, from the pawn's location; fallback)
     std::atomic<bool> eye_head{true};        // [first_person] eye = head (the head bone) | offset
     std::atomic<float> head_forward{2.0f}, head_right{0.0f}, head_up{0.0f};  // [first_person] head_offset (cm, from the eye bones or the head bone)
-    std::atomic<int> hide{1};                // [first_person] hide: 0 none, 1 the character's skeletal meshes
+    std::atomic<int> hide{1};                // [first_person] hide: 0 none, 1 the character's skeletal meshes,
+                                             // 2 the head (its bones), 3 the whole body through its bones,
+                                             // 4 out of the main pass (shadow kept); 2 to 4 experimental
     std::atomic<bool> head_bob{false};       // [first_person] head_bob: 1 = the view follows every step of the head
     std::atomic<float> steady_seconds{0.3f}; // [first_person] steady_seconds: time constant of each of the two filter
                                              // stages that take the step motion out of the head's offset (head_bob = 0)

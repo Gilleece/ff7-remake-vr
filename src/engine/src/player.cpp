@@ -59,6 +59,10 @@ void** g_gengine = nullptr;
 uobj::Lookup* g_lookup = nullptr;
 uobj::Lookup* g_opt_lookup = nullptr;
 uobj::Lookup* g_child_lookup = nullptr;  // SceneComponent.GetChildrenComponents
+// SkinnedMeshComponent.HideBoneByName, UnHideBoneByName, IsBoneHiddenByName, GetParentBone
+enum BoneFn : std::size_t { kHideBone, kUnHideBone, kIsBoneHidden, kGetParentBone };
+uobj::Lookup* g_bone_lookup = nullptr;
+uobj::Lookup* g_pass_lookup = nullptr;  // PrimitiveComponent.SetRenderInMainPass
 bool g_lookup_logged = false;
 bool g_opt_logged = false;
 
@@ -129,13 +133,22 @@ struct State {
     std::uint64_t toggles = 0, auto_switches = 0, calls = 0, call_failures = 0;
     // hidden meshes
     void* hidden_pawn = nullptr;
+    int hidden_mode = 0;
     std::vector<void*> hidden;
+    struct HiddenBone {
+        void* mesh;
+        std::uint64_t name;
+    };
+    std::vector<HiddenBone> hidden_bones;
+    std::vector<void*> hidden_pass;  // meshes kept visible but left out of the main pass
+    std::string hidden_bone_text;
     std::uint64_t hide_scans = 0;
     std::string last_mode = "none";
     std::string logged_mode;
 } g;
 std::mutex g_status_mutex;
 std::string g_status_line;
+
 // Per-frame trace of the first-person eye (fp trace): game thread only.
 struct TraceRow {
     double t, dt;
@@ -147,7 +160,6 @@ std::vector<TraceRow> g_trace;
 std::size_t g_trace_want = 0;
 std::string g_trace_path;
 std::chrono::steady_clock::time_point g_trace_start;
-
 
 double dist(const FVector& a, const FVector& b) {
     const double dx = a.X - b.X, dy = a.Y - b.Y, dz = a.Z - b.Z;
@@ -210,11 +222,65 @@ void set_visible(void* comp, bool on) {
     call(kSetVisibility, comp, params);
 }
 
+bool bone_call(BoneFn f, void* mesh, void* params) {
+    if (!g_bone_lookup || !g_bone_lookup->ready() || !mesh || !uobj::alive(mesh)) return false;
+    ++g.calls;
+    if (uobj::call(mesh, g_bone_lookup->get(f), params)) return true;
+    ++g.call_failures;
+    return false;
+}
+
+// HideBoneByName(FName, EPhysBodyOption = PBO_None) / UnHideBoneByName(FName).
+bool set_bone_hidden(void* mesh, std::uint64_t name, bool hidden) {
+    alignas(16) std::uint8_t params[16]{};
+    std::memcpy(params, &name, 8);
+    return bone_call(hidden ? kHideBone : kUnHideBone, mesh, params);
+}
+
+// IsBoneHiddenByName(FName) -> bool at +8.
+bool bone_hidden(void* mesh, std::uint64_t name) {
+    alignas(16) std::uint8_t params[16]{};
+    std::memcpy(params, &name, 8);
+    return bone_call(kIsBoneHidden, mesh, params) && params[8] != 0;
+}
+
+// GetParentBone(FName) -> FName at +8 (None: no parent).
+std::uint64_t parent_bone(void* mesh, std::uint64_t name) {
+    alignas(16) std::uint8_t params[16]{};
+    std::memcpy(params, &name, 8);
+    if (!bone_call(kGetParentBone, mesh, params)) return 0;
+    std::uint64_t r = 0;
+    std::memcpy(&r, params + 8, 8);
+    return r;
+}
+
+// SetRenderInMainPass(bool): the mesh stays visible to the engine (it ticks, casts its
+// shadow and counts as rendered) but is not drawn in the depth, base and translucency passes.
+bool set_main_pass(void* comp, bool on) {
+    if (!g_pass_lookup || !g_pass_lookup->ready() || !uobj::alive(comp)) return false;
+    alignas(16) std::uint8_t params[16]{};
+    params[0] = on ? 1 : 0;
+    ++g.calls;
+    if (uobj::call(comp, g_pass_lookup->get(0), params)) return true;
+    ++g.call_failures;
+    return false;
+}
+
 void restore_meshes() {
+    for (void* c : g.hidden_pass)
+        if (uobj::alive(c)) set_main_pass(c, true);
+    if (!g.hidden_pass.empty()) log::info("player: {} mesh(es) of the character drawn in the main pass again", g.hidden_pass.size());
+    g.hidden_pass.clear();
     for (void* c : g.hidden)
         if (uobj::alive(c)) set_visible(c, true);
     if (!g.hidden.empty()) log::info("player: {} mesh(es) of the character shown again", g.hidden.size());
     g.hidden.clear();
+    for (const auto& b : g.hidden_bones)
+        if (uobj::alive(b.mesh)) set_bone_hidden(b.mesh, b.name, false);
+    if (!g.hidden_bones.empty()) log::info("player: {} bone(s) of the character shown again ({})", g.hidden_bones.size(), g.hidden_bone_text);
+    g.hidden_bones.clear();
+    g.hidden_bone_text.clear();
+    g.hidden_mode = 0;
     g.hidden_pawn = nullptr;
     g.meshes_pawn = nullptr;  // the next first person scans again (meshes added since: equipment)
 }
@@ -445,13 +511,78 @@ std::vector<void*> attached_meshes(void* pawn, const std::vector<void*>& meshes)
     return out;
 }
 
-void hide_meshes(void* pawn) {
-    if (g.hidden_pawn != pawn) {
+// Bone to hide for hide = head instead of the automatic choice (fp headbone; game thread).
+std::string g_head_hide_bone;
+
+// The bone named `text` on the mesh (0 = none).
+std::uint64_t find_bone(void* mesh, const std::string& text) {
+    const int n = num_bones(mesh);
+    const std::string want = lower(text);
+    for (int i = 0; i < n && i < 2048; ++i) {
+        std::uint64_t name = 0;
+        if (!bone_name(mesh, i, name)) break;
+        if (lower(fname_text(name)) == want) return name;
+    }
+    return 0;
+}
+
+// For hide = head: the highest ancestor of the eye (or head) bone with "head" in its name,
+// so its subtree holds the head, the face and the hair but not the neck. `chain` lists the
+// ancestors for the log.
+std::uint64_t head_root_bone(void* mesh, std::uint64_t from, std::string& chain) {
+    std::uint64_t best = 0;
+    std::uint64_t b = from;
+    for (int depth = 0; depth < 64 && (b & 0xffffffffu) != 0; ++depth, b = parent_bone(mesh, b)) {
+        const std::string t = fname_text(b);
+        chain += " " + t;
+        const std::string l = lower(t);
+        if (l.find("head") != std::string::npos && l.find("fore") == std::string::npos) best = b;
+    }
+    return best;
+}
+
+void hide_bone(void* mesh, std::uint64_t name) {
+    if (!name || !set_bone_hidden(mesh, name, true)) return;
+    g.hidden_bones.push_back({mesh, name});
+    g.hidden_bone_text += (g.hidden_bone_text.empty() ? "" : " ") + uobj::object_name(mesh) + ":" + fname_text(name);
+}
+
+// mode 1: the character's skeletal meshes and the meshes attached to them (the sword).
+// mode 2: the head through its bones (HideBoneByName); body and sword stay.
+// mode 3: the whole body through its root bone; the attached meshes through their visibility.
+void hide_meshes(void* pawn, int mode) {
+    if (g.hidden_pawn != pawn || g.hidden_mode != mode) {
         restore_meshes();
         g.hidden_pawn = pawn;
+        g.hidden_mode = mode;
+        if (mode == 2) {
+            if (g.head_pawn != pawn) find_head(pawn);
+            std::string chain;
+            if (g.head_mesh) {
+                const std::uint64_t b = g_head_hide_bone.empty() ? head_root_bone(g.head_mesh, g.head_name, chain)
+                                                                 : find_bone(g.head_mesh, g_head_hide_bone);
+                hide_bone(g.head_mesh, b);
+            }
+            log::info("player: first person: hid bone(s) [{}] of {} (body and sword shown); from the eye up:{}", g.hidden_bone_text,
+                      uobj::object_name(pawn), chain);
+            return;
+        }
         std::vector<void*> meshes = pawn_meshes(pawn);
         const std::size_t own = meshes.size();
-        for (void* a : attached_meshes(pawn, meshes)) meshes.push_back(a);
+        if (mode == 3) {
+            for (void* m : meshes) {
+                std::uint64_t root = 0;
+                if (bone_name(m, 0, root)) hide_bone(m, root);
+            }
+            meshes.clear();
+        }
+        if (mode == 4) {
+            for (void* m : meshes)
+                if (set_main_pass(m, false)) g.hidden_pass.push_back(m);
+            meshes.clear();
+        }
+        for (void* a : attached_meshes(pawn, pawn_meshes(pawn))) meshes.push_back(a);
+        const std::size_t shown_own = mode >= 3 ? 0 : own;
         std::string names;
         for (void* m : meshes) {
             names += " " + uobj::path_of(m);
@@ -460,13 +591,19 @@ void hide_meshes(void* pawn) {
                 g.hidden.push_back(m);
             }
         }
-        log::info("player: first person: hid {} of {} mesh(es) ({} skeletal of {} ({}), {} attached):{}", g.hidden.size(), meshes.size(), own,
-                  uobj::object_name(pawn), uobj::object_name(uobj::class_of(pawn)), meshes.size() - own, names);
+        log::info("player: first person: hid {} of {} mesh(es) ({} skeletal of {} ({}), {} attached), bones [{}], {} out of the main pass:{}",
+                  g.hidden.size(), meshes.size(), shown_own, uobj::object_name(pawn), uobj::object_name(uobj::class_of(pawn)),
+                  meshes.size() - shown_own, g.hidden_bone_text, g.hidden_pass.size(), names);
         return;
     }
-    // The game may show a mesh again (equipment, animation events): hide it again.
+    // The game may show a mesh or a bone again (equipment, animation events): hide it again.
     for (void* c : g.hidden)
         if (uobj::alive(c) && is_visible(c)) set_visible(c, false);
+    for (const auto& b : g.hidden_bones)
+        if (uobj::alive(b.mesh) && !bone_hidden(b.mesh, b.name)) set_bone_hidden(b.mesh, b.name, true);
+    // SetRenderInMainPass has no getter; setting the same value again costs nothing.
+    if (g.frame % 30 == 0)
+        for (void* c : g.hidden_pass) set_main_pass(c, false);
 }
 
 // The game's own camera actor in normal play: an object named EndCameraActor of class
@@ -616,6 +753,13 @@ void init(std::uint8_t* object_array, std::uint8_t* name_pool, void** gengine) {
         {"GetSocketLocation", "SceneComponent", "Function"},
     });
     g_child_lookup = new uobj::Lookup({{"GetChildrenComponents", "SceneComponent", "Function"}});
+    g_bone_lookup = new uobj::Lookup({
+        {"HideBoneByName", "SkinnedMeshComponent", "Function"},
+        {"UnHideBoneByName", "SkinnedMeshComponent", "Function"},
+        {"IsBoneHiddenByName", "SkinnedMeshComponent", "Function"},
+        {"GetParentBone", "SkinnedMeshComponent", "Function"},
+    });
+    g_pass_lookup = new uobj::Lookup({{"SetRenderInMainPass", "PrimitiveComponent", "Function"}});
     if (!g_battle_class.empty()) g_battle_lookup = new uobj::Lookup({{g_battle_function, g_battle_class, "Function"}});
 }
 
@@ -625,6 +769,16 @@ void tick(bool stereo, float delta_seconds) {
     g.dt = std::clamp(delta_seconds, 0.0001f, 0.25f);
     if (g_lookup->ready()) run_work();
     if (g_child_lookup && !g_child_lookup->ready() && g_child_lookup->passes() < 3) g_child_lookup->step();
+    if (g_bone_lookup && !g_bone_lookup->ready() && g_bone_lookup->passes() < 3) {
+        g_bone_lookup->step();
+        if (g_bone_lookup->passes() >= 3)
+            for (const auto& e : g_bone_lookup->entries())
+                if (!e.obj) log::warn("player: {} ({}) not found; hide = head and hide = bones do nothing", e.name, e.outer);
+    }
+    if (g_pass_lookup && !g_pass_lookup->ready() && g_pass_lookup->passes() < 3) {
+        g_pass_lookup->step();
+        if (g_pass_lookup->passes() >= 3 && !g_pass_lookup->ready()) log::warn("player: PrimitiveComponent.SetRenderInMainPass not found");
+    }
     if (g_opt_lookup && !g_opt_lookup->ready() && g_opt_lookup->passes() < 3) {
         g_opt_lookup->step();
         if (g_opt_lookup->passes() >= 2 && !g_opt_logged) {
@@ -708,18 +862,19 @@ void tick(bool stereo, float delta_seconds) {
     else g.blend = std::clamp(g.blend + (fp_target ? step : -step), 0.0f, 1.0f);
     g.snap_first = false;
 
-    const bool hide = stereo && s.hide.load() == 1 && g.blend > 0.5f && g.pawn;
-    if (hide) hide_meshes(g.pawn);
-    else if (!g.hidden.empty() || g.hidden_pawn) restore_meshes();
+    const int hide_mode = s.hide.load();
+    const bool hide = stereo && hide_mode != 0 && g.blend > 0.5f && g.pawn;
+    if (hide) hide_meshes(g.pawn, hide_mode);
+    else if (!g.hidden.empty() || !g.hidden_bones.empty() || !g.hidden_pass.empty() || g.hidden_pawn) restore_meshes();
 
     std::lock_guard lock(g_status_mutex);
     g_status_line = std::format(
         "pc {} pawn {} ({}) view_target {} ({}) target_ok {} aim_miss {:.1f} orbit_frames {} follow {} stereo {} first_person {} combat {} blend {:.2f} hidden {} "
-        "bob {} toggles {} (pad {} of {} polls) auto {} calls {} failed {} pawn_loc ({:.1f} {:.1f} {:.1f}) head {} {} ({:.1f} {:.1f} {:.1f}) failures {} "
+        "bones {} pass {} bob {} toggles {} (pad {} of {} polls) auto {} calls {} failed {} pawn_loc ({:.1f} {:.1f} {:.1f}) head {} {} ({:.1f} {:.1f} {:.1f}) failures {} "
         "battle_signal {} raw {} value {:#x} reads {} changes {} mode {}",
         g.pc, g.pawn, g.pawn ? uobj::object_name(uobj::class_of(g.pawn)) : "", g.view_target,
         g.view_target ? uobj::object_name(g.view_target) : "", g.target_ok ? 1 : 0, g.aim_miss, g.orbit_frames, g.follow_camera ? 1 : 0, stereo ? 1 : 0, g.first_person ? 1 : 0,
-        g.combat ? 1 : 0, g.blend, g.hidden.size(), s.head_bob.load() ? 1 : 0, g.toggles, g_pad_toggles.load(), controls::pad_polls(), g.auto_switches, g.calls, g.call_failures, g.pawn_loc.X,
+        g.combat ? 1 : 0, g.blend, g.hidden.size(), g.hidden_bones.size(), g.hidden_pass.size(), s.head_bob.load() ? 1 : 0, g.toggles, g_pad_toggles.load(), controls::pad_polls(), g.auto_switches, g.calls, g.call_failures, g.pawn_loc.X,
         g.pawn_loc.Y, g.pawn_loc.Z, g.head_bone.empty() ? "-" : g.head_bone, g.head_ok ? "ok" : "no", g.head_loc.X, g.head_loc.Y,
         g.head_loc.Z, g.head_failures, g_battle_class.empty() ? std::string("none") : g_battle_class + "." + g_battle_function, g.battle_raw,
         g.battle_value, g.battle_reads, g.battle_changes, g.last_mode);
@@ -865,7 +1020,7 @@ std::string command(const std::string& args) {
         return std::format("ok eye offset {} {} {}", s.eye_forward.load(), s.eye_right.load(), s.eye_up.load());
     }
     if (a[0] == "hide" && a.size() == 2) {
-        s.hide = a[1] == "meshes" ? 1 : 0;
+        s.hide = a[1] == "meshes" ? 1 : a[1] == "head" ? 2 : a[1] == "bones" ? 3 : a[1] == "pass" ? 4 : 0;
         return std::format("ok hide {}", s.hide.load());
     }
     if (a[0] == "bob" && a.size() == 2) {
@@ -888,6 +1043,15 @@ std::string command(const std::string& args) {
             g_trace_start = std::chrono::steady_clock::now();
             g_trace_want = frames;
             return std::format("ok tracing {} frames to {}", frames, path);
+        });
+    }
+    if (a[0] == "headbone" && a.size() == 2) {
+        // fp headbone <name>|auto: the bone hidden by hide = head (applied again at once when it is in use).
+        const std::string name = a[1] == "auto" ? std::string() : a[1];
+        return on_game_thread([name]() -> std::string {
+            g_head_hide_bone = name;
+            if (g.hidden_mode == 2) restore_meshes();  // hidden again with the new bone at the next frame
+            return "ok head hide bone " + (name.empty() ? std::string("auto") : name);
         });
     }
     if (a[0] == "boom" && a.size() == 2) {
@@ -1073,8 +1237,8 @@ std::string command(const std::string& args) {
         for (int d = 0; c && d < 16; ++d, c = uobj::super_of(c)) r += " " + uobj::object_name(c);
         return r;
     }
-    return "err fp status|toggle|first|third|available <0|1>|combat <0|1|auto>|offset <fwd> <right> <up>|hide <none|meshes>|"
-           "bob <0|1>|steady <s>|trace <frames> <csv path>|eye <head|offset>|headoffset <fwd> <right> <up>|boom <level|game>|pivot <cm>|blend <s>|find <name> [outer] [class]|"
+    return "err fp status|toggle|first|third|available <0|1>|combat <0|1|auto>|offset <fwd> <right> <up>|hide <none|meshes|head|bones|pass>|"
+           "bob <0|1>|steady <s>|trace <frames> <csv path>|headbone <name|auto>|eye <head|offset>|headoffset <fwd> <right> <up>|boom <level|game>|pivot <cm>|blend <s>|find <name> [outer] [class]|"
            "classes <text>|chain <hex address>|funcs <text> [class text]|props <text> [class text]|call <obj|class> <Class.Function> [hex]|"
            "bones [text]";
 }

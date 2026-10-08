@@ -259,6 +259,47 @@ captures after the toggles (`h05_third_toggled`, `h08_third_after_toggles`,
   Finding the meshes scans the object array each time first person starts (a one-off cost
   of a few milliseconds on the game thread), so meshes added since the last time (equipment)
   are included. When the game exits nothing needs restoring (visibility is not saved).
+- **Other ways of hiding (experimental, dev pipe `fp hide <mode>` or `[first_person] hide`)**:
+  - `pass`: the character's own skeletal meshes stay visible to the engine but are left out
+    of the main pass (`PrimitiveComponent.SetRenderInMainPass(false)`, set again every 30
+    frames because there is no getter); the attached meshes are hidden as with `meshes`.
+    Seen (`captures/fp/run2/p2_pass_down`): looking down, no body, but the character's
+    shadow (the feet) stays on the floor; looking ahead (`p1_pass_ahead`) the same as
+    `meshes`.
+  - `bones`: the root bone (`Trans`) of each of the character's skeletal meshes is hidden
+    with `SkinnedMeshComponent.HideBoneByName(name, PBO_None)` (`UnHideBoneByName` when
+    first person ends, `IsBoneHiddenByName` checked every frame); attached meshes as with
+    `meshes`.
+  - `head`: only the head through its bones, body and sword shown: the highest ancestor of
+    the eye bone with "head" in its name (`fp headbone <name>` picks another bone). The
+    chain from the eye up, from `GetParentBone`: `L_Eye C_FaceBase_a C_Head_a C_Neck_a
+    C_Spine_d C_Spine_c C_Spine_b C_Spine_a C_Hip_a Trans`. **Does not work yet**: with
+    `C_Head_a` hidden the first-person view turns almost white (mean level 248 of 255 in
+    `captures/fp/run1/h1_head_ahead`, `h2_head_down`, `run2/h4_head_first`; the cause is
+    not known); with `C_FaceBase_a` hidden the view is normal but the hair (not under the
+    face base) fills part of it (`run2/h6_facebase_first`). With nothing hidden the view
+    ahead is clean (`run2/p4_none_ahead`) and looking down shows the shoulder armour and the
+    chest (`run2/p3_none_down`), so the head is only in the way when the view faces away
+    from where the character faces.
+
+  In all three the eye bones stay readable: with the root bone or `C_Head_a` hidden,
+  `fp bones eye` still gave the eyes 74.2 to 74.6 cm above the pawn, as without hiding.
+  In the Sector 7 slums save the meshes attached to the character are three, not one: the
+  sword, `FA0034_00_76idcard_Standard_C` and `FA0233_00_Town7PhotoFrame_Standard_C`
+  (`player: first person: hid 4 of 4 mesh(es)` in the log).
+- **Footsteps** (reported from a headset session: none heard in first person). Tried
+  headless by recording the PC's audio output (WASAPI loopback) while the character runs
+  4.5 s forward and back, in each hiding mode, and folding the envelope of three frequency
+  bands at the step period that the head trace gives (0.33 s, 3.0 Hz): footsteps show as
+  a peak at that period over the other periods between 0.25 and 0.45 s. The music and the
+  street's ambience are louder than the steps, so the result is weak. Mean score (z, six
+  values per recording; 0.4 standing still): nothing hidden 2.9, 2.3, 1.7 (three
+  recordings); `meshes` 0.9, 1.3; `pass` 1.4, 1.3; `bones` 1.3; third person 1.0
+  (`captures/fp/run1`, `run2`, `captures/fp/fold3.py`). That points to hiding the
+  character, by any of the three methods, weakening the steps, but the spread between
+  recordings of the same mode is as large as the differences: **not established**. A
+  clearer test needs a quieter spot or the game's own footstep events (an object or
+  function found through reflection) instead of the mixed audio.
 - **Head bob, measured** (`captures/fp/run1`, Null backend, Sector 7 slums street, 90 fps;
   `fp trace` writes each first-person frame's pawn location and the eyes' raw, 80 ms and
   steady offsets to a CSV; analysis after removing the 0.5 s moving average). Standing:
@@ -1674,9 +1715,11 @@ Ordered by how much they would bother a player in the headset:
    pitched camera passed over (a counter, a low wall, a person) can then be close in front
    of the eyes or, possibly, around them (`e05_level_pdown`: an NPC's back fills the view).
    Not seen inside a wall; not tested against one on purpose.
-3. **First person**: the whole character is hidden (its shadow too, presumably: not checked); the view does not
-   follow the character's head animation (the eye bones' offset from the pawn is smoothed
-   over 80 ms and the view stays level); interacting, climbing or squeezing animations were
+3. **First person**: the whole character is hidden, its shadow too (`hide = pass` keeps
+   the shadow); the view stays level and, with `head_bob = 0`, does not bob with the steps
+   (with `head_bob = 1` the eye bones' offset is smoothed over 80 ms only); footsteps may be
+   quieter or missing while the character is hidden (see "Footsteps" under "First person",
+   not established); interacting, climbing or squeezing animations were
    not tried. The eyes are 2 cm in front of the eye bones, about 75 cm above the pawn's
    location; with `hide = none` the inside of the face is visible.
 4. **Not exercised with scripted input**: conversations (camera cuts and scripted camera
