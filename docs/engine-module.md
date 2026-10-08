@@ -577,7 +577,7 @@ XInput pad, and whether Steam Input is on for the game on the player's PC.
 | `bloom_fix` | `1` | right-eye bloom fix (below) |
 | `ao_fix` | `1` | right-eye ambient occlusion fix (below) |
 | `ssr_per_eye` | `1` | each eye's screen-space reflection run limited to its half of the target, and the per-view colour copy for it halved (see "Reflections per eye"); same image, about 0.45 ms less per frame at 2 x 3072x3264 |
-| `ssr_fix` | `1` | right-eye screen-space reflections: without it the right eye has none (see "Right-eye reflections fix"); with it they are not the right view's own ("The right eye's reflections are not its own"). `2`: no screen-space reflections in either eye, the eyes match |
+| `ssr_fix` | `1` | right-eye screen-space reflections: without it the right eye has none (see "Right-eye reflections fix") |
 | `distortion_fix` | `1` | heat haze and refraction per eye: without it the left view's distortion composite covers both eyes and the right view's draws nothing (see "Right-eye distortion fix") |
 | `hzb_skip` | `0` | `1` leaves out the further mips of the hierarchical depth chain nothing reads, while `r.HZBOcclusion` is 0 (see "Volumes and hierarchical depth per view"); gain within noise |
 | `tonemap_shift` | `auto` | with ReShade's Luma add-on loaded, the right view's bloom-combine input shifted to the origin (Luma's shader reads it there; without it both eyes show the left eye's image). `auto`: only while Luma is loaded; `0` off; `1` always (breaks the right eye without Luma). See "ReShade and Luma: the tonemapping shift and Luma's DLSS" |
@@ -647,7 +647,7 @@ Through the dev pipe (`[dev] pipe = 1`, `tools\dev\send-input.ps1 -Pipe "<comman
 | `stereo aofix [0\|1]` | right-eye ambient occlusion fix on/off, with its counters (draws fixed, failures); one per stereo frame |
 | `ssr [on\|off]` | reflections per eye on/off, with its counters (runs limited, colour copies halved; two each per stereo frame) |
 | `ssr poison <0\|1\|2\|3>` | test of reflections per eye: `1` fills every half the fix skips with a loud colour (nothing of it may reach the eye images), `2` fills the half each reflection run writes, `3` the half each colour copy writes (controls: the colour must show) |
-| `ssr fix <0\|1\|2>` | right-eye reflections fix off/on, `2` both eyes without screen-space reflections (`runs cleared` counts them); `ssr` shows `applied` (one per stereo frame), `failed`, the x where the right view's result was placed, how often that x changed (`moved`) and results no draw read (`not read`) |
+| `ssr fix <0\|1>` | right-eye reflections fix off/on; `ssr` shows `applied` (one per stereo frame), `failed`, the x where the right view's result was placed, how often that x changed (`moved`) and results no draw read (`not read`) |
 | `hzb [0-4]` | the unread hierarchical depth chain: `0` built (default), `1` further mips left out, `2` / `3` the whole chain filled with near / far depth, `4` the read chain's further mips filled (control); shows the view chains seen and the mips left out |
 | `stereo framelog start` / `stop <csv>` | frame log: per frame the start, host return and end of `UGameEngine::Tick`, the render thread's end of the scene and the frame-end command on the RHI thread, each with the thread's CPU time (cycle count) and, at the start of Tick, the latest GPU frame time (see "Turning: where the slow frames come from") |
 | `dynres [on\|off]`, `dynres scale\|min\|target <value>` | render scale and dynamic resolution: state, current scale and rect, last GPU frame time and budget, number of changes |
@@ -1252,68 +1252,6 @@ scratch target of 3088x3264 RGBA16F (81 MB of video memory, released after about
 frames without a reflection run). Street, frame cap lifted, 5 s windows alternating: fix off
 9.20, 9.22, 9.33 ms; on 9.46, 9.46, 9.65 ms (scene GPU p50 8.01, 7.97, 8.05 against 8.24,
 8.22, 8.31): about +0.25 ms, roughly the cost of the left view's own run.
-
-### The right eye's reflections are not its own (08/10)
-
-Reported in the headset: some reflections (a puddle) show in one eye only, and many
-reflections of lights show in the right eye only. Checked headless at the layout of the
-DLSS package (`[dlss] enabled = 1`, `input_scale = 0.65`, `output = runtime`, Null
-backend eyes 3436x3468, so the engine's eye target is 2 x 2232x2256 = 4464x2256;
-foveation `performance` with `dlss_finer`), first person in a street with a puddle
-(pawn at -52075, 20198, 743), runs `captures/refl/r1` to `r5`.
-
-**The fixes apply at this layout.** Over 5 s (`r1/run.txt`): `ssr` runs limited 2 per
-stereo frame, right-eye fix `applied` = stereo frames, `failed 0`, `not read 0`, at x 2232
-(half the target, the right view's rectangle); bloom fix and occlusion fix `applied` =
-stereo frames, `missed 0`, `failed 0`. Poison tests at this layout: `ssr poison 1` 0
-magenta pixels in either eye, `2` 44 % / 42 % (left / right), `3` 0.10 % / 0.16 %
-(`r1/p*_L.png`, `p*_R.png`): every part a run or copy skips stays unread and each
-composite reads what its run wrote, as at the standard layout.
-
-**But what the right view's run computes is wrong.** One-frame traces with read-backs of
-the reflection target (`r1/tr1`, events 4550 / 4552) give, for the left view's part after
-its run, mean colour 0.42 and 3.9 % of the pixels non-zero; for the right view's part
-after the fixed run 1.23 and 18.9 %. Overlaid on each view's scene colour
-(`r1/overlay_fix1.png`, reflections in red): the left view's reflections sit on the puddle
-and along the wall edges and grating; the right view's are a scatter of specks over the
-whole floor, a dense band at the left edge of the view, and almost nothing on the puddle.
-The same holds in the old standard-layout trace (2 x 3072x3264, first room,
-`captures/render2/014336-scales/tr_sp100` events 2630 / 2632; `captures/refl/overlay_sp100.png`):
-left view on the door frame, beams and table edges; right view on bright bars of wall
-that are not edges, and floor specks. So the earlier check ("the right view's result
-holds the right eye's objects") was too coarse: objects are at the right positions, but
-where the pass finds reflections is wrong. In the eye images the right eye gets
-reflections of lights on the floor that the left eye does not have, and loses the
-puddle's own screen-space reflection. Without the fix (`ssr_fix = 0`) it has none at all.
-
-What decides it, from tests in the running game (each a trace of the same frame layout):
-
-| Test | Right view's part after its run |
-|---|---|
-| fixed run as shipped (`r3/tr_s0`, `r4/tr_uv0` baseline) | 17.4-18.9 % non-zero, specks |
-| `stereo swap 1` (the left eye rendered into the right half, `r2/tr_swap_m1`) | the eye in the right half (now the left eye) has the specks (20.3 %); the eye at the origin (now the right eye) is clean (3.6 %): **the fault follows the position in the target, not the view** |
-| the run drawn in place with its viewport moved to x 2232 (`r2/tr_m2`) | exactly 0: the pass treats its pixel position as relative to the origin |
-| inputs replaced by copies holding the right view's part at the origin only (`r3/tr_s*`): depth (t4), GBuffers (t1-t3), previous colours (t7, t8) | 0 (colour 0 with t7/t8, alpha unchanged): all of these are read at the right view's rectangle, correctly |
-| same for velocity (t6) | unchanged: not read, or read correctly |
-| copies holding the right view's part at the origin and at its rectangle, all of t1-t4 and t6-t8 (`r4/tr_dup`) | unchanged (18.4 %): none of the full-size inputs is read at the origin |
-| vertex constants with the texture rectangle at x 0 instead of 2232 (`r4/tr_uv0`) | unchanged (18.6 %): the interpolated texture coordinate does not matter |
-
-Left: the hierarchical depth (t5, built per view over the whole 4096x2048 texture from the
-view's own rectangle; its mip-0 constants are correct for both views), the per-view view
-buffer (cb1) and the pass's own constants (cb0). The pass's cb0 is the same for both runs
-except one value (row 20 w: a finite number for the first run, `3.4e38` for the second; it
-follows the run order, not the position, so it is not the cause) and holds a 4x4 matrix
-(rows 28-31) that is identical for both views. The likeliest cause is the ray march's
-mapping from the view's screen position to the hierarchical depth texture: correct only
-for a view whose rectangle starts at the origin. Not established; a fix needs the pass's
-pixel shader (disassembly of its bytecode) or the view buffer's rectangle fields patched
-for the right view's run.
-
-`[stereo] ssr_fix = 2` (`ssr fix 2`) removes the inconsistency instead of fixing it: both
-views' reflection runs are replaced by a clear of the target, so neither eye has
-screen-space reflections (wet floors, puddles and metal keep their reflection captures and
-light highlights; by the binding audit of the traces the reflection composite reads per-view light grids,
-reflection capture buffers and view constants, not checked with read-backs). Default stays `1` until this is decided.
 
 ### Bloom and occlusion fixes at reduced view rectangles
 
