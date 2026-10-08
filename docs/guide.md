@@ -289,10 +289,13 @@ session it is `ff7vr.log` in the game's `End\Binaries\Win64` folder).
   has never been seen in a battle); scripted camera shots should be shown as the game
   frames them (the mod then uses the game's camera); the camera may cut between
   shots, which can be uncomfortable in a headset.
-- **Pre-rendered movies** are very likely wrong: movie detection exists but is off
-  (`[stereo] movie_screen = 0`) because it was never seen to work. A movie may be
-  shown inside the 3D scene or the HUD panel instead of on the virtual screen.
-  Setting `[stereo] movie_screen = 1` is worth a try if movies look broken.
+- **Pre-rendered movies** are shown on the virtual screen (`[stereo] movie_screen = 1`,
+  the default). A movie that plays at a few frames per second is most likely the slow graphics-driver
+  state after a quick restart, not the movie itself: the movie's frames are uploaded to
+  the card, and in that state uploads crawl (stereo can look fine until then). Quit, wait
+  a minute and a half, start again. The log's `movie: stopped ... fps` line gives the
+  frame rate over each movie, and `game copy engine` at 40 % or more in the timing lines
+  confirms the state.
 - **A connected gamepad.** The gamepad combinations were tested only with simulated
   button states (no pad was connected; the game reads the pad only while one is),
   so what the game does with the View/Back press handed over on release, and with a

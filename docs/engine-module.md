@@ -529,7 +529,7 @@ XInput pad, and whether Steam Input is on for the game on the player's PC.
 | `dynamic_resolution_min` | `0.75` | lowest scale the dynamic resolution may use (per axis; 0.75 is 56 % of the pixels) |
 | `dynamic_resolution_target` | `0.85` | GPU frame time to hold, as a share of the display's frame period (0.85 at 72 Hz: 11.8 ms) |
 | `vr_window` | `1280x720` | window size the game is switched to while VR renders in a fullscreen mode; `0` keeps the mode (see "Window modes") |
-| `movie_screen` | `0` | movie detection: stereo is held off while a pre-rendered movie plays, so the virtual screen shows it (below) |
+| `movie_screen` | `1` | movie detection: stereo is held off while a pre-rendered movie plays, so the virtual screen shows it (below) |
 | `allow_unknown_build` | `0` | try a game build other than 1.0.0.7 if every signature and layout check passes |
 | `log_frames` | `0` | log the eye cameras of the first N stereo frames |
 | `eye_width`, `eye_height` | `1280`, `1440` | fixed host: per-eye render size |
@@ -593,7 +593,7 @@ Through the dev pipe (`[dev] pipe = 1`, `tools\dev\send-input.ps1 -Pipe "<comman
 | `hzb [0-4]` | the unread hierarchical depth chain: `0` built (default), `1` further mips left out, `2` / `3` the whole chain filled with near / far depth, `4` the read chain's further mips filled (control); shows the view chains seen and the mips left out |
 | `stereo framelog start` / `stop <csv>` | frame log: per frame the start, host return and end of `UGameEngine::Tick`, the render thread's end of the scene and the frame-end command on the RHI thread, each with the thread's CPU time (cycle count) and, at the start of Tick, the latest GPU frame time (see "Turning: where the slow frames come from") |
 | `dynres [on\|off]`, `dynres scale\|min\|target <value>` | render scale and dynamic resolution: state, current scale and rect, last GPU frame time and budget, number of changes |
-| `stereo movie [on\|off]`, `stereo movie menu <0\|1>` | movie detection on/off and its state; `menu 1` counts the menu background players too (test) |
+| `stereo movie [on\|off]`, `stereo movie menu <0\|1>`, `stereo movie simulate <on\|off>` | movie detection on/off and its state; `menu 1` counts the menu background players too (test); `simulate on` behaves as if a movie played (stereo off, the virtual screen) until `simulate off`, to measure the switch without a movie |
 | `stereo window [<w>x<h>\|0]` | window size while VR renders in a fullscreen mode, and the state |
 | `stereo frametime <s>` | frame time window length in seconds; restarts the window (for A/B measurements) |
 | `stereo swap <0\|1>` | test: render the right eye into the left half of the target and the left eye into the right half (the eyes then come out swapped). Tells a bug that follows a view's position in the target from one that follows the view |
@@ -1394,11 +1394,65 @@ a slice per frame), then keeps scanning the object array a slice per frame (1638
 frame. While one plays, stereo is switched off: the engine renders the normal window and
 the render module shows it on the virtual screen (the automatic fallback of stereo mode);
 stereo comes back when no movie plays. The switch reallocates the eye target (a short
-hitch at the start and end of a movie).
+hitch at the start and end of a movie). When a movie ends the log gets
+`movie: stopped <path> (after S s, N engine frames, F fps)`: the game's frame rate over the
+movie (the movies run at 30 fps; far below that, the movie's frames were slow to reach the
+card, see below).
 
-Status: the class and function are found in gameplay (`stereo movie`); detection of a
-playing movie has not been seen yet (no movie was reached with scripted input), so the key
-is off by default.
+Status: on by default since 08/10. Detection was seen working in a headset session on
+08/10 (`MV_TOWN7_2250_US_MediaPlayer_VP9`: `movie: playing` when the movie started,
+`movie: stopped` 112 s later, the virtual screen in between, stereo back afterwards). The
+movies are WebM files (VP9 video at 1920x1080, Opus audio; `.emov` is only the extension):
+every movie frame is decoded on the CPU and uploaded to the card.
+
+### Frame rate during movies
+
+His two sessions with a movie (07-08/10, DLSS package at 0.65, Virtual Desktop at 72 Hz):
+
+| Session | `movie_screen` | Before the movie | During the movie | After it |
+|---|---|---|---|---|
+| A | 0 (movie inside the stereo frame) | 72 fps, then slowing for 50 s before the movie (GPU scene 4 -> 14 ms, Present 13-16 ms) | 22, 12, 12, 22, 2.9 fps | quit |
+| B, started 5 s after A's exit | 1 (virtual screen) | 5-12 fps for the first minute (the slow state after a quick restart), then 72 fps | 12 fps for 110 s | 7-14 fps for at least 30 s with GPU scene 45-78 ms (quit) |
+
+Where the time went in session B (10-s windows during the movie, screen mode): the game's
+own `IDXGISwapChain::Present` 42-65 ms on average (p95 110-340 ms); the mod's work before it
+0.2 ms at the median (its average 1-10 ms comes from a few `xrEndFrame` calls of 100-670 ms in
+Virtual Desktop's runtime); the mod's GPU work (the copy to the virtual screen) 0.02-0.06 ms.
+The game presents with sync interval 0 and `ALLOW_TEARING` into a two-buffer flip-discard
+swap chain, so its Present waits only when the GPU's queue is full: the frame time was GPU
+work the game itself had queued while the mod's 3D work was nil, that is the movie frames'
+uploads. In the slow state after a quick restart (`docs/benchmarking.md`, slow state 3)
+uploads to the card run at 0.03-0.2 GB/s instead of 7-14 GB/s; a 1080p movie frame is 3 MB
+(YUV) to 8 MB (RGBA), 15 to 270 ms per frame at those rates, which matches 12 fps and 2.9 fps.
+Session B started 5 s after A's exit (the package predates the 90-s wait). Stereo rendering
+uploads little and recovered to 72 fps inside the state, so the state went unnoticed until
+the movie. Session A was not a quick restart; what slowed it before the movie is not known
+(that package did not log the copy engine's load).
+
+The movie path is not slow by itself: in a later session (normal start) the battle tutorial
+players (VP9 as well) were loaded at 13:00:08 and 13:01:34 while stereo held 72.0 fps in every
+window (inferred to have played: menu players are not asked `IsPlaying`).
+
+The switch itself, measured without a headset (Null backend, standard build, eye
+2064x2208, `stereo movie simulate on` for 36 s, then off): in screen mode the game ran at the
+Null runtime's pace (120 fps; Present 0.03 ms, the mod's work 0.02 ms); back to stereo one
+66-ms frame, then 90 fps with the GPU scene at 4.1 ms and the copy engine at 0 %. The same
+with the DLSS build at his settings (eye 3436x3468, `input_scale` 0.65, `output = runtime`):
+120 fps in screen mode, then stereo at 90 fps from the first 10-s window with every frame
+upscaled in both eyes (791 of 791, then 903 of 903), GPU scene 4.3-4.4 ms, no failure. So the
+30-s slow phase after the movie in session B is not the switch: a movie usually ends with a
+new area streaming in (20-40 s of uploads after a load even in the normal state, slow state 2
+in `docs/benchmarking.md`), and in the slow state those uploads crawl.
+
+What helps: wait 90 s after quitting before starting again (the launcher and
+`ff7vr-start.cmd` now do this); `movie_screen = 1` (now the default) so the engine renders
+the small window instead of the double-wide eye target during the movie. In a slow movie,
+the timing block's `game copy engine N %` at 40 % or more and the warning after it identify
+the slow state: quit, wait a minute and a half, restart.
+
+Not reproduced without a headset: no movie player exists in the levels the dev saves load,
+and the mod has no way to load a movie asset; the game without the mod was not measured
+during a movie.
 
 ## Window modes
 
@@ -1627,9 +1681,9 @@ Ordered by how much they would bother a player in the headset:
    pitch and the head pose combine with a cinematic camera is unknown, and whether every
    authored camera fails the follow-camera test (so that neither the level boom nor first
    person applies there) has not been seen.
-5. **Pre-rendered movies**: detection exists but no movie was reached; `[stereo]
-   movie_screen` is off by default. Without it a movie would be rendered into both eyes
-   wherever the game draws it (UI or scene).
+5. **Pre-rendered movies**: shown on the virtual screen (`[stereo] movie_screen = 1`, the
+   default since 08/10). With `0` a movie is rendered into both eyes wherever the game draws
+   it. A movie in the slow state after a quick restart plays at 3-12 fps (see "Movies").
 6. **Smooth camera yaw** is applied as the game does it (no snap turn option).
 7. Square Enix's custom glare (`docs/re/engine.md`, section 10) puts both views' glare at the
    same place of one target; in a scene with glare primitives the left eye would get the
