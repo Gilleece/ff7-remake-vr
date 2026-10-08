@@ -11,6 +11,7 @@
 #include <format>
 #include <mutex>
 #include <sstream>
+#include <thread>
 #include <vector>
 
 namespace ff7vr::render::pause_on_remove {
@@ -34,17 +35,24 @@ bool game_has_focus() {
     return pid == GetCurrentProcessId();
 }
 
-// One press and release of the key, as the dev harness sends it.
+// One press and release of the key, as the dev harness sends it: scan codes (the game reads
+// those), held for 80 ms so that the game's per-frame input poll sees it down. On its own
+// thread: the caller is the frame loop.
 bool send_key(int vk) {
-    INPUT in[2] = {};
-    const UINT scan = MapVirtualKeyW(static_cast<UINT>(vk), MAPVK_VK_TO_VSC);
-    for (int i = 0; i < 2; ++i) {
-        in[i].type = INPUT_KEYBOARD;
-        in[i].ki.wVk = static_cast<WORD>(vk);
-        in[i].ki.wScan = static_cast<WORD>(scan);
-        in[i].ki.dwFlags = i == 1 ? KEYEVENTF_KEYUP : 0;
-    }
-    return SendInput(2, in, sizeof(INPUT)) == 2;
+    const WORD scan = static_cast<WORD>(MapVirtualKeyW(static_cast<UINT>(vk), MAPVK_VK_TO_VSC));
+    if (scan == 0) return false;
+    std::thread([scan] {
+        INPUT in{};
+        in.type = INPUT_KEYBOARD;
+        in.ki.wScan = scan;
+        in.ki.dwFlags = KEYEVENTF_SCANCODE;
+        const UINT down = SendInput(1, &in, sizeof(INPUT));
+        Sleep(80);
+        in.ki.dwFlags = KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP;
+        const UINT up = SendInput(1, &in, sizeof(INPUT));
+        if (down != 1 || up != 1) log::warn("xr: pause key: SendInput failed ({})", GetLastError());
+    }).detach();
+    return true;
 }
 
 // Caller holds g_mutex.
@@ -63,8 +71,8 @@ std::string pause_now(const char* why) {
     }
     const int vk = g_key.load();
     if (!send_key(vk)) {
-        log::warn("xr: {}: SendInput failed ({})", why, GetLastError());
-        return "SendInput failed";
+        log::warn("xr: {}: no scan code for key {}", why, vk);
+        return "no scan code";
     }
     g_last_sent = now;
     ++g_sent;
