@@ -230,6 +230,7 @@ std::string stereo_command(const std::vector<std::string>& a) {
     }
     if (c == "distortfix") {
         if (a.size() == 3) distortion_fix::set_enabled(a[2] == "1");
+        if (a.size() == 4 && a[2] == "opaque") distortion_fix::set_opaque(a[3] == "1");
         return "ok " + distortion_fix::status();
     }
     if (c == "movie") {

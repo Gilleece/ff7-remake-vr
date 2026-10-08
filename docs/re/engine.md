@@ -856,10 +856,12 @@ never ran it.
   at the origin, which is why the two views differ in index count.
 - Consequence: whenever distortion renders, the right eye's scene colour is what the left
   view's composite wrote over it (the left view's parameters and history, stretched over
-  both halves), and the right view's own distortion never appears. A headset report of a
-  right eye made of horizontal blurry lines while a real-time fire is on screen matches this
-  (inferred: the blurred half-size inputs sampled for right-half pixels with the left view's
-  rectangle, clamped at its edge); not reproduced with a real fire.
+  both halves), and the right view's own distortion never appears. Made visible with the
+  forced pipeline and the composite's blending switched off (`stereo distortfix opaque 1`,
+  `captures/fire/r4/b_opaque_off_*.png`, `d_opaque65_off_*.png`): the left eye shows its
+  blurred scene, the right eye is entirely horizontal blurry lines, which is what a headset
+  report described for a right eye near a real-time fire. Where the composite blends little
+  (weak distortion) the lines show through only partly. Not yet seen with a real fire.
 - `r.DisableDistortion 1` (or `r.RefractionQuality 0`) switches the whole pipeline off.
 - Measured with pipeline statistics queries around the composite's draw (forced pipeline,
   `captures/fire/r3/session.txt`): the left composite shaded 9 114 624 pixels (the whole

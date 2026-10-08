@@ -67,6 +67,24 @@ Probe g_probe[2];
 std::atomic<std::uint64_t> g_ps_invocations[2]{};
 std::atomic<std::int64_t> g_eye_pixels[2]{};
 bool g_logged_first = false;
+std::atomic<bool> g_opaque{false};
+
+// Runs the draw, without blending in the opaque test.
+void draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_trace::DrawIndexedFn original) {
+    ID3D11BlendState* bs = nullptr;
+    FLOAT factor[4]{};
+    UINT mask = 0;
+    const bool opaque = g_opaque.load(std::memory_order_relaxed);
+    if (opaque) {
+        ctx->OMGetBlendState(&bs, factor, &mask);
+        ctx->OMSetBlendState(nullptr, nullptr, 0xffffffff);
+    }
+    original(ctx, count, start, base);
+    if (opaque) {
+        ctx->OMSetBlendState(bs, factor, mask);
+        if (bs) bs->Release();
+    }
+}
 
 void execute(void*, rhi::Command* self) {
     auto* c = reinterpret_cast<Command*>(self);
@@ -262,7 +280,7 @@ bool on_draw_indexed(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base,
     g_eye_pixels[eye] = static_cast<std::int64_t>(a.w) * a.h;
     if (!a.apply) {  // fix off: the engine's draw as it is, measured
         begin_probe(ctx, eye);
-        original(ctx, count, start, base);
+        draw(ctx, count, start, base, original);
         end_probe(ctx, eye);
         return true;
     }
@@ -301,7 +319,7 @@ bool on_draw_indexed(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base,
     if (ours) ctx->VSSetConstantBuffers(0, 1, &ours);
 
     begin_probe(ctx, eye);
-    original(ctx, count, start, base);
+    draw(ctx, count, start, base, original);
     end_probe(ctx, eye);
 
     ctx->RSSetViewports(nvp, vps);
@@ -318,6 +336,8 @@ bool on_draw_indexed(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base,
     }
     return true;
 }
+
+void set_opaque(bool on) { g_opaque = on; }
 
 std::string status() {
     return std::format(

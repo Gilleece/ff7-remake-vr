@@ -39,5 +39,8 @@ void frame();
 // RHI thread, from the shared DrawIndexed override: true if it issued the draw itself.
 bool on_draw_indexed(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_trace::DrawIndexedFn original);
 std::string status();
+// Test: the composite's draws write without blending, so its output becomes visible even with
+// nothing to distort (a forced pipeline). Development only.
+void set_opaque(bool on);
 
 }  // namespace ff7vr::engine::distortion_fix

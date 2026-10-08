@@ -1032,10 +1032,10 @@ target. In mono the two are the same. In stereo the left view's rectangle is str
 both eyes (its pixel shader ran for all 4128x2208 pixels at eyes 2064x2208) and the right
 view's rectangle lands at clip x 1 to 3, outside the viewport (no pixels). So whenever
 distortion renders, the right eye shows the left view's composite stretched over it, and its
-own distortion never appears. Details: `docs/re/engine.md`, section 10, "Distortion". A
-report from the headset of a right eye made entirely of horizontal blurry lines while a
-real-time fire was on screen fits this (inferred, not reproduced with a real fire: no fire
-or heat haze in the save used for testing).
+own distortion never appears. Details: `docs/re/engine.md`, section 10, "Distortion". With
+the composite made visible (below) the right eye is entirely horizontal blurry lines, as
+reported from the headset for a right eye near a real-time fire. No fire or heat haze was
+reachable in the save used for testing, so it was reproduced with the pipeline forced.
 
 `src/engine/src/distortion_fix.cpp`: a hook on the composite function (render thread, signature
 "Distortion composite") appends an RHI command with the view's rectangle (`FViewInfo+0x70`).
@@ -1049,6 +1049,8 @@ viewport. The engine's buffers are not changed and the state is put back after t
 Nothing happens while no distortion renders (the composite function is not called).
 `stereo distortfix [0|1]` switches it and shows its counters, including the number of pixels
 the composite shaded per eye (pipeline statistics queries, also with the fix off).
+`stereo distortfix opaque 1` (test only) draws the composite without blending, so its output
+is visible even when there is nothing to distort.
 
 Cost: none without distortion; with it, one small constant buffer update per frame.
 
@@ -1066,9 +1068,12 @@ Evidence (Null backend, eyes 2064x2208, no distortion in the scene, the pipeline
 Shape mismatches 0, failures 0 over 2988 corrected composites; before forcing, the composite
 never ran (`composites 0`), so the fix is idle in scenes without distortion. Both eyes'
 pictures with the fix on and off differ by capture noise only (mean 1.0 to 2.3 of 255, the
-same in both eyes; the forced pipeline has nothing to distort, so this shows the fix leaves
-the picture intact, not that it corrects a real effect): `captures/fire/r3/*.png`. Not yet
-seen with real heat haze; `r.DisableDistortion 1` (under `[stereo_cvars]`) switches the whole
+same in both eyes): `captures/fire/r3/*.png`. With the composite's output made visible
+(`stereo distortfix opaque 1`, `captures/fire/r4`, side by side in `*_LR_small.png`): fix off,
+the right eye is entirely horizontal blurry lines (`b_opaque_off_R.png`, and at
+`dynres scale 0.65` `d_opaque65_off_R.png`); fix on, both eyes show their own blurred scene
+with the normal parallax (`c_opaque_on_*.png`, `e_opaque65_on_*.png`). Not yet seen with real
+heat haze in a headset; `r.DisableDistortion 1` (under `[stereo_cvars]`) switches the whole
 pipeline off as a fallback.
 
 ## Skin lighting fix
