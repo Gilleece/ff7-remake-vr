@@ -82,19 +82,21 @@ std::vector<std::string> apply(Config& cfg) {
         out.push_back("graphics: profile custom: nothing applied, every value comes from the ini");
         return out;
     }
-    std::string applied, kept;
+    // A chosen profile is the whole point: its values replace what the ini says for those
+    // keys (the shipped ini writes every key, so "the ini wins" would leave a profile with
+    // nothing to do). profile = custom keeps the ini as written.
+    std::string applied, replaced;
     for (const Line& l : lines(name)) {
         const std::string item = std::format("{}.{} = {}", l.section, l.key, l.value);
-        if (cfg.set_default(l.section, l.key, l.value)) {
-            applied += (applied.empty() ? "" : "; ") + item;
-            if (std::string_view(l.section) == "stereo_cvars") g_applied_cvars.emplace_back(l.key);
-        } else {
-            kept += std::format("{}{}.{} = {} (profile: {})", kept.empty() ? "" : "; ", l.section, l.key,
-                                cfg.get_string(l.section, l.key, ""), l.value);
-        }
+        const std::string before = cfg.get_string(l.section, l.key, "");
+        const bool existed = cfg.set(l.section, l.key, l.value);
+        applied += (applied.empty() ? "" : "; ") + item;
+        if (std::string_view(l.section) == "stereo_cvars") g_applied_cvars.emplace_back(l.key);
+        if (existed && before != l.value)
+            replaced += std::format("{}{}.{} (ini: {})", replaced.empty() ? "" : "; ", l.section, l.key, before);
     }
     out.push_back(std::format("graphics: profile {}: applied {}", name, applied.empty() ? "nothing" : applied));
-    out.push_back(std::format("graphics: profile {}: left to the ini {}", name, kept.empty() ? "nothing" : kept));
+    out.push_back(std::format("graphics: profile {}: replaced the ini's {}", name, replaced.empty() ? "nothing" : replaced));
     return out;
 }
 

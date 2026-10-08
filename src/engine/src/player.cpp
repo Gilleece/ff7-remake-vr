@@ -1038,7 +1038,7 @@ void tick(bool stereo, float delta_seconds) {
     g.in_battle = (s.fp_available.load() && s.auto_combat.load()) || s.combat_level.load() ? combat_now() : false;
     const bool combat = s.fp_available.load() && s.auto_combat.load() && g.in_battle;
 #if FF7VR_ENGINE_WITH_RENDER
-    render::SetBattleActive(combat);  // HUD panel size in battles ([ui] battle_size)
+    render::SetBattleActive(g.in_battle);  // HUD panel size in battles ([ui] battle_size): the battle itself, whatever first person does
 #endif
     if (combat != g.combat) {
         g.combat = combat;
@@ -1074,7 +1074,7 @@ void tick(bool stereo, float delta_seconds) {
     const bool hide = stereo && hide_mode != 0 && g.blend > 0.5f && g.pawn;
     if (hide) hide_meshes(g.pawn, hide_mode);
     else if (!g.hidden.empty() || !g.hidden_bones.empty() || !g.hidden_pass.empty() || g.hidden_pawn) restore_meshes();
-    audio_listener::player_frame({g.pc, g.pawn, g.view_target, g.combat, stereo, stereo && g.follow_camera && g.blend > 0.5f});
+    audio_listener::player_frame({g.pc, g.pawn, g.view_target, g.in_battle, stereo, stereo && g.follow_camera && g.blend > 0.5f});
 
     std::lock_guard lock(g_status_mutex);
     g_status_line = std::format(

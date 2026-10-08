@@ -89,6 +89,11 @@ bool Config::set_default(std::string_view section, std::string_view key, std::st
     return values_.try_emplace(make_key(section, key), std::string(value)).second;
 }
 
+bool Config::set(std::string_view section, std::string_view key, std::string_view value) {
+    auto [it, inserted] = values_.insert_or_assign(make_key(section, key), std::string(value));
+    return !inserted;
+}
+
 std::optional<std::string> Config::get(std::string_view section, std::string_view key) const {
     auto it = values_.find(make_key(section, key));
     if (it == values_.end()) return std::nullopt;
