@@ -114,12 +114,23 @@ foreach ($k in $items.Keys) {
     if (-not (Test-Path -LiteralPath $items[$k])) { throw "Missing $($items[$k])" }
     Copy-Item -LiteralPath $items[$k] -Destination (Join-Path $pkg $k) -Force
 }
+if ($Dlss) {
+    # The -dlss package ships with DLSS on at input_scale 0.65 (the template keeps it off:
+    # the standard build has no DLSS).
+    $iniPath = Join-Path $pkg 'ff7vr.ini'
+    $ini = [System.IO.File]::ReadAllText($iniPath)
+    $ini = $ini -replace '(?m)^(\[dlss\](?:\r?\n(?!\[)[^\r\n]*)*?\r?\nenabled = )0 ', '${1}1 '
+    $ini = $ini -replace '(?m)^(\[dlss\](?:\r?\n(?!\[)[^\r\n]*)*?\r?\ninput_scale = )0\.5 ', '${1}0.65'
+    if ($ini -notmatch '(?m)^\[dlss\](?:\r?\n(?!\[)[^\r\n]*)*?\r?\nenabled = 1 ') { throw 'Could not switch DLSS on in the package ini' }
+    if ($ini -notmatch '(?m)^\[dlss\](?:\r?\n(?!\[)[^\r\n]*)*?\r?\ninput_scale = 0\.65') { throw 'Could not set input_scale = 0.65 in the package ini' }
+    [System.IO.File]::WriteAllText($iniPath, $ini)
+}
 $ver = @(
     "ff7vr $name",
     "commit:  $commit$(if ($dirty) { ' (with uncommitted changes)' })",
     "built:   $((Get-Item -LiteralPath $dll).LastWriteTime.ToString('yyyy-MM-dd HH:mm'))",
     "dll sha256: $((Get-FileHash -LiteralPath $dll -Algorithm SHA256).Hash)",
-    "dlss:    $(if ($Dlss) { 'built in (NVIDIA DLSS SDK; the DLSS model comes from the NVIDIA driver or nvngx_dlss.dll in the game folder)' } else { 'not built in' })"
+    "dlss:    $(if ($Dlss) { 'built in (NVIDIA DLSS SDK; the DLSS model nvngx_dlss.dll is not included: the player puts NVIDIA''s copy beside the game''s exe, see README.md)' } else { 'not built in' })"
 )
 [System.IO.File]::WriteAllLines((Join-Path $pkg 'VERSION.txt'), [string[]]$ver)
 
