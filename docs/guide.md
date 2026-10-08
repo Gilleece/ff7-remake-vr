@@ -365,6 +365,14 @@ session it is `ff7vr.log` in the game's `End\Binaries\Win64` folder).
   times (see "Performance"). With SteamVR's virtual headset the runtime sometimes
   blocked for 6 to 7 ms per frame during the first 15 to 20 seconds of a session.
 
+- **Reflections that differ between the eyes:** the game's screen-space reflection
+  pass only works for the eye drawn at the left of the game's picture. The right eye
+  gets reflections, but in the wrong places: specks of reflected light on floors the
+  left eye does not have, and less of a puddle's reflection. Not fixed yet.
+  `[stereo] ssr_fix = 2` turns screen-space reflections off in both eyes so the eyes
+  match (reflection captures and light highlights stay); `ssr_fix = 0` leaves them in
+  the left eye only.
+
 Fixed and confirmed in the headset:
 
 - **A ghost image in the right eye:** the game's ambient occlusion pass computed the
