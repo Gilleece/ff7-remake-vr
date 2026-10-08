@@ -304,8 +304,9 @@ captures after the toggles (`h05_third_toggled`, `h08_third_after_toggles`,
 
   Where the game's footsteps come from (reflection, `fp classes Foot`, `fp props foot`,
   `fp classes AnimNotify`; `captures/fp/run3/reflection.txt`): not from animation
-  notifies (`EndAnimNotifyPlayCharacterFootSound` appears only in fall animations such as
-  `N_Fall01` and `B_Fall01`), but from Square Enix's automatic motion sound system: the
+  notifies (`EndAnimNotifyPlayCharacterFootSound` was seen only in fall animations such as
+  `N_Fall01` and `B_Fall01`; the listing stops at 60 objects, so others may exist), but from
+  Square Enix's automatic motion sound system: the
   structures `SQEXSEADAutoSeDetectorSettingFootStep` (`bEnableFootStepWalkRun`,
   `FootStepWalkVolumeRangeMin/Max`, `FootStepRunVolumeRangeMin/Max`, `bEnableFootShuffle`,
   ...), `SQEXSEADAutoSeAnalyzerSetting` (`AutoCalcFootGroundedThresholdRatio`,
@@ -577,7 +578,7 @@ XInput pad, and whether Steam Input is on for the game on the player's PC.
 | `bloom_fix` | `1` | right-eye bloom fix (below) |
 | `ao_fix` | `1` | right-eye ambient occlusion fix (below) |
 | `ssr_per_eye` | `1` | each eye's screen-space reflection run limited to its half of the target, and the per-view colour copy for it halved (see "Reflections per eye"); same image, about 0.45 ms less per frame at 2 x 3072x3264 |
-| `ssr_fix` | `1` | right-eye screen-space reflections: without it the right eye has none (see "Right-eye reflections fix"); with it they are not the right view's own ("The right eye's reflections are not its own"). `2`: no screen-space reflections in either eye, the eyes match |
+| `ssr_fix` | `2` | screen-space reflections per eye. `2` (default since 08/10): none in either eye, the eyes match. `1`: the right view's run is moved into place, but what it computes is wrong ("The right eye's reflections are not its own"). `0`: the right eye has none (see "Right-eye reflections fix") |
 | `distortion_fix` | `1` | heat haze and refraction per eye: without it the left view's distortion composite covers both eyes and the right view's draws nothing (see "Right-eye distortion fix") |
 | `hzb_skip` | `0` | `1` leaves out the further mips of the hierarchical depth chain nothing reads, while `r.HZBOcclusion` is 0 (see "Volumes and hierarchical depth per view"); gain within noise |
 | `tonemap_shift` | `auto` | with ReShade's Luma add-on loaded, the right view's bloom-combine input shifted to the origin (Luma's shader reads it there; without it both eyes show the left eye's image). `auto`: only while Luma is loaded; `0` off; `1` always (breaks the right eye without Luma). See "ReShade and Luma: the tonemapping shift and Luma's DLSS" |
@@ -1219,7 +1220,8 @@ placed relative to the origin. The draw's vertex constants (`DrawRectangle`: pos
 ### Right-eye reflections fix
 
 `src/engine/src/fixes.cpp` (`ssr_draw_shifted`, `ssr_before_draw`; `[stereo] ssr_fix = 1`,
-default; `ssr fix 0|1`): the reflection run of the view in the right half (the second run of
+the default from 06/10 to 08/10, now `2`, see "The right eye's reflections are not its own";
+`ssr fix 0|1|2`): the reflection run of the view in the right half (the second run of
 a frame; with `stereo swap` the first) is drawn into a scratch render target of the same
 format, half the target's width plus 16 columns; the scratch target clips the full-target
 triangle, so only the part at the origin is computed. The result is then copied into the
@@ -1318,7 +1320,10 @@ for the right view's run.
 views' reflection runs are replaced by a clear of the target, so neither eye has
 screen-space reflections (wet floors, puddles and metal keep their reflection captures and
 light highlights; by the binding audit of the traces the reflection composite reads per-view light grids,
-reflection capture buffers and view constants, not checked with read-backs). Default stays `1` until this is decided.
+reflection capture buffers and view constants, not checked with read-backs). `2` is the default
+since 08/10: the eyes match, which the headset reports were about; `1` (the right eye's own but
+wrong reflections) and `0` (left eye only) remain for comparison, and a real fix is the shader-level
+task described under "Next". The ini accepts `0`, `1`, `2` and the words `off` / `on`.
 Checked at the DLSS layout (`r5`): after both runs both views' parts of the reflection target
 are exactly 0 (`tr_f2`, events 4692 / 4694); `runs cleared` grows by two per stereo frame;
 frame time unpaced (`xr.null_pace = 0`, `t.MaxFPS 0`), 5 s windows alternating: `2` 8.22 and
@@ -1581,8 +1586,9 @@ Status: on by default since 08/10. Detection was seen working in a headset sessi
 08/10 (`MV_TOWN7_2250_US_MediaPlayer_VP9`: `movie: playing` when the movie started,
 `movie: stopped` 112 s later, the virtual screen in between, stereo back afterwards). The
 movies are WebM files (VP9 video at 1920x1080 and 59.94 fps, Opus audio, read from the file
-header of `MV_TOWN7_2250_US.emov`; `.emov` is only the extension):
-every movie frame is decoded on the CPU and uploaded to the card.
+header of `MV_TOWN7_2250_US.emov`; `.emov` is only the extension): the exe carries the engine's
+WebMMedia plugin, so every movie frame is most likely decoded on the CPU and uploaded to the card
+(inferred from the plugin name; the decoder was not traced).
 
 ### Frame rate during movies
 
@@ -1591,7 +1597,14 @@ His two sessions with a movie (07-08/10, DLSS package at 0.65, Virtual Desktop a
 | Session | `movie_screen` | Before the movie | During the movie | After it |
 |---|---|---|---|---|
 | A | 0 (movie inside the stereo frame) | 72 fps, then slowing for 50 s before the movie (GPU scene 4 -> 14 ms, Present 13-16 ms) | 22, 12, 12, 22, 2.9 fps | quit |
-| B, started 5 s after A's exit | 1 (virtual screen) | 5-12 fps for the first minute (the slow state after a quick restart), then 72 fps | 12 fps for 110 s | 7-14 fps for at least 30 s with GPU scene 45-78 ms (quit) |
+| B, started about 15 s after A's exit | 1 (virtual screen) | 5-12 fps for the first minute (the slow state after a quick restart), then 72 fps | 12 fps for 110 s | 6-14 fps for about 40 s with GPU scene 45-96 ms, then 72 fps again for 40 s until the session ended |
+
+Session A's windows without any 3D scene (00:07:51 and 00:08:01, GPU scene 0 ms) ran at 11.9 and
+12.1 fps with Present at 58 to 61 ms, the same as B's movie windows; its 22.5 fps window still
+rendered the scene (GPU scene 13 ms) and its 2.9 fps window had the scene rendering again (GPU
+scene 167 ms average). So the movie itself ran at 12 fps in both sessions, with `movie_screen` 0
+and 1 alike, and session A was not a quick restart: whatever slows the uploads can also start
+during a session (A had been slowing for 50 s before the movie).
 
 Where the time went in session B (10-s windows during the movie, screen mode): the game's
 own `IDXGISwapChain::Present` 42-65 ms on average (p95 110-340 ms); the mod's work before it
@@ -1604,10 +1617,12 @@ uploads. In the slow state after a quick restart (`docs/benchmarking.md`, slow s
 uploads to the card run at 0.03-0.2 GB/s instead of 7-14 GB/s; a 1080p movie frame is 3 MB
 (YUV) to 8 MB (RGBA), 15 to 270 ms per frame at those rates: the order of the 80-350 ms
 frames seen (inferred; the copy engine's load was not logged by that package).
-Session B started 5 s after A's exit (the package predates the 90-s wait). Stereo rendering
+Session B started about 15 s after A's exit (the package predates the 90-s wait). Stereo rendering
 uploads little and recovered to 72 fps inside the state, so the state went unnoticed until
 the movie. Session A was not a quick restart; what slowed it before the movie is not known
-(that package did not log the copy engine's load).
+(that package did not log the copy engine's load). The upload-state explanation is therefore
+inferred for both sessions, not proven; the next movie session with the `movie: ... fps` lines
+and the `game copy engine N %` figure will tell.
 
 The movie path is not slow by itself: in a later session (normal start) the battle tutorial
 players (VP9 as well) were loaded at 13:00:08 and 13:01:34 while stereo held 72.0 fps in every
@@ -1625,8 +1640,9 @@ new area streaming in (20-40 s of uploads after a load even in the normal state,
 in `docs/benchmarking.md`), and in the slow state those uploads crawl.
 
 What helps: wait 90 s after quitting before starting again (the launcher and
-`ff7vr-start.cmd` now do this); `movie_screen = 1` (now the default) so the engine renders
-the small window instead of the double-wide eye target during the movie. In a slow movie,
+`ff7vr-start.cmd` now do this); `movie_screen = 1` (now the default): the movie is shown flat on
+the virtual screen, the way the game draws it, and stereo is held off while it plays (in the two
+sessions the frame rate was the same either way, so this is about the picture, not the speed). In a slow movie,
 the timing block's `game copy engine N %` at 40 % or more and the warning after it identify
 the slow state: quit, wait a minute and a half, restart.
 
