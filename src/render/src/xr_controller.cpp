@@ -1,6 +1,8 @@
 #include "xr_controller.h"
 
+#include "comfort.h"
 #include "foveation.h"
+#include "ui_battle.h"
 #include "video_memory.h"
 
 #include "ff7vr/core/dev_commands.h"
@@ -633,6 +635,7 @@ void XrController::SubmitOne(const PresentInfo& p, const Waited& w, const Pendin
                 oy = cfg_.uiOffsetY;
                 follow = cfg_.uiFollowHead;
             }
+            size = ui_battle::Height(size);  // [ui] battle_size while a battle is in progress
             uq.layer = uiLayer_;
             if (fresh) {
                 uq.texture = ui->texture.Get();
@@ -671,6 +674,16 @@ void XrController::SubmitOne(const PresentInfo& p, const Waited& w, const Pendin
     {
         std::lock_guard lk(pictureMutex_);
         d.picture = picture_;
+    }
+    if (stereo) {
+        xr::Fov fov[2];
+        {
+            std::lock_guard lk(eyeMutex_);
+            fov[0] = eye_.fov[0];
+            fov[1] = eye_.fov[1];
+        }
+        d.vignette = comfort::Update(fov);
+        d.sharpen = comfort::Sharpen();
     }
     if (cfg_.gpuTiming) gpu_.Begin(p.device, p.context);
     if (ui) DrawUiOnWindow(p, *ui);
@@ -937,15 +950,17 @@ std::string XrController::UiCommand(const std::string& args) {
         return ec == std::errc();
     };
     const char* usage =
-        "err usage: ui status | on | off | dump <png path> | distance <m> | size <m> | offset <x m> <y m> | follow <0|1> | mirror <0|1>";
+        "err usage: ui status | on | off | dump <png path> | distance <m> | size <m> | battle_size <m> | offset <x m> <y m> | follow <0|1> | mirror <0|1>";
     if (verb.empty() || verb == "status") {
         std::lock_guard lk(uiMutex_);
         return std::format("ok ui layer {} ({}), {:.2f} m high at {:.2f} m, offset {:.2f} {:.2f}, {}, on the window {}; image {}x{} from {}x{}; "
                            "frames {} held {} dropped {}",
                            uiOn_.load() ? "on" : "off", UiLayerWanted() ? "active" : "inactive", cfg_.uiSize, cfg_.uiDistance, cfg_.uiOffsetX,
                            cfg_.uiOffsetY, cfg_.uiFollowHead ? "head-locked" : "world-locked", uiMirror_.load() ? "too" : "no", uiW_, uiH_,
-                           uiSrcW_, uiSrcH_, uiSubmitted_.load(), uiHeld_.load(), uiDropped_.load());
+                           uiSrcW_, uiSrcH_, uiSubmitted_.load(), uiHeld_.load(), uiDropped_.load()) +
+               "; " + ui_battle::Text();
     }
+    if (verb == "battle_size") return ui_battle::SetSize(rest) ? "ok ui " + ui_battle::Text() : std::string(usage);
     if (verb == "on" || verb == "off") {
         uiOn_ = verb == "on";
         log::info("render: UI layer {}", verb);

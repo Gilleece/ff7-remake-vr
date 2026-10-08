@@ -180,8 +180,13 @@ struct BlitConstants {
     float pic1[4];
     uint32_t picture;  // 1: apply the picture adjustment (opaque output only)
     uint32_t pad2[3];
+    float vig0[4];  // comfort vignette: strength, radius, softness (half-heights), destination aspect (w / h)
+    float vig1[4];  // centre in destination UV
+    float sharp[4];  // unsharp mask: amount (0 = none), source texel size u, v
 };
-static_assert(sizeof(BlitConstants) == 80, "must match BlitConstants in blit.hlsl");
+static_assert(sizeof(BlitConstants) == 128, "must match BlitConstants in blit.hlsl");
+
+static bool WantsVignette(const BlitSource& src) { return src.alpha == BlitAlpha::Opaque && src.vignette[0] > 0.0f; }
 
 static bool WantsPicture(const BlitSource& src) {
     return src.picture && src.alpha == BlitAlpha::Opaque && !src.picture->IsIdentity();
@@ -430,7 +435,9 @@ bool Blitter::Transfer(ID3D11DeviceContext* ctx, const BlitSource& src, const Re
     // A copy keeps the source's alpha bits: right for opaque and premultiplied sources only.
     const bool alphaAsIs = src.alpha == BlitAlpha::Opaque || src.alpha == BlitAlpha::Premultiplied;
     const bool picture = WantsPicture(src) && curveSrv_;
-    const bool canCopy = fits && alphaAsIs && !picture && sd.SampleDesc.Count == 1 && dd.SampleDesc.Count == 1 &&
+    const bool vignette = WantsVignette(src);
+    const bool sharpen = src.alpha == BlitAlpha::Opaque && src.sharpen > 0.0f;
+    const bool canCopy = fits && alphaAsIs && !picture && !vignette && !sharpen && sd.SampleDesc.Count == 1 && dd.SampleDesc.Count == 1 &&
                          TypelessFamily(sd.Format) == TypelessFamily(dd.Format) && srcBitsSrgb == dstBitsSrgb &&
                          TypelessFamily(srcFmt) == TypelessFamily(dstFmt);
     if (canCopy) {
@@ -510,6 +517,19 @@ bool Blitter::Transfer(ID3D11DeviceContext* ctx, const BlitSource& src, const Re
         c.pic0[0] = src.picture->saturation;
         c.pic0[1] = float(kCurveSize - 1) / kCurveSize;  // t in [0, 1] -> the first and last texel centres
         c.pic0[2] = 0.5f / kCurveSize;
+    }
+    if (vignette) {
+        c.vig0[0] = std::min(src.vignette[0], 1.0f);
+        c.vig0[1] = src.vignette[1];
+        c.vig0[2] = std::max(src.vignette[2], 1e-3f);
+        c.vig0[3] = float(w) / float(std::max(1u, h));
+        c.vig1[0] = src.vignetteCentre[0];
+        c.vig1[1] = src.vignetteCentre[1];
+    }
+    if (sharpen) {
+        c.sharp[0] = std::min(src.sharpen, 1.0f);
+        c.sharp[1] = 1.0f / float(readW);
+        c.sharp[2] = 1.0f / float(readH);
     }
     memcpy(m.pData, &c, sizeof(c));
     ctx->Unmap(cb_.Get(), 0);

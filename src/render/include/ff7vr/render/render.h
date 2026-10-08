@@ -169,4 +169,14 @@ void FoveationSceneEnd();
 // shades one step finer than its preset ([foveation] dlss_finer).
 void FoveationSetUpscaling(bool upscaled, float inputShare);
 
+// Comfort vignette input: the current deflection of the left and right sticks, 0..1 (the
+// XInput proxy supplies it; docs/render.md, "Comfort vignette"). Called on the presenting
+// thread; must be cheap and thread-safe.
+using StickSource = void (*)(float* left, float* right);
+void SetStickSource(StickSource source);
+
+// Any thread: whether a battle is in progress (the engine's battle signal or its test
+// override). The HUD panel blends to [ui] battle_size while it is.
+void SetBattleActive(bool active);
+
 }  // namespace ff7vr::render

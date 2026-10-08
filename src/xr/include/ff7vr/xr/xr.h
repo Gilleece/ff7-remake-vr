@@ -338,6 +338,19 @@ struct PictureAdjust {
     }
 };
 
+// Comfort vignette of the eye images (not the quads): the periphery of each eye darkens
+// around the eye's view axis, a standard measure against discomfort during artificial
+// motion. Applied in the eye blit after the picture adjustment, in linear light:
+// rgb *= 1 - strength * smoothstep(radius, radius + softness, d), with d the distance
+// from the eye's centre in half-heights of the image. strength 0 = none (no change).
+struct Vignette {
+    float strength = 0.0f;  // 0..1
+    float radius = 0.55f;   // half-heights of the image
+    float softness = 0.25f; // half-heights
+    float centre[2][2] = {{0.5f, 0.5f}, {0.5f, 0.5f}};  // per eye, UV of the view axis in the image
+    bool IsNone() const { return strength <= 0.0f; }
+};
+
 struct EyeSubmit {
     // Region of the source texture holding this eye, in pixels of the selected
     // mip, origin top-left. width or height 0 = the left (Eye::Left) or right
@@ -420,6 +433,10 @@ struct SubmitDesc {
     // Applied to the eye images and to quads with adjustPicture when they are copied in.
     // An eye or quad that keeps its last image keeps the adjustment it was copied with.
     PictureAdjust picture{};
+    // Applied to the eye images only (not to any quad). See Vignette.
+    Vignette vignette{};
+    // Eye images only: unsharp mask on luminance, 0 = none, 1 = strong ([picture] sharpen).
+    float sharpen = 0.0f;
 };
 
 // The part of an eye's image the headset cannot show (lens edges, display corners),
@@ -513,6 +530,15 @@ public:
     // offset taken against the old origin would no longer fit.
     virtual void Recenter() = 0;
     virtual void ResetRecenter() = 0;
+
+    // Any thread. Snap turn: turns the views (not the quad layers, which stay where
+    // the recenter put them) by `radians` about the vertical axis through the
+    // recenter origin, on top of the recenter, from the next WaitFrame. Positive
+    // turns the view to the left (+Y rotation). Recenter, ResetRecenter and the
+    // runtime's own recenter clear it. SnapYaw: the turn in effect for the latest
+    // frame (radians, -pi..pi).
+    virtual void AddSnapYaw(float radians) { (void)radians; }
+    virtual float SnapYaw() const { return 0.0f; }
 
     // Any thread. Development aid: drives the Null backend's emulated headset
     // (head pose, runtime recenter events, tracking loss, eye gaze); see the Null backend for

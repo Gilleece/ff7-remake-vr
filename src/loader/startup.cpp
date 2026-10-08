@@ -58,6 +58,7 @@ void start_modules(const StartupContext& ctx) {
 #if FF7VR_HAVE_RENDER
     // D3D11 hooks and the XR session (src/xr is driven by the render module; [xr] keys configure it).
     if (cfg.get_bool("render", "enabled", true)) ff7vr::render::start(ctx);
+    ff7vr::render::SetStickSource(&xinput::stick_magnitudes);  // comfort vignette
 #endif
 #if FF7VR_HAVE_DEV
     // Measurement tools (frame timer for tools/bench); each is off unless the ini enables it.

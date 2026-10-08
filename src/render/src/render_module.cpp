@@ -1,7 +1,9 @@
 // Entry points of the render module: configuration, hooks, dev commands.
 
+#include "comfort.h"
 #include "d3d11_hooks.h"
 #include "foveation.h"
+#include "ui_battle.h"
 #include "xr_controller.h"
 
 #include "ff7vr/core/dev_commands.h"
@@ -226,6 +228,8 @@ bool start(const StartupContext& ctx) {
     log::info("render: picture {}; brightness keys up {} down {} (step {:.3f})", PictureText(cfg.picture), cfg.brightnessUpKey,
               cfg.brightnessDownKey, cfg.brightnessStep);
     foveation::Configure(*ctx.config);
+    comfort::Start(*ctx.config);
+    ui_battle::Start(*ctx.config);
     HookCallbacks cb;
     cb.onPresent = &OnPresentCb;
     cb.onResize = &OnResizeCb;

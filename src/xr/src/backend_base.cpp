@@ -431,6 +431,15 @@ bool BackendBase::TransferEye(Eye eye, const SubmitDesc& desc, const EyeTarget& 
     src.arraySlice = desc.arraySlice;
     src.mipLevel = desc.mipLevel;
     src.picture = &desc.picture;
+    if (!desc.vignette.IsNone()) {
+        const int e = eye == Eye::Left ? 0 : 1;
+        src.vignette[0] = desc.vignette.strength;
+        src.vignette[1] = desc.vignette.radius;
+        src.vignette[2] = desc.vignette.softness;
+        src.vignetteCentre[0] = desc.vignette.centre[e][0];
+        src.vignetteCentre[1] = desc.vignette.centre[e][1];
+    }
+    src.sharpen = desc.sharpen;
     BlitDest dst{t.texture, t.viewFormat, t.width, t.height, t.arraySlice};
     Blitter::Path path{};
     if (gpuTiming_) gpuCopy_.Before(context_.Get());

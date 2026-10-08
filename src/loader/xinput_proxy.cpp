@@ -7,6 +7,7 @@
 #include <xinput.h>
 
 #include <atomic>
+#include <cmath>
 #include <cstring>
 #include <format>
 #include <mutex>
@@ -101,7 +102,19 @@ SHORT add_axis(SHORT a, SHORT b) {
 
 std::atomic<PadFilter> g_pad_filter{nullptr};
 
+// Stick deflection of the last successful poll (0..1 each), for the comfort vignette.
+std::atomic<float> g_stick_left{0.0f}, g_stick_right{0.0f};
+
+float stick_magnitude(SHORT x, SHORT y) {
+    const float m = std::sqrt(float(x) * float(x) + float(y) * float(y)) / 32767.0f;
+    return m > 1.0f ? 1.0f : m;
+}
+
 DWORD filtered(DWORD user, XINPUT_STATE* state, DWORD rc) {
+    if (rc == ERROR_SUCCESS && state && user == 0) {
+        g_stick_left.store(stick_magnitude(state->Gamepad.sThumbLX, state->Gamepad.sThumbLY), std::memory_order_relaxed);
+        g_stick_right.store(stick_magnitude(state->Gamepad.sThumbRX, state->Gamepad.sThumbRY), std::memory_order_relaxed);
+    }
     const PadFilter f = g_pad_filter.load(std::memory_order_relaxed);
     if (f && rc == ERROR_SUCCESS && state) f(user, &state->Gamepad.wButtons);
     return rc;
@@ -426,6 +439,11 @@ VirtualPad virtual_pad() {
 }
 std::uint64_t get_state_calls() { return g_get_state_calls.load(); }
 void set_pad_filter(PadFilter filter) { g_pad_filter = filter; }
+
+void stick_magnitudes(float* left, float* right) {
+    if (left) *left = g_stick_left.load(std::memory_order_relaxed);
+    if (right) *right = g_stick_right.load(std::memory_order_relaxed);
+}
 
 namespace {
 GetStateFn proxy_entry() { return &proxy_XInputGetState; }

@@ -28,12 +28,16 @@ target_link_libraries(ff7vr_nvapi INTERFACE ${nvapi_SOURCE_DIR}/amd64/nvapi64.li
 
 add_library(ff7vr_render STATIC
     include/ff7vr/render/render.h
+    src/comfort.h
+    src/comfort.cpp
     src/d3d11_hooks.h
     src/d3d11_hooks.cpp
     src/foveation.h
     src/foveation.cpp
     src/timing.h
     src/timing.cpp
+    src/ui_battle.h
+    src/ui_battle.cpp
     src/video_memory.h
     src/video_memory.cpp
     src/xr_controller.h

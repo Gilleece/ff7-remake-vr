@@ -77,6 +77,12 @@ struct BlitSource {
     // Picture adjustment for an opaque transfer (null or identity: none). A source that
     // could be copied as it is goes through the shader instead while it is set.
     const PictureAdjust* picture = nullptr;
+    // Comfort vignette for an opaque transfer (strength 0: none): strength, radius,
+    // softness (Vignette in xr.h) and the centre in UV of the destination.
+    float vignette[3] = {0.0f, 0.0f, 0.0f};
+    float vignetteCentre[2] = {0.5f, 0.5f};
+    // Unsharp mask on luminance for an opaque transfer (0: none).
+    float sharpen = 0.0f;
 };
 
 struct BlitDest {

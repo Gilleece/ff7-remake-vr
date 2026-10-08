@@ -20,6 +20,14 @@ cbuffer BlitConstants : register(b0)
     float4 pic1;
     uint   picture;
     uint3  pad2;
+    // Comfort vignette (Vignette in xr.h), eye images only: vig0 = strength (0: none),
+    // radius and softness in half-heights of the destination, destination aspect (w / h);
+    // vig1.xy = the eye's view axis in destination UV.
+    float4 vig0;
+    float4 vig1;
+    // Unsharp mask on luminance, eye images only: sharp.x = amount (0: none), sharp.yz =
+    // the source's texel size in UV.
+    float4 sharp;
 };
 
 Texture2DArray<float4> src : register(t0);
@@ -81,8 +89,32 @@ float4 PSMain(VSOut i) : SV_Target
     float4 c = src.SampleLevel(samp, float3(uv, 0.0), 0.0);
     if (decodeSrgb != 0)
         c.rgb = SrgbToLinear(c.rgb);
+    if (sharp.x > 0.0 && alphaMode == 0)
+    {
+        // The four direct neighbours' luminance against the centre's, added back to every
+        // channel (no colour fringes); limited so a dark pixel cannot go below black.
+        const float3 w = float3(0.2126, 0.7152, 0.0722);
+        float3 n0 = src.SampleLevel(samp, float3(uv + float2(sharp.y, 0.0), 0.0), 0.0).rgb;
+        float3 n1 = src.SampleLevel(samp, float3(uv - float2(sharp.y, 0.0), 0.0), 0.0).rgb;
+        float3 n2 = src.SampleLevel(samp, float3(uv + float2(0.0, sharp.z), 0.0), 0.0).rgb;
+        float3 n3 = src.SampleLevel(samp, float3(uv - float2(0.0, sharp.z), 0.0), 0.0).rgb;
+        if (decodeSrgb != 0)
+        {
+            n0 = SrgbToLinear(n0); n1 = SrgbToLinear(n1); n2 = SrgbToLinear(n2); n3 = SrgbToLinear(n3);
+        }
+        float y = dot(c.rgb, w);
+        float blur = 0.25 * (dot(n0, w) + dot(n1, w) + dot(n2, w) + dot(n3, w));
+        float d = clamp((y - blur) * sharp.x, -0.25 * y, 0.25);
+        c.rgb = max(c.rgb + d, 0.0);
+    }
     if (picture != 0 && alphaMode == 0)
         c.rgb = AdjustPicture(c.rgb);
+    if (vig0.x > 0.0 && alphaMode == 0)
+    {
+        // Distance from the view axis in half-heights (i.uv spans the destination).
+        float2 d = (i.uv - vig1.xy) * float2(vig0.w, 1.0) * 2.0;
+        c.rgb *= 1.0 - vig0.x * smoothstep(vig0.y, vig0.y + vig0.z, length(d));
+    }
     if (alphaMode == 0)
         c.a = 1.0;
     else if (alphaMode == 2)

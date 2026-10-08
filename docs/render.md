@@ -561,6 +561,57 @@ get a little brighter and the colours a little stronger; side-by-side crops in
 `captures\picture\r2\crops_def_vs_example.png` (local, not in the
 repository).
 
+### Sharpening
+
+`[picture] sharpen` (0..1, default `0` = off; live: `sharpen <v>`) is an unsharp
+mask in the eye blit, for a picture that looks soft with DLSS or a reduced render
+scale: the pixel's Rec. 709 luminance minus the mean of its four direct neighbours,
+times the amount, is added to all three channels (no colour fringes), limited to
++0.25 and to a quarter of the pixel's own luminance downwards so dark pixels cannot
+clip to black. It runs on the decoded linear source before the picture adjustment
+(the neighbours would otherwise each need the curve), only for the eye images
+(`SubmitDesc::sharpen`), so the HUD layer and the virtual screen stay as they are.
+Five texture reads per pixel instead of one: `gpu copy` 0.081 -> 0.149 ms per
+frame at 2 x 2064x2208 on the Null backend (6 s each); a 3072x3264 eye should cost
+about twice that (inferred, not measured).
+
+## Comfort vignette
+
+`[comfort] vignette` (0..1, default `0` = off; `0.6` is a typical strength) darkens
+the periphery of both eye images while the player moves or turns with the sticks,
+the usual VR comfort measure for artificial motion. `vignette_radius` (default
+`0.55`) is the clear centre and `vignette_softness` (default `0.25`) the width of
+the fade, both in half-heights of the eye image, measured from where the eye's
+view axis meets the image (off-centre, from the eye's asymmetric FOV), so the
+clear zone is a circle around what the eye looks straight at.
+
+Input: the XInput proxy keeps the deflection of both sticks of the last successful
+poll of user 0, the virtual pad included (`xinput::stick_magnitudes`, handed to the
+render module with `render::SetStickSource` at start-up). Per submitted stereo frame
+(`comfort::Update`, presenting thread) the larger deflection beyond a 0.25 dead
+zone, scaled to 0..1, is the target; the level follows it linearly, from rest to
+full in 100 ms and back in 300 ms, and is eased (smoothstep) into the strength.
+Mouse and keyboard motion do not drive it.
+
+Where: the eye blit (`blit.hlsl`, after the picture adjustment, linear light):
+`rgb *= 1 - strength * smoothstep(radius, radius + softness, d)`. Only
+`TransferEye` passes it (`SubmitDesc::vignette`), so the UI layer and the virtual
+screen are never darkened, and with strength 0 an eye that could be copied as it is
+still is. Live: `comfort status | vignette <v> | radius <r> | softness <s> | test 0|1`
+(`test 1` drives the level as if a stick were fully pushed, for checks without a
+pad; `status` also gives the peak level since the last status and the frames
+darkened).
+
+Checked on the Null backend (2064x2208 per eye, the street of the latest save):
+with `vignette 0.6`, `comfort test 1` left the centre of each eye as it was (mean
+encoded level 51.1 -> 52.2 left, 31.4 -> 31.5 right; the crowd moves) and
+darkened the periphery (top-right corner 37.4 -> 21.1 left, 31.9 -> 17.5 right;
+right edge of the right eye 4.8 -> 1.9); the HUD panel and its minimap in the
+corner keep their brightness. `stick R 1 0 800` through the virtual pad raised
+the level to 1.00 (last stick 1.00) and it was back at 0 within 0.6 s. Cost: the
+eye images already go through the shader blit, and `gpu copy` read 0.081 ms per
+frame with and without the vignette (6 s each).
+
 ## Timing
 
 Every `stats_interval` seconds `ff7vr.log` gets a block like this (SteamVR
@@ -952,6 +1003,21 @@ lines up with its object's direction exactly, with three remaining effects:
 The camera's FOV is a game setting and changes with camera modes (INFERRED,
 only one scene measured), so the matching size is not automatic yet; the
 default stays the larger, easier to read UEVR size.
+
+### Size in battles
+
+`[ui] battle_size` (metres, default `1.57`, `0` = unchanged): while a battle is in
+progress the panel's height blends from `[ui] size` to `battle_size` over 0.5 s
+(eased) and back over 0.5 s after the battle, with the same centre, so the
+markers over enemies line up with them where it matters and the larger panel
+stays for exploring. The signal is the one the automatic third person uses (the
+engine's battle flag, `render::SetBattleActive`, set every game frame from
+`player.cpp`; `fp combat 1|0|auto` overrides it for tests), so it needs first
+person available and `[first_person] auto_combat` on. Live: `ui battle_size <m>`;
+`ui status` ends with the battle size, the flag, the blend and the height in use.
+The log records each battle start and end. Checked on the Null backend with
+`fp combat 1` / `fp combat 0`: `ui status` read `battle 1, blend 1.00, height now
+1.57 m` and, after the battle, `battle 0, blend 0.00, height now 2.00 m`.
 
 ### Measured cost
 

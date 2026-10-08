@@ -250,7 +250,8 @@ session it is `ff7vr.log` in the game's `End\Binaries\Win64` folder).
    too dark or washed out compared with the monitor.
 5. **Load a save. The world in 3D.** Correct depth, both eyes aligned (no double
    vision when looking at a near object), the horizon level, the scene stable when
-   you turn your head. The log shows `stereo: rendering STEREO ... (eye WxH ...)` with
+   you turn your head. If it looks soft (DLSS, a lower render scale), `[picture]
+   sharpen = 0.3` sharpens the 3D view. The log shows `stereo: rendering STEREO ... (eye WxH ...)` with
    the per-eye size the headset's runtime asked for.
 6. **Smoothness.** Turning your head must feel smooth. The log's `timing:` lines
    every 10 seconds show the frame rate and `errors 0`.
@@ -327,10 +328,12 @@ session it is `ff7vr.log` in the game's `End\Binaries\Win64` folder).
   started sooner can run at about 10 frames per second for minutes (the launcher and
   `ff7vr-start.cmd` wait by themselves; a start from Steam does not).
 - **Smooth turning only.** The game camera turns you smoothly, as in the flat game;
-  there is no snap turn. This can be uncomfortable for some players.
+  there is no snap turn. This can be uncomfortable for some players: `[comfort]
+  vignette = 0.6` darkens the edges of the view while you move or turn with the sticks.
 - **Markers over enemies and objects are slightly off** on the default HUD panel
   (3 to 6 degrees towards the edges). `[ui] size = 1.57` lines them up; the larger
-  default is easier to read.
+  default is easier to read. In battles the panel takes `[ui] battle_size` (1.57 by
+  default) by itself, so the markers over enemies line up there; `0` keeps `size`.
 - **The game window becomes 1280x720 while 3D runs** if the game was in a fullscreen
   mode, and stays that way until the game exits (switching 3D off with Insert does not
   change it back). The game does not remember it: your display setting is not changed,
@@ -409,7 +412,7 @@ To narrow a problem down, change one setting at a time and start a new session:
 | anything in 3D (image, depth, flicker, crash in the world) | `[stereo] enabled = 0`: if the virtual screen works, the 3D rendering is at fault |
 | HUD or menus missing, cut off, doubled | `[ui] layer = 0` (the HUD goes back into the 3D image, cropped) |
 | blocky or shimmering edges, any odd shading | `[foveation] enabled = 0` |
-| uncomfortable camera height or movement | `[camera] boom = game`, then `[stereo] decoupled_pitch = 0` |
+| uncomfortable camera height or movement | `[camera] boom = game`, then `[stereo] decoupled_pitch = 0`; for motion, `[comfort] vignette = 0.6` |
 | first person in a battle, or third person outside one | `[first_person] battle_signal =` (empty) and `default = 0` |
 | first person at the wrong height or inside the head | `[first_person] eye = offset` (a fixed height above the character's position instead of its eyes) |
 | first person: the view lags when Cloud crouches or climbs | `[first_person] steady_seconds = 0.15` (follows faster, a little more step motion), or `head_bob = 1` |

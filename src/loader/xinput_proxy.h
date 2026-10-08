@@ -34,6 +34,9 @@ VirtualPad virtual_pad();
 // virtual pad is merged): it may change the buttons. Set once at start-up; nullptr = none.
 using PadFilter = void (*)(unsigned long user, unsigned short* buttons);
 void set_pad_filter(PadFilter filter);
+// Deflection of the left and right sticks (0..1) in the last successful poll of user 0,
+// virtual pad included.
+void stick_magnitudes(float* left, float* right);
 // Number of XInputGetState calls seen (diagnostics: proves the game polls us).
 std::uint64_t get_state_calls();
 // Call once after load_real. With `wrap_import`, points the game's import of XInputGetState
