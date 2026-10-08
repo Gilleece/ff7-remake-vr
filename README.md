@@ -1,10 +1,10 @@
 # ff7vr: VR for FINAL FANTASY VII REMAKE INTERGRADE (PC)
 
-VR mod for FF7 Remake that adds first person, DLSSS and DFR. The main goal here was performance as I found other mods, amazing as they are, to be much more demanding than I would have expected. This is still early days, I made this for myself and am just sharing. This was primarily vibe coded, just for transparency. 
+VR mod for FF7 Remake that adds first person, DLSS and DFR. The main goal here was performance as I found other mods, amazing as they are, to be much more demanding than I would have expected. This is still early days, I made this for myself and am just sharing. This was primarily vibe coded, just for transparency. 
 
 To install take a look at the "Playing" section of this readme. 
 
-First person mode can be toggled with home on keyboard or L3 and R3 together on controller. The mod automatically switches to 3rd person for combat. There's a bunch of options to tweak in the ff7vr.ini file with descritions in that file. For me personally I get massively better performance out of this mod than others. I have only played through a few sections so almost certainly some areas will have issues etc, as I play through the game I will try to fix them.
+First person mode can be toggled with home on keyboard or L3 and R3 together on controller. The mod automatically switches to 3rd person for combat. There's a bunch of options to tweak in the ff7vr.ini file with descriptions in that file. For me personally I get massively better performance out of this mod than others. I have only played through a few sections so almost certainly some areas will have issues etc, as I play through the game I will try to fix them.
 
 The details (what the launcher does, a first-session checklist, the full lists of
 known problems and untested areas, troubleshooting, performance) are in
@@ -13,6 +13,14 @@ known problems and untested areas, troubleshooting, performance) are in
 ## State
 
 Tested on Quest 3 and Pico 4 ultra so far, any openXR headset should work but if there's specific headsets not working let me know and I will try to address that. 
+
+Known problems right now (details in `GUIDE.md`):
+
+- Screen-space reflections are off in 3D: the game's reflection pass gets the right eye wrong, so the eyes would not match. `[stereo] ssr_fix = 1` brings them back (wrong in the right eye).
+- Pre-rendered movies can drop to a slideshow. It looks like a GPU upload slowdown rather than the movie itself and is still being looked at; waiting a minute and a half between restarts of the game helps.
+- Heat haze over fire broke the right eye; fixed, not yet confirmed in a headset.
+- The gamepad combinations need an XInput pad (Xbox, 8BitDo in XInput mode); a DualSense or any pad in DirectInput mode is read by the game itself and the combinations do not apply (use the keys).
+- Wait a minute and a half between quitting the game and starting it again, or it can run at 10 fps for minutes (the launcher waits by itself; a start from Steam does not).
 
 ## Requirements
 
@@ -46,6 +54,18 @@ folder (beside `ff7remake_.exe`) and start the game from Steam, or with
 `ff7vr-start.cmd` there. The log is `ff7vr.log` in that folder; to remove the mod,
 delete the files the zip added. Details (ReShade/Luma, DLSS): `GUIDE.md`,
 "Installing without the launcher".
+
+## DLSS package
+
+The `-dlss` zip is the same mod built with NVIDIA DLSS (RTX cards only, experimental). It
+needs one file I can't ship: NVIDIA's `nvngx_dlss.dll`. Get it from NVIDIA's DLSS SDK on
+GitHub (https://github.com/NVIDIA/DLSS, folder `lib/Windows_x86_64/rel`: open the file and
+click "Download raw file"; NVIDIA's licence applies to it) and put it beside
+`ff7remake_.exe` in `End\Binaries\Win64`. If there is one there already (from Luma or
+another DLSS mod) you're done. Without it the mod simply runs without DLSS (the log says
+`NGX is not available`). DLSS is on in that package (`[dlss] enabled = 1` in `ff7vr.ini`,
+`input_scale = 0.65`: each eye is rendered at 65 % of its width and height and scaled up);
+`enabled = 0` turns it off. `-dlss-dropin.zip` is the same without the launcher.
 
 ## Controls
 
@@ -92,4 +112,9 @@ documentation: `docs/dev-harness.md` (build, run, test without a headset),
 ## Licence
 
 MIT, see `LICENSE`. The third-party components the mod is built with, and their
-licences, are listed in `THIRD-PARTY-NOTICES.md`.
+licences, are listed in `THIRD-PARTY-NOTICES.md`. The `-dlss` build also contains
+NVIDIA's NGX library and header code, which are not under MIT: NVIDIA's RTX SDKs licence
+applies to them (see `THIRD-PARTY-NOTICES.md`, "NVIDIA DLSS SDK").
+
+ff7vr is an unofficial fan project. It is not affiliated with, sponsored, endorsed or
+reviewed by Square Enix or NVIDIA.
