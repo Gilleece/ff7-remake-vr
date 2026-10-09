@@ -996,8 +996,18 @@ std::string XrController::DepthCommand(const std::string& args) {
         depthOn_ = verb == "on";
         log::info("xr: depth layer switched {}", verb);
     } else if (verb == "dump") {
-        if (rest.empty()) return "err usage: xr-depth dump <path prefix> (writes <prefix>_depthL.png / _depthR.png with the eye images)";
-        return Capture(rest, 5000);
+        if (rest.empty()) return "err usage: xr-depth dump <path prefix> [timeout ms] (writes <prefix>_depthL.png / _depthR.png with the eye images)";
+        uint32_t timeoutMs = 5000;
+        if (const size_t sp = rest.rfind(' '); sp != std::string::npos) {
+            uint32_t v = 0;
+            const char* end = rest.data() + rest.size();
+            const auto [p, ec] = std::from_chars(rest.data() + sp + 1, end, v);
+            if (ec == std::errc() && p == end && v > 0) {
+                timeoutMs = v;
+                rest.resize(sp);
+            }
+        }
+        return Capture(rest, timeoutMs);
     } else if (!verb.empty() && verb != "status") {
         return "err usage: xr-depth status | on | off | dump <path prefix>";
     }

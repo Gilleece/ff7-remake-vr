@@ -442,6 +442,10 @@ Measured (2026-10-09, without a headset):
 | Its depth images (`d1_depthL.png`, `gt_head0_depthL.png`) | the same geometry as the colour image of the same frame (pillars, railings, the floor grate); values 7.5e-5 to 0.077 (1.3 m to 1.3 km), centre 16 to 85 m depending on the frame's view |
 | `xr_smoke --backend openxr --runtime steamvr --depth`, SteamVR 2.18.2 null driver (`captures/frame-wt/s2/smoke.txt`) | depth swapchains `D32_FLOAT` (images `R32_TYPELESS`, bind flags depth-stencil + shader resource); 300 of 300 frames ended with depth chained, 600 depth images, no error; result PASS |
 | The game on the same SteamVR (2 x 1512x1680, `captures/frame-wt/s2`) | 5 602 frames ended with depth in 70 s, no `xrEndFrame` error; `gpu copy` 0.107 ms with depth, 0.060 ms without (0.047 ms) |
+| Null backend at `[stereo] render_scale = 0.75` (`captures/frame-wt/s8`) | the depth images are 2304x2448, the eye images' size, with the same content as at scale 1 (centre 46.5 m in both) |
+
+DLSS with `output = runtime` (the colour image larger than the rendered views) takes the
+same path (the depth region is scaled to the colour image) but was not run.
 
 Not checked: Virtual Desktop's and Meta's runtimes (no headset here; Virtual Desktop's
 source shows it hands the depth to its compositor with the projection terms above), and
@@ -479,7 +483,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev\send-input.ps1 -Pi
 | `fov ...` | foveated rendering: status, settings, one-frame trace, timing ([Foveation dev commands](#foveation-dev-commands)) |
 | `picture status` / `picture reset` / `picture <key> <value>` | the colour adjustment now, back to no change, or one key (`brightness`, `contrast`, `saturation`, `gamma`, `black_level`) set and clamped; applies from the next image copied to the headset ([Picture controls](#picture-controls)) |
 | `xr-depth status` / `on` / `off` | the depth layer: on or off, whether it is in use, the depth swapchains' format (or why there are none), frames offered the scene depth, depth images written, frames ended with depth, late view locations ([Depth layer](#depth-layer)) |
-| `xr-depth dump <prefix>` | a `capture` that also writes the frame's depth images as `<prefix>_depthL.png` / `_depthR.png` (grey = 255 * depth^(1/4), depth 0 black) and logs their range and the distance at the centre |
+| `xr-depth dump <prefix> [timeout ms]` | a `capture` that also writes the frame's depth images as `<prefix>_depthL.png` / `_depthR.png` (grey = 255 * depth^(1/4), depth 0 black) and logs their range and the distance at the centre |
 | `xr-sim status` | Null backend: emulated tracker head, LOCAL origin, head in LOCAL, recenter offset, the head the game sees, validity, and the yaw the last submitted left image was rendered at against the yaw its frame was located at |
 | `xr-sim yawrate <deg/s>` | Null backend: the head turns at a constant rate with the wall clock, so every location (the frame wait's and a late one) sees the yaw of its own moment (`0` = off) |
 | `xr-sim late-yaw <deg>` | Null backend: an extra yaw that only late locations (`RelocateViews`) see, a deterministic test of the late update (`docs/engine-module.md`, "Late update of the head pose") |

@@ -240,8 +240,26 @@ Known limit: an in-scene marker the game places from the camera on the game thre
 blue map icon in that room) stays where the frame-wait view put it, so it moves by the late
 correction (10 degrees in the test; about 0.2 degrees per frame at 45 deg/s).
 
-Not verified: a real headset (whether it looks steadier, and with Virtual Desktop's own late
-warp); the SteamVR run below is the only real runtime it ran on.
+SteamVR 2.18.2 null driver (a real OpenXR runtime, 2 x 1512x1680, 90 Hz; run
+`captures/frame-wt/s7`, log `captures/runs/20261009-204406`): layout found on the first
+frame with late update on, 1 268 of 1 268 stereo scenes relocated through `xrLocateViews`
+on the render thread (0 failed, 0 skipped because a teardown held the lock), 0 matrices
+not as built, no warning or error in the log, 0 submit errors; pose age at the hand-over
+4.21 ms (frame wait) against 2.11 ms (late); render thread time of the whole late update
+0.037 ms per frame on average, 0.205 ms at most. The null driver's head does not move, so
+this run shows that the path works with a runtime, not that the picture is steadier.
+
+With `late_update = 1` in the ini and `render_scale = 0.75` from the start (Null backend,
+run `captures/frame-wt/s8`): layout found on the first stereo frame, 1 458 of 1 461 scenes
+relocated (3 without a queued frame), pose age 5.3 ms against 2.7 ms, 0.010 ms of render
+thread time per frame.
+
+Not verified: a real headset (whether it looks steadier, and how it combines with Virtual
+Desktop's own late warp). Virtual Desktop's runtime (public source) locates views under its
+own spaces lock, not the frame lock that `xrWaitFrame` waits on, so a render-thread
+location should not stall behind the game thread's frame wait (read in the source, not
+measured). `[stereo] late_update` stays `0` by default until it has been tried in a
+headset.
 
 ## Camera modes
 
