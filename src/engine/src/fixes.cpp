@@ -501,8 +501,10 @@ float h2f(std::uint16_t h) { return DirectX::PackedVector::XMConvertHalfToFloat(
 
 // Test 1: the run at the origin drawn again with the patched shader into the scratch target;
 // for a view whose rectangle starts at the origin the two must be identical bit for bit.
+// Test 4 (control) draws it again with the game's own shader instead.
 void ssr_equivalence_test(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base,
-                          void(STDMETHODCALLTYPE* original)(ID3D11DeviceContext*, UINT, UINT, INT), ID3D11PixelShader* patched) {
+                          void(STDMETHODCALLTYPE* original)(ID3D11DeviceContext*, UINT, UINT, INT), ID3D11PixelShader* patched,
+                          const char* what) {
     ID3D11RenderTargetView* rtv = nullptr;
     ctx->OMGetRenderTargets(1, &rtv, nullptr);
     ID3D11Resource* target = nullptr;
@@ -553,8 +555,8 @@ void ssr_equivalence_test(ID3D11DeviceContext* ctx, UINT count, UINT start, INT 
                         for (int c = 0; c < 4; ++c) maxd = std::max(maxd, std::fabs(h2f(a[i + c]) - h2f(b[i + c])));
                     }
                 }
-                result = std::format("equivalence at the origin ({}x{}): pixels differing {} of {} (max difference {}), non-zero in the engine's run {}",
-                                     half, td.Height, differ, a.size() / 4, maxd, nonzero);
+                result = std::format("{} at the origin ({}x{}): pixels differing {} of {} (max difference {}), non-zero in the engine's run {}",
+                                     what, half, td.Height, differ, a.size() / 4, maxd, nonzero);
             } else {
                 result = "err read-back failed";
             }
@@ -943,7 +945,8 @@ std::string ssr_test(const std::string& what) {
     if (what == "equal") g_ssr_test = 1;
     else if (what == "halves") g_ssr_test = 2;
     else if (what == "shift") g_ssr_test = 3;
-    else if (what != "result") return "err usage: ssr test equal | halves | shift | result";
+    else if (what == "same") g_ssr_test = 4;
+    else if (what != "result") return "err usage: ssr test equal | same | halves | shift | result";
     std::lock_guard lk(g_ssr_test_mutex);
     return std::string(what == "result" ? "ok " : "ok armed for the next frame; last result: ") + g_ssr_test_result;
 }
@@ -993,12 +996,11 @@ bool ssr_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base,
         g_ssr_ps = ps;  // compared and looked up only
         if (index == 0) {
             // Mode 3 is decided once per frame, for both runs, so that a frame without the
-            // patched shader falls back to mode 2 in both eyes.
-            if (ps != g_ssr_patched_of || !g_ssr_patched) {
-                if (g_ssr_patched) g_ssr_patched->Release();
-                g_ssr_patched = shaders::patched_for(ps);
-                g_ssr_patched_of = ps;
-            }
+            // patched shader falls back to mode 2 in both eyes. Looked up every frame: a shader
+            // the engine released and created again may reuse an address.
+            if (g_ssr_patched) g_ssr_patched->Release();
+            g_ssr_patched = fix_mode == 3 ? shaders::patched_for(ps) : nullptr;
+            g_ssr_patched_of = ps;
             g_ssr_frame_patched = g_ssr_patched != nullptr;
             ID3D11RenderTargetView* rtv = nullptr;
             ctx->OMGetRenderTargets(1, &rtv, nullptr);
@@ -1164,16 +1166,18 @@ bool ssr_draw(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base,
     ctx->RSSetState(rs);
     ctx->RSSetScissorRects(1, &rect);
     original(ctx, count, start, base);
-    if (!right_half && g_ssr_test.load(std::memory_order_relaxed) == 1) {
+    if (const int t = g_ssr_test.load(std::memory_order_relaxed); !right_half && (t == 1 || t == 4)) {
         g_ssr_test = 0;
         ID3D11PixelShader* ps = nullptr;
         ctx->PSGetShader(&ps, nullptr, nullptr);
         ID3D11PixelShader* patched = shaders::patched_for(ps);
-        if (ps) ps->Release();
         if (patched) {
-            ssr_equivalence_test(ctx, count, start, base, original, patched);
+            ssr_equivalence_test(ctx, count, start, base, original, t == 1 ? patched : ps,
+                                 t == 1 ? "equivalence (patched shader)" : "control (the game's shader twice)");
             patched->Release();
-        } else {
+        }
+        if (ps) ps->Release();
+        if (!patched) {
             set_test_result("err no patched shader for the reflection pass");
         }
     }

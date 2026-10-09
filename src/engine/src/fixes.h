@@ -86,7 +86,7 @@ void set_ssr_fix(int mode);  // 0 off, 1 moved into place, 2 both eyes without, 
 bool ssr_fix();
 int ssr_fix_mode();
 // Tests of mode 3: `equal` draws the run at the origin a second time with the patched shader and
-// compares the two bit for bit; `halves` compares the two halves of the reflection target once
+// compares the two bit for bit (`same`: with the game's own shader, the control); `halves` compares the two halves of the reflection target once
 // both runs have written it (for two identical views); `shift` computes, right after the run
 // drawn in place, the same view's reflections with the game's own shader and the view moved to
 // the origin (inputs and view constants), and compares the two pixel for pixel. `result`

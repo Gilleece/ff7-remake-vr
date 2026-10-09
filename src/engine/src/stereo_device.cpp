@@ -810,26 +810,28 @@ void configure_render_scale(const Config& cfg) {
     // Reflections per eye (fixes.h); its draw hook belongs to the post-process fixes.
     fixes::set_ssr_per_eye(cfg.get_bool("stereo", "ssr_per_eye", true));
     {
-        // 0 (off, false, no): the right eye has no screen-space reflections; 1 (on, true, yes):
-        // the right view's run is moved into place (its reflections are wrong, see
-        // docs/engine-module.md); 2: no screen-space reflections in either eye (the default).
-        std::string v = cfg.get_string("stereo", "ssr_fix", "2");
+        // 3 (on, true, yes; the default): the right view's run drawn in place with the pass's
+        // pixel shader patched, both eyes get their own reflections; 2: no screen-space
+        // reflections in either eye; 1: the right view's run moved into place (its reflections
+        // are wrong, for comparison); 0 (off, false, no): the right eye has none. See
+        // docs/engine-module.md, "Reflections per eye" and the sections after it.
+        std::string v = cfg.get_string("stereo", "ssr_fix", "3");
         for (char& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        int mode = 2;
+        int mode = 3;
         if (v == "0" || v == "off" || v == "false" || v == "no") mode = 0;
-        else if (v == "1" || v == "on" || v == "true" || v == "yes") mode = 1;
-        else if (v == "3") mode = 3;
-        else if (v != "2") log::warn("stereo: ssr_fix = '{}' not understood; using 2", v);
+        else if (v == "1") mode = 1;
+        else if (v == "2") mode = 2;
+        else if (v != "3" && v != "on" && v != "true" && v != "yes") log::warn("stereo: ssr_fix = '{}' not understood; using 3", v);
         fixes::set_ssr_fix(mode);
     }
-    dev_commands::add("ssr", "ssr [status] | on | off | fix 0-3 | poison 0-3 | test equal|halves|shift|result | shader <prefix>: screen-space reflections per eye half, right-eye reflections fix",
+    dev_commands::add("ssr", "ssr [status] | on | off | fix 0-3 | poison 0-3 | test equal|same|halves|shift|result | shader <prefix>: screen-space reflections per eye half, right-eye reflections fix",
                       [](std::string_view args) {
                           if (args == "on" || args == "off") fixes::set_ssr_per_eye(args == "on");
                           else if (args.size() == 5 && args.substr(0, 4) == "fix " && args[4] >= '0' && args[4] <= '3') fixes::set_ssr_fix(args[4] - '0');
                           else if (args.size() > 5 && args.substr(0, 5) == "test ") return fixes::ssr_test(std::string(args.substr(5)));
                           else if (args.size() == 8 && args.substr(0, 7) == "poison " && args[7] >= '0' && args[7] <= '3') fixes::set_ssr_poison(args[7] - '0');
                           else if (args.size() > 7 && args.substr(0, 7) == "shader ") return fixes::ssr_shader_dump(std::string(args.substr(7)));
-                          else if (!args.empty() && args != "status") return std::string("err usage: ssr [status] | on | off | fix 0-3 | poison 0-3 | test equal|halves|shift|result | shader <prefix>");
+                          else if (!args.empty() && args != "status") return std::string("err usage: ssr [status] | on | off | fix 0-3 | poison 0-3 | test equal|same|halves|shift|result | shader <prefix>");
                           return "ok " + fixes::ssr_status();
                       });
     fixes::set_hzb_skip(static_cast<int>(cfg.get_int("stereo", "hzb_skip", 0)));

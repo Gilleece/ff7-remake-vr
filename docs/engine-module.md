@@ -718,7 +718,7 @@ keys, comfort in a headset.
 | `bloom_fix` | `1` | right-eye bloom fix (below) |
 | `ao_fix` | `1` | right-eye ambient occlusion fix (below) |
 | `ssr_per_eye` | `1` | each eye's screen-space reflection run limited to its half of the target, and the per-view colour copy for it halved (see "Reflections per eye"); same image, about 0.45 ms less per frame at 2 x 3072x3264 |
-| `ssr_fix` | `2` | screen-space reflections per eye. `2` (default since 08/10): none in either eye, the eyes match. `1`: the right view's run is moved into place, but what it computes is wrong ("The right eye's reflections are not its own"). `0`: the right eye has none (see "Right-eye reflections fix") |
+| `ssr_fix` | `3` | screen-space reflections per eye. `3` (default since 09/10): the right view's run drawn in place with a patched copy of the pass's pixel shader, both eyes get their own reflections ("Right-eye reflections drawn in place"). `2`: none in either eye. `1`: the right view's run moved into place, but what it computes is wrong ("The right eye's reflections are not its own"). `0`: the right eye has none (see "Right-eye reflections fix"). `on` = 3, `off` = 0 |
 | `distortion_fix` | `1` | heat haze and refraction per eye: without it the left view's distortion composite covers both eyes and the right view's draws nothing (see "Right-eye distortion fix") |
 | `hzb_skip` | `0` | `1` leaves out the further mips of the hierarchical depth chain nothing reads, while `r.HZBOcclusion` is 0 (see "Volumes and hierarchical depth per view"); gain within noise |
 | `tonemap_shift` | `auto` | with ReShade's Luma add-on loaded, the right view's bloom-combine input shifted to the origin (Luma's shader reads it there; without it both eyes show the left eye's image). `auto`: only while Luma is loaded; `0` off; `1` always (breaks the right eye without Luma). See "ReShade and Luma: the tonemapping shift and Luma's DLSS" |
@@ -793,7 +793,9 @@ Through the dev pipe (`[dev] pipe = 1`, `tools\dev\send-input.ps1 -Pipe "<comman
 | `stereo aofix [0\|1]` | right-eye ambient occlusion fix on/off, with its counters (draws fixed, failures); one per stereo frame |
 | `ssr [on\|off]` | reflections per eye on/off, with its counters (runs limited, colour copies halved; two each per stereo frame) |
 | `ssr poison <0\|1\|2\|3>` | test of reflections per eye: `1` fills every half the fix skips with a loud colour (nothing of it may reach the eye images), `2` fills the half each reflection run writes, `3` the half each colour copy writes (controls: the colour must show) |
-| `ssr fix <0\|1\|2>` | right-eye reflections fix off/on, `2` both eyes without screen-space reflections (`runs cleared` counts them); `ssr` shows `applied` (one per stereo frame), `failed`, the x where the right view's result was placed, how often that x changed (`moved`) and results no draw read (`not read`) |
+| `ssr fix <0\|1\|2\|3>` | right-eye reflections: `3` drawn in place with the patched shader (`drawn in place` counts the runs, `frames without it` the frames that fell back to `2`), `2` both eyes without screen-space reflections (`runs cleared` counts them), `1` moved into place (`applied` one per stereo frame, `failed`, the x where the right view's result was placed, how often that x changed (`moved`) and results no draw read (`not read`)), `0` off |
+| `ssr test equal\|same\|shift\|halves\|result` | tests of `ssr fix 3` on the next frame, result in the log and in `ssr test result`: `equal` the patched shader against the game's at the origin (bit for bit; `same` the game's shader twice, the control; run them with `fov off`), `shift` the run in place against the same view computed at the origin with the game's shader, `halves` the two halves of the target compared (for two identical views) |
+| `ssr shader <prefix>`, `shader status\|check`, `shader dump <pointer> <prefix>` | the reflection pass's pixel shader (`.dxbc` and `.asm`; needs `[dev] keep_shaders = 1` from start-up), the shaders created and the patched copies, the checksum check, any pixel shader by the pointer `gpu trace` logs (`docs/re/engine.md`, "Screen-space reflections: the pixel shader") |
 | `hzb [0-4]` | the unread hierarchical depth chain: `0` built (default), `1` further mips left out, `2` / `3` the whole chain filled with near / far depth, `4` the read chain's further mips filled (control); shows the view chains seen and the mips left out |
 | `stereo framelog start` / `stop <csv>` | frame log: per frame the start, host return and end of `UGameEngine::Tick`, the render thread's end of the scene and the frame-end command on the RHI thread, each with the thread's CPU time (cycle count) and, at the start of Tick, the latest GPU frame time (see "Turning: where the slow frames come from") |
 | `dynres [on\|off]`, `dynres scale\|min\|target <value>` | render scale and dynamic resolution: state, current scale and rect, last GPU frame time and budget, number of changes |
@@ -1411,9 +1413,10 @@ placed relative to the origin. The draw's vertex constants (`DrawRectangle`: pos
 ### Right-eye reflections fix
 
 `src/engine/src/fixes.cpp` (`ssr_draw_shifted`, `ssr_before_draw`; `[stereo] ssr_fix = 1`,
-the default from 06/10 to 08/10, now `2`, see "The right eye's reflections are not its own";
-`ssr fix 0|1|2`): the reflection run of the view in the right half (the second run of
-a frame; with `stereo swap` the first) is drawn into a scratch render target of the same
+the default from 06/10 to 08/10, then `2`, since 09/10 `3`, see "The right eye's reflections
+are not its own" and "Right-eye reflections drawn in place"; `ssr fix 1`): the reflection run
+of the view in the right half (the second run of a frame; with `stereo swap` the first) is
+drawn into a scratch render target of the same
 format, half the target's width plus 16 columns; the scratch target clips the full-target
 triangle, so only the part at the origin is computed. The result is then copied into the
 target at the x where the right view's rectangle starts. That x is half the width at full
@@ -1501,24 +1504,134 @@ view's own rectangle; its mip-0 constants are correct for both views), the per-v
 buffer (cb1) and the pass's own constants (cb0). The pass's cb0 is the same for both runs
 except one value (row 20 w: a finite number for the first run, `3.4e38` for the second; it
 follows the run order, not the position, so it is not the cause) and holds a 4x4 matrix
-(rows 28-31) that is identical for both views. The likeliest cause is the ray march's
-mapping from the view's screen position to the hierarchical depth texture: correct only
-for a view whose rectangle starts at the origin. Not established; a fix needs the pass's
-pixel shader (disassembly of its bytecode) or the view buffer's rectangle fields patched
-for the right view's run.
+(rows 28-31) that is identical for both views. The likeliest cause looked like the ray march's
+mapping from the view's screen position to the hierarchical depth texture. The disassembly
+of the pass's pixel shader (09/10) showed otherwise: the shader derives the ray's start from
+`SV_Position - ViewRectMin` while it loads its inputs at `SV_Position + ViewRectMin`
+("Right-eye reflections drawn in place", below).
 
 `[stereo] ssr_fix = 2` (`ssr fix 2`) removes the inconsistency instead of fixing it: both
 views' reflection runs are replaced by a clear of the target, so neither eye has
 screen-space reflections (wet floors, puddles and metal keep their reflection captures and
 light highlights; by the binding audit of the traces the reflection composite reads per-view light grids,
-reflection capture buffers and view constants, not checked with read-backs). `2` is the default
-since 08/10: the eyes match, which the headset reports were about; `1` (the right eye's own but
-wrong reflections) and `0` (left eye only) remain for comparison, and a real fix is the shader-level
-task described under "Next". The ini accepts `0`, `1`, `2` and the words `off` / `on`.
+reflection capture buffers and view constants, not checked with read-backs). `2` was the default
+from 08/10 to 09/10: the eyes match, which the headset reports were about. The shader-level fix
+that replaced it as the default is the next section. The ini accepts `0` to `3` and the words
+`off` (0) and `on` (3).
 Checked at the DLSS layout (`r5`): after both runs both views' parts of the reflection target
 are exactly 0 (`tr_f2`, events 4692 / 4694); `runs cleared` grows by two per stereo frame;
 frame time unpaced (`xr.null_pace = 0`, `t.MaxFPS 0`), 5 s windows alternating: `2` 8.22 and
 8.25 ms, `1` 8.43 and 8.45 ms, so about 0.2 ms less.
+
+### Right-eye reflections drawn in place (`ssr_fix = 3`, 09/10)
+
+The cause, from the pass's pixel shader (captured when the game creates it and
+disassembled; the instructions and the view buffer rows are in `docs/re/engine.md`,
+"Screen-space reflections: the pixel shader"): the shader loads its GBuffers and depth at
+`SV_Position + ViewRectMin` but derives the screen position, from which it rebuilds the world
+position the ray starts at, from `SV_Position - ViewRectMin`. For a view whose rectangle does
+not start at the origin one of the two is always wrong: drawn over the whole target (the
+game's draw) the right view's pixels left of the middle load the right view's surfaces with a
+screen position two view widths off and those right of the middle load nothing (the zeros);
+drawn into a scratch target at the origin (`ssr_fix = 1`) the surfaces are right and the ray
+starts are still two widths off, so rays from wrong points hit whatever lies there: the
+specks. Everything else in the shader (the ray march in the view's clip space and
+hierarchical depth, the hit's velocity and previous colour through the view's
+ScreenPositionScaleBias and buffer size, clamped to the view's rectangle) is relative to the
+target and right for either view. This also explains the earlier test results: the inputs
+are read at the view's rectangle (the "shift" tests of 08/10), the interpolated texture
+coordinate is unused, and the fault follows the position in the target.
+
+`[stereo] ssr_fix = 3` (default since 09/10; `ssr fix 3`; `src/engine/src/shaders.cpp`,
+`fixes.cpp`):
+
+- When the game creates the pass's pixel shader, a copy is created next to it with one
+  operand changed: the load position adds `ViewRectMin.zzzz` (always 0) instead of
+  `ViewRectMin.xyxx`. For a view at the origin the copy computes exactly what the original
+  does; for any other view every position in it is relative to the target. The copy is found
+  by the shader's structure, not by its checksum; the log says `shaders: pixel shader
+  3c1fb8a3... adds the view's origin to SV_Position; patched copy created` and `shader
+  status` lists it.
+- The left view's run is the game's own (limited to its half by `ssr_per_eye`). The right
+  view's run is drawn in place with the copy bound and a scissor on the right half (16
+  columns past the middle, for a rounded rectangle): no scratch target and no copy. The 16
+  columns it writes left of the right view belong to the left view's part, which the left
+  view's composite has already read; no later pass reads the target (the passes after the
+  right view's composite only have it left bound in a slot they do not declare).
+- Mode 3 is decided once per frame, at the first run: without a patched copy for the bound
+  shader the frame falls back to mode 2 in both eyes (`frames without it` in `ssr`, one log
+  warning).
+- Tests (`ssr test ...`, result in the log and in `ssr test result`): `equal` draws the run at
+  the origin a second time with the copy and compares the two bit for bit (`same`, the control,
+  draws it again with the game's shader); `shift` computes,
+  right after the run in place, the same view's reflections the way the game computes a view at
+  the origin (the game's shader, every full-size input copied with the view's part at the
+  origin, the view buffer with rows 58.w, 121.x, 123.w, 124.x moved to the origin) and
+  compares the two; `halves` compares the two halves of the target (meaningful when both
+  views are the same camera).
+
+Proof (Null backend, 2 x 3072x3264, the latest save: a lit catwalk with a metal grating,
+pipes and tanks; runs in `captures/ssrfix/` (local): `s2` with foveation off in the ini, `s5`,
+`s7`, `s8` with the player's ini, `tools/package/ff7vr.ini`, foveation `performance`).
+
+Same frame, pixel for pixel. These tests draw into a scratch target, which foveation shades at
+another rate than the game's target (with foveation on even the game's shader drawn twice
+differs in 7 % of the pixels: `s8`), so they were run with foveation off (`fov off`):
+
+| Test | Result |
+|---|---|
+| `ssr test same` (control: the game's shader drawn twice, left view) | 0 of 10 027 008 pixels differ, 4 of 4 times (`s8`) |
+| `ssr test equal` (the patched copy against the game's shader, left view at the origin) | 0 of 10 027 008 pixels differ in 9 of 10 runs (`s2` 2, `s7` 3 of 4 including 67 % and render scale 0.8, `s8` 4); once, in the first half-minute after start, 6 839 (max 0.9995) |
+| `ssr test shift` (the right view's run in place against the same view computed by the game's shader at the origin) | after the first half-minute: 103, 125, 177, 293 pixels differ (0.001 to 0.003 %), of them 3 to 30 by more than 0.01 (`s8`); with `stereo swap 1` (the left eye in the right half) 132, 3; at render scale 0.8 (right view 2456 wide at x 3072) 148, 14. In the first half-minute after start up to 12 337 (0.12 %), at most 144 by more than 0.01 (`s2`, `s7`). Non-zero pixels and mean alpha equal in every run |
+| `ssr test shift` at `r.ScreenPercentage 67` (right view 2059 wide at x 2060) | 9.3 % differ: 2060 is not a multiple of 64, so the run in place reads another phase of the pass's 64x64 noise (`SV_Position & 63`) than the reference; non-zero 7.03 / 7.05 %, mean alpha equal (`s7`); `equal` 0 differ |
+
+The few differing pixels are hits found or missed at the threshold of the ray march (the
+largest differences are single bright pixels of the previous frame's colour); they are of the
+order of what a recompiled but equivalent shader gives (the one `equal` run that differed
+shows the same kind of difference with nothing changed but the one operand). That they shrink
+after the first half-minute matches the driver replacing its first compilation of new shaders
+by an optimised one (INFERRED).
+
+Against the game's own picture of the right eye at the origin (`stereo swap 1` renders the
+right eye into the left half with the game's shader; the following frames, `s5`, foveation
+on; read-backs of the reflection target at 1/4 size; correlation of 8x8-pixel block means of
+the reflection images, `captures/ssrfix/compare_eyes.py`):
+
+| Comparison | Colour | Alpha | Non-zero pixels |
+|---|---|---|---|
+| right eye, `ssr_fix = 3`, against the right eye at the origin (two frames) | 0.82, 0.84 | 0.70, 0.77 | 5.1 / 5.0 % |
+| the same eye in two frames, both `ssr_fix = 3` (what frame-to-frame variation alone gives: noise slice, jitter, animation) | 0.82 | 0.71 | 5.1 / 5.0 % |
+| left eye in two frames, the game's own run | 0.80 | 0.65 | 5.6 / 5.4 % |
+| right eye, `ssr_fix = 1`, against the right eye at the origin | 0.01 | 0.06 | 19.3 / 5.0 % |
+
+Two identical cameras (`stereo host fixed`, `stereo ipd 0`, symmetric field of view; one
+frame, left half against right half; `s5`): `ssr_fix = 3` 0.91 (alpha 0.91), non-zero 5.3 /
+5.2 %; `ssr_fix = 1` 0.06 (0.15), 5.3 / 18.4 %; `ssr_fix = 0` the right half empty. (The two
+views still differ by their anti-aliasing jitter and noise slice, which belong to each view's
+state; `docs/re/engine.md`.) Overlays of each view's reflections on its scene colour:
+`s2/tr3_overlay.png` (mode 3: the same reflections in both views, on the pillar, the grating,
+the lamp, the spot under the tank) against `s1/tr1_overlay.png` (mode 1: specks over the
+ceiling, a dense band at the right view's left edge).
+
+`ssr poison 1` (everything left of the right run's part filled with magenta after it): 0 magenta
+pixels in either eye (`s2`, `s5`, `s7`); `ssr poison 2` (control): 41.7 / 32.5 % of the eye images
+magenta (`s7`, foveation off; `s5` with foveation 41.7 / 32.8 %; `s2` 50.8 / 54.4 %). Counters in every run:
+`drawn in place` = stereo frames, `frames without it` 0. In the final eye images of this scene
+the reflections are weak and the modes are hard to tell apart (`s2/sheet_R_fix2_fix3_fix1.png`,
+right eye, modes 2, 3, 1); the tests above are the proof.
+
+Cost (frame cap lifted, `xr.null_pace = 0`, 5 s windows alternating, same spot):
+
+| Frame time | foveation off | foveation `performance` (the packages' default) |
+|---|---|---|
+| `ssr_fix = 3` | 8.62, 8.61, 8.64 ms (`s7`); 8.31, 8.30, 8.33 (`s2`, other ini) | 6.63, 6.63, 6.63 (`s7`); 6.61, 6.60, 6.62 (`s5`) |
+| `ssr_fix = 2` (no screen-space reflections) | 8.15, 8.18, 8.18 (`s7`); 7.82, 7.83 (`s2`) | 6.44, 6.45, 6.44 (`s7`); 6.41, 6.43 (`s5`) |
+| difference | +0.45 to +0.48 ms | +0.19 ms |
+
+`ssr_fix = 1` cost 8.37 ms in `s2`: mode 3 is slightly cheaper (no copy, no scratch target).
+With foveation the reflection pass is shaded at the coarser rates outside the centre in both
+eyes (it runs inside foveation's scene window; INFERRED from the cost and from the tests
+above), as it was for the left eye before.
 
 ### Bloom and occlusion fixes at reduced view rectangles
 

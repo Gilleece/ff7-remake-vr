@@ -16,7 +16,7 @@ Tested on Quest 3 and Pico 4 ultra so far, any openXR headset should work but if
 
 Known problems right now (details in `GUIDE.md`):
 
-- Screen-space reflections are off in 3D: the game's reflection pass gets the right eye wrong, so the eyes would not match. `[stereo] ssr_fix = 1` brings them back (wrong in the right eye).
+- Screen-space reflections (puddles, wet floors, metal) are now drawn in both eyes, each eye its own (`[stereo] ssr_fix = 3`, new); checked without a headset only. `ssr_fix = 2` switches them off in both eyes if they look wrong.
 - Pre-rendered movies can drop to a slideshow. It looks like a GPU upload slowdown rather than the movie itself and is still being looked at; waiting a minute and a half between restarts of the game helps.
 - Heat haze over fire broke the right eye; fixed, not yet confirmed in a headset.
 - The gamepad combinations need an XInput pad (Xbox, 8BitDo in XInput mode); a DualSense or any pad in DirectInput mode is read by the game itself and the combinations do not apply (use the keys).

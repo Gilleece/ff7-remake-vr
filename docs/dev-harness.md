@@ -191,6 +191,7 @@ Copied next to the DLL by the build and by `deploy.ps1`. Every key is optional.
 | `[crash] full_memory` | `0` | Full-memory minidumps (several GB) |
 | `[dev] pipe` | `0` | Serve `\\.\pipe\ff7vr-dev` (ping, log markers, virtual pad) |
 | `[dev] virtual_pad` | `0` | Merge an injected pad state into XInput user 0 |
+| `[dev] keep_shaders` | `0` | Keep the bytecode of every pixel shader the game creates, for `shader dump` / `ssr shader` (a few MB; read at start-up) |
 | `[debug] crash_after_seconds` | `0` | Crash on purpose N seconds after start (tests the crash handler) |
 
 Use another ini for a run with `launch.ps1 -Ini path\to\test.ini`.

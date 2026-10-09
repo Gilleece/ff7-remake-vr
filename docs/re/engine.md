@@ -735,7 +735,7 @@ of Square Enix's passes do not: they put every view's data at the origin of thei
 | Custom glare (`CustomGlare`, `CombinedExtraGlare`) | each view at the origin of one shared target | not exercised: no glare primitives in the scenes tested; see below |
 | Ambient occlusion (full-size setup at the view's rectangle; three half-size passes, pooled under names shared with the subsurface targets, `SubsurfaceBlurY` / `SubsurfaceBlurX` / `AmbientOcclusionDownsample`; resolve into `ScreenSpaceAO` + `AmbientOcclusionResolve` at the view's rectangle) | half-size passes at the origin | **no** (fixed by the mod), see below |
 | Ray-traced shadows (compute, `RayTracedShadows`, 3072x1632 at eyes 3072x3264, one 192x204-group dispatch per view, consumed by a per-view instanced draw into `CapsuleShadow`) | each view at the origin quarter | yes as far as checked: the two views' results differ (mean difference 3.3 of 255) |
-| Screen-space reflections (Square Enix's, before the reflection composite) | each view's draw covers the whole double-wide target and writes its result at the origin; the right view's draw leaves the right half at 0 | **no**: only a view whose rectangle starts at the origin gets correct reflections. The right view's draw reads its GBuffers, depth and colours at its own rectangle but finds hits in the wrong places (specks over floors, bands on walls); the fault follows the position in the target (`stereo swap 1`), not the view. The mod's `ssr_fix` moves that result into the right half; `ssr_fix = 2` clears both. Details and tests: `docs/engine-module.md`, "The right eye's reflections are not its own". The left view's draw also writes meaningless values into the right half, which the right view's draw then overwrites |
+| Screen-space reflections (Square Enix's, before the reflection composite) | each view's draw covers the whole double-wide target and writes its result at the origin; the right view's draw leaves the right half at 0 | **no** (fixed by the mod): only a view whose rectangle starts at the origin gets correct reflections. The pixel shader loads its inputs at `SV_Position + ViewRectMin` but derives the screen position from `SV_Position - ViewRectMin` ("Screen-space reflections: the pixel shader" below). `ssr_fix = 3` draws the right view's run in place with a patched copy of the shader; `ssr_fix = 1` (older) moved the wrong result into the right half; `ssr_fix = 2` clears both. Details and tests: `docs/engine-module.md`, "Reflections per eye" and the sections after it. The left view's draw also writes meaningless values into the right half, which the right view's draw then overwrites |
 | Distortion (heat haze, refraction: `Distortion` full size, `DistortDirection`, `DistortHistory`, two `DistortBlurred` at half size, then a composite into the scene colour) | half-size passes at the view's own half-size rectangle (stock layout); the composite's draw is given the view's size as its target size inside a viewport covering the whole double-wide target | **no** (fixed by the mod): the left view's composite covers both eyes and the right view's composite draws nothing, see below |
 
 ### The right-eye ghost: the bloom's first pass (LIVE, fixed)
@@ -868,6 +868,106 @@ never ran it.
   4128x2208 target), the right composite 0; at `render_scale 0.65` the same.
 - Fix: `src/engine/src/distortion_fix.cpp`, `docs/engine-module.md` "Right-eye distortion
   fix" (with it: 4 557 312 pixels per eye, 1 924 608 at 0.65).
+
+### Screen-space reflections: the pixel shader (LIVE, bytecode disassembled, fixed)
+
+Why the right view's reflection run is wrong, read from the pass's own pixel shader
+(09/10, eyes 3072x3264, Null backend; runs `captures/ssrfix/s1` and `s2`, local).
+
+- How the bytecode was obtained: `ID3D11Device::CreatePixelShader` is hooked from start-up
+  (`src/engine/src/shaders.cpp`; the function is found through a throwaway device of the NULL
+  driver, whose device class is the game's). The engine creates its shaders on first use, so
+  every pixel shader of the game passes through the hook (109 by the first stereo frames of
+  the test save). With `[dev] keep_shaders = 1` the bytecode of every shader is kept, and
+  `shader dump <pointer> <prefix>` (the pointer as `gpu trace` logs it) or `ssr shader
+  <prefix>` writes the `.dxbc` and its disassembly (`D3DDisassemble`, `.asm`). The DXBC
+  checksum (bytes 4-19) identifies a shader exactly. The mod recomputes it (MD5's block
+  function with the container's own padding: the bit count in the first word of the last
+  block and `(bits >> 2) | 1` in its last word, no final MD5 step; `shaders.cpp`): `shader
+  check` compared it with the stored one for all 109 shaders, 0 differ, and the runtime
+  accepts the re-signed patched copy below.
+- The pass's pixel shader (one object for both views): DXBC checksum
+  `3c1fb8a30946e77121001676e698c71e`, 7852 bytes, `ps_5_0`. Inputs: `t0` a 64x64x64 noise
+  volume, `t1` normals, `t2` a GBuffer whose fourth channel's low four bits are the shading
+  model (0: nothing to reflect, the pixel writes 0), `t3` a second normal (read for shading
+  models 1 and 5), `t4` scene depth, `t5` the view's hierarchical depth (the second chain, see
+  "Hierarchical depth" in `docs/engine-module.md`), `t6` velocity, `t7` and `t8` the
+  previous frame's scene colour (the per-view copies). `cb0` is the pass's own buffer (rows
+  used: 18 = HZBUvFactorAndInvFactor, `0.375 0.797 2.667 1.255` with the 4096x2048
+  hierarchical depth; 19 intensities; 20.y the previous colour's exposure scale), `cb1` the
+  view uniform buffer (4096 bytes, 140 rows declared). A second shader with the same pattern
+  (checksum `d08d5de8f8c3c0342fcb5998f7be4d17`, 11992 bytes) is created half a second before
+  it; no traced frame draws it (INFERRED: another quality level of the same pass). It gets a
+  patched copy too, used the same way if a reflection run binds it.
+- View uniform buffer rows the shader reads (checked in both views' dumps; `gpu trace
+  <prefix> dump fullscreen cbs 1` writes every constant buffer of a read-back event as
+  `<prefix>_<seq>_pscb<n>.bin`):
+
+  | Row | Field | Left view | Right view |
+  |---|---|---|---|
+  | 0-3 | TranslatedWorldToClip | own | own |
+  | 24, 26 | ViewToClip (columns) | own | own |
+  | 44-47 | ScreenToTranslatedWorld | own | own |
+  | 57 | InvDeviceZToWorldZTransform | `0 0 0.1 -1e-08` | same |
+  | 58 | ScreenPositionScaleBias | `0.25 -0.5 0.5 0.25` | `0.25 -0.5 0.5 0.75` |
+  | 60 | TranslatedWorldCameraOrigin | `0 0 0 0` | same |
+  | 114-117 | ClipToPrevClip | own | own |
+  | 121 | ViewRectMin | `0 0 0 0` | `3072 0 0 0` |
+  | 122 | ViewSizeAndInvSize | `3072 3264 1/3072 1/3264` | same |
+  | 123 | the previous frame's ScreenPositionScaleBias | as row 58 | as row 58 |
+  | 124 | the previous frame's ViewRectMin | `0 0 0 0` | `3072 0 0 0` |
+  | 125 | the previous frame's ViewSize | `3072 3264 ...` | same |
+  | 126 | BufferSizeAndInvSize | `6144 3264 ...` | same |
+  | 128.x | pre-exposure | `0.0413` | same |
+  | 139.z | the view state's frame index modulo 8 (noise slice) | 5 | 0 |
+
+  Rows 139 and 147 belong to each view's own state (INFERRED from the values: `147.x` the
+  anti-aliasing sample index, `.y` the sample count 8, `.zw` the jitter); in both frames
+  dumped the two views were 5 apart in that sequence, so even two identical cameras get
+  different jitter and noise slices.
+- **The fault**: the shader's first instruction and the one that starts the screen position
+  disagree about what `SV_Position` is relative to:
+
+  ```
+  add r0.xy, v1.xyxx, cb1[121].xyxx      // SV_Position + ViewRectMin: t1-t4 are loaded here
+  ...
+  add r4.xy, v1.xyxx, -cb1[121].xyxx     // SV_Position - ViewRectMin, * 1/ViewSize (row 122.zw),
+  mul r4.xy, r4.xyxx, cb1[122].zwzz      //   * (2, -2) + (-1, 1): the screen position the world
+                                         //   position of the ray's start is built from (rows 44-47)
+  ```
+
+  The first treats `SV_Position` as relative to the view, the second as relative to the
+  target. For the left view (`ViewRectMin = 0`) they agree. For the right view drawn over the
+  whole target (the game's draw), a pixel left of x 3072 loads the right view's surfaces with
+  a screen position two view widths too far left, so its ray starts from a wrong point; a
+  pixel right of x 3072 loads outside the textures (zeros, shading model 0) and writes 0, the
+  "right half exactly 0" of the first traces. Drawn into a scratch target at the origin
+  (`ssr_fix = 1`) the surfaces are right and the ray starts are still two widths off: the
+  specks and bands. Every other position in the shader is relative to the target and right
+  for either view: the ray is marched in the view's clip space and hierarchical depth
+  (`cb0[18]`); the hit becomes a target pixel through rows 58 and 126, clamped to the view's
+  rectangle (121, 122) for the velocity read; the previous colour is read through rows
+  123-126; the noise uses `SV_Position & 63` (3072 is a multiple of 64).
+- No constant-buffer change alone makes the right view's run correct: drawn at its own
+  rectangle (`SV_Position = 3072 + p`) the load needs row 121 = 0 and the screen position
+  needs 3072. (Drawn at an offset `s` in a scratch target, `s = ViewRectMin.x = 1536` with
+  row 122.x widened to 4608 for the velocity clamp satisfies both, at the cost of a 4608-wide
+  scratch target and a copy; not used.)
+- **The patch** (`shaders.cpp`, `find_view_origin_add`): in a copy of the bytecode the
+  constant operand of the first instruction selects `.zzzz` instead of `.xyxx` (the operand
+  token's swizzle bits 4-11, `0x04` to `0xAA`). `ViewRectMin.zw` is 0 (UE 4.18 fills it as
+  `(x, y, 0, 0)`; both views' dumps show 0), so the load becomes `SV_Position + 0`: the shader
+  is then right for a view at any rectangle of the target and unchanged for a view at the
+  origin. The copy is re-signed and created next to the original when the game creates the
+  original. The match is structural, not by checksum: a pixel shader with exactly one `add
+  rX, vN, cbM[R]` and one `add rY, vN, -cbM[R]` (same input register and constant row) is
+  patched. Of the 55 pixel shaders of a traced frame only the reflection pass matches (one
+  other uses `-cb1[121]` alone). Use and tests: `docs/engine-module.md`, "Right-eye
+  reflections drawn in place". Verified: drawn at the origin the copy gives the original's
+  output bit for bit (0 of 10 027 008 pixels differ in 9 of 10 runs, as the game's shader drawn
+  twice); drawn in place for the right view it matches the same view computed by the game's
+  shader at the origin (the reference of `ssr test shift`) in all but 0.001 to 0.12 % of the
+  pixels, at most 144 of them by more than 0.01 (tests with foveation off; see that section).
 
 ### Other FViewInfo fields seen (STATIC + LIVE)
 
@@ -1161,6 +1261,7 @@ library folders (or `FF7R_EXE`, or a path argument).
 | `live_check.py` | Read-only inspection of a running game: GEngine, device and vtable, controller refcounts, XRSystem, viewport size and separate-target state, render target texture and its native resource, local player view states, a few cvars, `GSystemResolution`. |
 | `pe_info.py [exe]` | Exe identity: hashes, PE header, sections with entropy, imports, TLS, packer/DRM markers. |
 | `ff7re.py` | Library: image loading by RVA, string search, RIP-relative xref scan, `.pdata` function bounds, control-flow disassembly, vtable helpers. |
+| `dxbc_tool.py check\|asm\|origin <file.dxbc>` | Shader bytecode written by `shader dump`: recomputes and compares the DXBC checksum, disassembles (d3dcompiler_47), finds the view-origin add of the reflection pass and writes the patched, re-signed copy (the patch the mod applies at run time; see "Screen-space reflections: the pixel shader"). |
 | `gpu_trace_view.py` | Views a one-frame GPU trace of the running game (dev pipe `gpu trace`): `sheet` makes contact sheets of the read-backs (optionally only one eye's half), `png` converts read-backs, `passes` sums GPU time per render target. |
 
 ### One-frame GPU trace (in the mod, dev pipe)
@@ -1169,7 +1270,10 @@ library folders (or `FF7R_EXE`, or a path argument).
 gpu names on                                   # label textures with the engine's pool names (before 'stereo on')
 gpu trace <abs prefix>                         # next stereo frame: every draw/dispatch/clear/copy with its state
 gpu trace <abs prefix> dump fullscreen scale 4 # plus a read-back of every full-screen pass and its constants
+gpu trace <abs prefix> dump fullscreen cbs 1   # plus every constant buffer of those passes as binary files
 gpu status
+shader dump <ps pointer> <abs prefix>          # a pixel shader's bytecode (.dxbc) and disassembly (.asm)
+                                               # (needs [dev] keep_shaders = 1 from start-up)
 python tools/re/gpu_trace_view.py sheet <prefix> out.png --from N --to M
 ```
 
