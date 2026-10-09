@@ -28,8 +28,6 @@ namespace {
 
 using namespace ff7vr;
 
-constexpr char kVersion[] = "0.1.0";
-
 Config g_config;
 std::vector<std::string> g_profile_log;  // [graphics] profile, logged once the log is open
 HANDLE g_bootstrap = nullptr;
@@ -116,7 +114,7 @@ void log_identity(const std::filesystem::path& dll_dir) {
     std::error_code ec;
     auto exe_size = std::filesystem::file_size(game.path, ec);
 
-    log::info("ff7vr {} loaded (commit {}, built {} {})", kVersion, FF7VR_GIT_COMMIT, FF7VR_BUILD_TIME_UTC,
+    log::info("ff7vr {} loaded (commit {}, built {} {})", FF7VR_VERSION, FF7VR_GIT_COMMIT, FF7VR_BUILD_TIME_UTC,
               FF7VR_BUILD_TYPE);
     log::info("dll: {} base 0x{:x} size 0x{:x}", log::narrow(self.path.wstring()), self.base, self.size);
     log::info("exe: {}", log::narrow(game.path.wstring()));

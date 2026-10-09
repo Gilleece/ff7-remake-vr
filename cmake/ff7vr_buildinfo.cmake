@@ -1,4 +1,4 @@
-# Generates ff7vr_buildinfo.h with the git commit and build time, refreshed on
+# Generates ff7vr_buildinfo.h with the version (git describe), the git commit and build time, refreshed on
 # every build (not only at configure time) so the log always identifies the
 # exact binary.
 
