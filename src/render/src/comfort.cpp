@@ -19,7 +19,7 @@ namespace ff7vr::render {
 namespace {
 
 std::atomic<StickSource> g_source{nullptr};
-std::atomic<float> g_sharpen{0.0f};
+std::atomic<float> g_sharpen{0.5f};
 
 struct Settings {
     float vignette = 0.0f;  // strength at full stick deflection, 0 = off
@@ -77,7 +77,7 @@ void Start(const Config& c) {
                       "comfort status | vignette <0..1> | radius <half-heights> | softness <half-heights> | test 0|1: the comfort vignette "
                       "while the sticks move or turn the view",
                       [](std::string_view args) { return Command(std::string(args)); });
-    g_sharpen = static_cast<float>(std::clamp(c.get_float("picture", "sharpen", 0.0), 0.0, 1.0));
+    g_sharpen = static_cast<float>(std::clamp(c.get_float("picture", "sharpen", 0.5), 0.0, 1.0));
     log::info("render: picture sharpen {:.2f}", g_sharpen.load());
     dev_commands::add("sharpen", "sharpen [0..1]: the unsharp mask of the eye images ([picture] sharpen); no value = status",
                       [](std::string_view args) {

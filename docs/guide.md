@@ -262,8 +262,8 @@ session it is `ff7vr.log` in the game's `End\Binaries\Win64` folder).
    too dark or washed out compared with the monitor.
 5. **Load a save. The world in 3D.** Correct depth, both eyes aligned (no double
    vision when looking at a near object), the horizon level, the scene stable when
-   you turn your head. If it looks soft (DLSS, a lower render scale), `[picture]
-   sharpen = 0.3` sharpens the 3D view. The log shows `stereo: rendering STEREO ... (eye WxH ...)` with
+   you turn your head. The 3D view is sharpened a little by default (`[picture]
+   sharpen = 0.5`; `0` turns it off, `1` is strong). The log shows `stereo: rendering STEREO ... (eye WxH ...)` with
    the per-eye size the headset's runtime asked for.
 6. **Smoothness.** Turning your head must feel smooth. The log's `timing:` lines
    every 10 seconds show the frame rate and `errors 0`.

@@ -23,7 +23,7 @@ xr::Vignette Update(const xr::Fov fov[2]);
 
 std::string Command(const std::string& args);
 
-// [picture] sharpen (0..1, 0 = off), the eye images' unsharp mask; live: `sharpen <v>`.
+// [picture] sharpen (0..1, default 0.5, 0 = off), the eye images' unsharp mask; live: `sharpen <v>`.
 float Sharpen();
 
 }  // namespace ff7vr::render::comfort

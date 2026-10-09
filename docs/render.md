@@ -590,7 +590,7 @@ repository).
 
 ### Sharpening
 
-`[picture] sharpen` (0..1, default `0` = off; live: `sharpen <v>`) is an unsharp
+`[picture] sharpen` (0..1, default `0.5`, `0` = off; live: `sharpen <v>`) is an unsharp
 mask in the eye blit, for a picture that looks soft with DLSS or a reduced render
 scale: the pixel's Rec. 709 luminance minus the mean of its four direct neighbours,
 times the amount, is added to all three channels (no colour fringes), limited to
