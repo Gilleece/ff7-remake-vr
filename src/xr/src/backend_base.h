@@ -119,6 +119,44 @@ protected:
     bool TransferEye(Eye eye, const SubmitDesc& desc, const EyeTarget& target, uint32_t* outW, uint32_t* outH);
     bool TransferQuad(const SubmitDesc& desc, const QuadLayer& q, const EyeTarget& target, uint32_t* outW, uint32_t* outH);
     static Rect EyeRect(const SubmitDesc& desc, Eye eye);
+    // Depth (XR_KHR_composition_layer_depth). depth_[e] are the depth swapchains (OpenXR)
+    // or emulated images (Null); depthFormat_ their format (UNKNOWN: none). Per eye, the
+    // depth image released last belongs to the colour image released last when
+    // depthValid_[e] (written for it, with depthNear_/depthFar_).
+    SwapImages depth_[2];
+    DXGI_FORMAT depthFormat_ = DXGI_FORMAT_UNKNOWN;
+    bool depthValid_[2]{};
+    float depthNear_[2]{}, depthFar_[2]{};
+    std::atomic<bool> depthOff_{false};  // switched off for the session after a runtime error
+    // The depth-stencil view format for a depth swapchain format.
+    static DXGI_FORMAT DepthViewFormat(DXGI_FORMAT swapchainFormat);
+    // RT, inside a saved-state scope: writes eye `eye`'s region of desc.depth into `t`
+    // at (0, 0, w, h) (the size of the eye's colour image).
+    bool TransferDepthEye(Eye eye, const SubmitDesc& desc, const EyeTarget& t, uint32_t w, uint32_t h);
+    // Depth, after an eye's colour image was handled this frame: `colourUpdated` = a new
+    // colour image was released. Writes the eye's depth image when the frame has depth,
+    // and keeps depthValid_ telling whether the depth image matches the colour image.
+    // `update(sc, transfer)` acquires / transfers / releases like the colour path
+    // (returns true when the image was released with the new content).
+    template <class Update>
+    void UpdateDepthEye(int e, const SubmitDesc& desc, bool colourUpdated, uint32_t w, uint32_t h, Update&& update) {
+        if (!colourUpdated) return;  // the colour image kept: so does the depth image
+        depthValid_[e] = false;
+        if (depthFormat_ == DXGI_FORMAT_UNKNOWN || depthOff_.load(std::memory_order_relaxed) || !desc.depth.texture) return;
+        const bool ok = update(depth_[e], [&](const EyeTarget& t) { return TransferDepthEye(static_cast<Eye>(e), desc, t, w, h); });
+        if (ok) {
+            depthValid_[e] = true;
+            depthNear_[e] = desc.depth.nearZ;
+            depthFar_[e] = desc.depth.farZ;
+            depth_[e].lastW = w;
+            depth_[e].lastH = h;
+            CountStat(&FrameStats::depthImages);
+        } else {
+            CountStat(&FrameStats::depthFailures);
+        }
+    }
+    // RT: the depth images of the frame go into an active capture (<prefix>_depthL.png / R).
+    void CaptureDepthImages();
     static Rect QuadRect(const QuadLayer& q);
     // Raw (pre-recenter) view an eye image was rendered with.
     static View SubmittedView(const FrameRecord& r, const SubmitDesc& desc, int eye);

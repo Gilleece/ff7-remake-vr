@@ -16,16 +16,18 @@
 //                                     runtime events, returns poses for the
 //                                     predicted display time and a frameId.
 //   RT: BeginFrame(info.frameId)   -> xrBeginFrame.
-//   RT: (optional) RelocateViews(frameId, views)   late pose update.
+//   any: (optional) RelocateViews(frameId, views)  late pose update.
 //   RT: render both eyes into one texture (side by side or any layout).
 //   RT: SubmitFrame(frameId, desc) -> copy/blit into runtime swapchains, xrEndFrame.
 //
 // Rules:
 //   1. WaitFrame is called from ONE thread (normally GT). Not reentrant.
-//   2. BeginFrame/SubmitFrame/SkipFrame/RelocateViews are called from ONE thread
+//   2. BeginFrame/SubmitFrame/SkipFrame are called from ONE thread
 //      (normally RT), and that thread must be the only user of the device's
 //      immediate context while they run (they use it, and so may the runtime).
 //      They may run concurrently with WaitFrame on the other thread.
+//      RelocateViews may be called from any thread (xrLocateViews has no
+//      externally synchronised parameter); it uses no D3D11 context.
 //   3. Every frameId returned with info.sessionRunning == true MUST eventually
 //      get BeginFrame + (SubmitFrame or SkipFrame), in increasing frameId order.
 //      OpenXR blocks the next xrWaitFrame until the previous frame was begun,
@@ -56,8 +58,15 @@
 //   * it is what every runtime supports best (per-view swapchains are the
 //     common path in SteamVR, VDXR, Oculus);
 //   * the cost difference is one extra CopySubresourceRegion per frame.
-// A depth layer (XR_KHR_composition_layer_depth) will add one depth
-// swapchain per eye chained to the same views.
+// Depth (XR_KHR_composition_layer_depth): with InitDesc::depthLayer and the
+// extension enabled, one depth swapchain per eye of the eye swapchains' size.
+// A frame whose SubmitDesc::depth names a texture gets each eye's region of it
+// written into that eye's depth image (a full-screen pass that writes the
+// depth, scaled to the eye image's size), and an XrCompositionLayerDepthInfoKHR
+// chained to the eye's projection view. The runtime can then re-project late
+// frames with the scene's depth (positional time warp). An eye that keeps its
+// last image keeps its last depth image. A runtime error while depth is
+// chained switches depth off for the rest of the session (logged).
 //
 // ============================ QUAD LAYERS ==================================
 // A quad layer is a flat rectangle placed in space (a virtual screen, a HUD
@@ -218,9 +227,12 @@ struct InitDesc {
     // R10G10B10A2_UNORM, R8G8B8A8_UNORM, B8G8R8A8_UNORM offered by the runtime.
     DXGI_FORMAT swapchainFormat = DXGI_FORMAT_UNKNOWN;
 
-    // Request XR_KHR_composition_layer_depth if available (not used yet; reserved
-    // so a depth layer can be added without API change).
+    // Request XR_KHR_composition_layer_depth if available.
     bool requestDepthExtension = true;
+    // Create a depth swapchain per eye when the extension is enabled (see
+    // SWAPCHAINS). Depth is submitted only for frames whose SubmitDesc::depth
+    // names a texture.
+    bool depthLayer = true;
     // Enable XR_EXT_debug_utils messages from the runtime/loader into the log (if offered).
     bool enableDebugUtils = false;
     // Disable every implicit OpenXR API layer registered on the machine (OpenXR
@@ -262,6 +274,9 @@ struct RuntimeInfo {
     SwapchainInfo eyeSwapchain[2];
     bool orientationTracking = false, positionTracking = false;
     bool depthLayerSupported = false;  // XR_KHR_composition_layer_depth enabled
+    // Format of the depth swapchains (UNKNOWN: none, see depthNote).
+    DXGI_FORMAT depthSwapchainFormat = DXGI_FORMAT_UNKNOWN;
+    std::string depthNote;  // why there are no depth swapchains, or why depth was switched off
     // Eye gaze source in use (InitDesc::eyeGaze): "XR_EXT_eye_gaze_interaction",
     // "XR_FB_eye_tracking_social", "simulated" (Null backend); "" = none.
     std::string gazeSource;
@@ -351,6 +366,20 @@ struct Vignette {
     bool IsNone() const { return strength <= 0.0f; }
 };
 
+// Scene depth for the projection layer (XR_KHR_composition_layer_depth). Values
+// are read from `texture` through a view of `srvFormat` (the depth plane:
+// R32_FLOAT_X8X24_TYPELESS, R24_UNORM_X8_TYPELESS, R32_FLOAT or R16_UNORM) and
+// written unchanged; each eye's rect is scaled (nearest) to the eye image's size.
+// minDepth/maxDepth/nearZ/farZ as in XrCompositionLayerDepthInfoKHR: nearZ is the
+// distance in metres at minDepth, farZ at maxDepth (nearZ > farZ: reversed depth).
+struct DepthSubmit {
+    ID3D11Texture2D* texture = nullptr;  // null: no depth this frame
+    DXGI_FORMAT srvFormat = DXGI_FORMAT_UNKNOWN;
+    Rect rect[2]{};
+    float minDepth = 0.0f, maxDepth = 1.0f;
+    float nearZ = 0.0f, farZ = 0.0f;
+};
+
 struct EyeSubmit {
     // Region of the source texture holding this eye, in pixels of the selected
     // mip, origin top-left. width or height 0 = the left (Eye::Left) or right
@@ -437,6 +466,8 @@ struct SubmitDesc {
     Vignette vignette{};
     // Eye images only: unsharp mask on luminance, 0 = none, 1 = strong ([picture] sharpen).
     float sharpen = 0.0f;
+    // Scene depth for the eyes updated this frame (ignored without depth swapchains).
+    DepthSubmit depth{};
 };
 
 // The part of an eye's image the headset cannot show (lens edges, display corners),
@@ -466,6 +497,9 @@ struct FrameStats {
     uint64_t copyPath = 0, blitPath = 0;  // per-image submission paths used (eyes and quads)
     uint64_t quadUpdates = 0;             // quad layer images copied in
     uint64_t imageWaitTimeouts = 0;       // xrWaitSwapchainImage timed out (image kept for the next frame)
+    uint64_t depthImages = 0;             // eye depth images written
+    uint64_t depthLayers = 0;             // frames ended with depth chained to both projection views
+    uint64_t depthFailures = 0;           // depth images that could not be written (the frame went without depth)
     // Cumulative CPU time spent inside runtime calls on the submitting thread (OpenXR), milliseconds.
     double acquireWaitMs = 0;  // xrAcquireSwapchainImage + xrWaitSwapchainImage
     double releaseMs = 0;      // xrReleaseSwapchainImage
@@ -492,8 +526,12 @@ public:
 
     // RT.
     virtual Result BeginFrame(uint64_t frameId) = 0;
-    // RT, optional: re-locate the eyes for frameId's display time (late latching).
-    // The returned views replace the frame's views for submission.
+    // Any thread, optional: locates the eyes again for frameId's predicted display
+    // time (late latching), with the frame's recenter. Changes nothing the frame
+    // records: what the runtime is told the image was rendered with is decided by
+    // the views passed to SubmitFrame (EyeSubmit::viewOverride). Ok with the late
+    // views when the runtime reports them fully tracked and finite; otherwise an
+    // error and outViews untouched (keep the frame's views).
     virtual Result RelocateViews(uint64_t frameId, View outViews[2]) = 0;
     // RT. Copies the eye regions into the runtime swapchains and ends the frame.
     virtual Result SubmitFrame(uint64_t frameId, const SubmitDesc& desc) = 0;

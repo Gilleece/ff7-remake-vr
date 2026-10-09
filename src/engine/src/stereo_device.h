@@ -9,6 +9,7 @@
 
 #include "fixed_host.h"
 #include "mirror.h"
+#include "ue_math.h"
 
 #include "ff7vr/engine/stereo_abi.h"
 #include "ff7vr/engine/stereo_host.h"
@@ -71,5 +72,20 @@ std::string last_views();
 // Dev command `stereo framelog start | stop <csv>` (arguments as split by the command parser,
 // a[0] = "stereo", a[1] = "framelog").
 std::string framelog_command(const std::vector<std::string>& a);
+
+// Late update (late_update.h). A queued stereo frame: its host frame id, the eye cameras
+// built for it (the inputs of math::compose_eye and the results) and its views.
+struct LateCandidate {
+    std::uint64_t frame_id = 0;
+    math::EyeCameraInput in[2]{};
+    ue::FVector loc[2]{};
+    ue::FRotator rot[2]{};
+    HostView views[2]{};
+};
+// Render thread: the stereo frames queued for the render thread (oldest first), at most max.
+std::size_t late_candidates(LateCandidate* out, std::size_t max);
+// Render thread: the frame `frame_id` whose left eye was built at `left_origin` was
+// rendered with `views` (located at QPC `qpc`): they are handed over with its image.
+bool late_commit(std::uint64_t frame_id, const ue::FVector& left_origin, const HostView views[2], std::int64_t qpc);
 
 }  // namespace ff7vr::engine::device

@@ -64,6 +64,7 @@ void XrController::Start(const RenderConfig& cfg) {
     waitOnPresent_ = cfg_.waitOnPresentThread;
     uiOn_ = cfg_.uiLayer;
     uiMirror_ = cfg_.uiMirror;
+    depthOn_ = cfg_.depthLayer;
     {
         std::lock_guard lk(pictureMutex_);
         picture_ = ClampPicture(cfg_.picture);
@@ -72,9 +73,14 @@ void XrController::Start(const RenderConfig& cfg) {
     lastStatsQpc_ = QpcNow();
     dev_commands::add("xr-sim",
                       "xr-sim status | head <yaw deg> [pitch deg] [x y z m] | recenter-event [nopose] [delay <frames>] | lose orientation|position "
-                      "<frames> | gaze <yaw> <pitch> | gaze off | gaze sweep [radius deg] [period s] | gaze blink <frames>: Null backend only, emulate the "
-                      "headset's head pose, its own recenter, lost tracking, or an eye tracker",
+                      "<frames> | gaze <yaw> <pitch> | gaze off | gaze sweep [radius deg] [period s] | gaze blink <frames> | yawrate <deg/s> | late-yaw <deg> | "
+                      "depth: Null backend only, emulate the headset's head pose, its own recenter, lost tracking, an eye tracker, a turning head, "
+                      "an offset only late locations see; depth layer counters",
                       [this](std::string_view a) { return SimulateCommand(std::string(a)); });
+    dev_commands::add("xr-depth",
+                      "xr-depth status | on | off | dump <path prefix>: the scene depth with the projection layer (XR_KHR_composition_layer_depth); "
+                      "dump = a capture that also writes <prefix>_depthL.png / _depthR.png",
+                      [this](std::string_view a) { return DepthCommand(std::string(a)); });
     thread_ = std::thread([this] { ThreadMain(); });
     if (cfg_.stereoTest) stereoTest_ = std::thread([this] { StereoTestThread(); });
 }
@@ -206,6 +212,7 @@ void XrController::TryInit() {
     d.null.refreshHz = cfg_.nullRefreshHz;
     d.null.paceToRefresh = cfg_.nullPace;
     d.null.motion = cfg_.nullMotion;
+    d.depthLayer = cfg_.depthLayer;
 
     auto be = xr::CreateBackend(cfg_.backend);
     const int64_t t0 = QpcNow();
@@ -235,6 +242,10 @@ void XrController::TryInit() {
               ri.runtimeVersion, ri.systemName, ri.eyeSwapchain[0].width, ri.eyeSwapchain[0].height,
               xr::DxgiFormatName(ri.eyeSwapchain[0].format), ri.eyeSwapchain[0].imageCount, ri.refreshHz, ri.adapterLuid);
     for (const auto& l : ri.implicitLayers) log::info("xr:   implicit API layer {}", l);
+    depthAvailable_ = ri.depthSwapchainFormat != DXGI_FORMAT_UNKNOWN;
+    log::info("xr: depth layer {}{}", depthAvailable_.load() ? std::string("available, swapchains ") + xr::DxgiFormatName(ri.depthSwapchainFormat)
+                                                             : std::string("not available: ") + ri.depthNote,
+              depthAvailable_.load() ? (depthOn_.load() ? ", on" : ", off ([xr] depth_layer = 0)") : "");
     failedAttempts_ = 0;
     lastInitResult_ = xr::Result::Ok;
     {
@@ -380,6 +391,8 @@ void XrController::Teardown(TeardownReason why, const char* text) {
         std::unique_lock<std::mutex> rl(rtMutex_, std::defer_lock);
         for (int i = 0; i < 200 && !rl.try_lock(); ++i) Sleep(5);
         ready_ = false;
+        depthAvailable_ = false;
+        std::lock_guard relocLock(relocMutex_);  // a late location in progress finishes first (never waits on anything)
         if (backend_) {
             backend_->Shutdown();
             backend_.reset();
@@ -653,6 +666,7 @@ void XrController::SubmitOne(const PresentInfo& p, const Waited& w, const Pendin
     uint32_t quadCount = 0;
     StereoSubmit s;
     ComPtr<ID3D11Texture2D> stereoTex;
+    ComPtr<ID3D11Texture2D> depthTex;
     bool stereo = false;
     {
         std::lock_guard lk(stereoMutex_);
@@ -661,6 +675,7 @@ void XrController::SubmitOne(const PresentInfo& p, const Waited& w, const Pendin
                 stereo = true;
                 s = ps.submit;
                 stereoTex = ps.texture;
+                depthTex = ps.depth;
             }
         // Images for this frame or older ones are done with (a frame ends exactly once).
         std::erase_if(stereoQueue_, [&](const PendingStereo& ps) { return ps.submit.frameId <= w.info.frameId; });
@@ -677,6 +692,19 @@ void XrController::SubmitOne(const PresentInfo& p, const Waited& w, const Pendin
         for (int e = 0; e < 2; ++e) {
             d.eyes[e].rect = s.eyeRects[e];
             if (s.haveRenderedViews) d.eyes[e].viewOverride = &s.renderedViews[e];
+        }
+        if (depthTex && depthOn_.load(std::memory_order_relaxed)) {
+            d.depth.texture = depthTex.Get();
+            d.depth.srvFormat = s.depthSrvFormat;
+            d.depth.rect[0] = s.depthRects[0];
+            d.depth.rect[1] = s.depthRects[1];
+            d.depth.minDepth = 0.0f;
+            d.depth.maxDepth = 1.0f;
+            d.depth.farZ = s.depthFarZ;
+            // Infinite is allowed by the specification, but a runtime that turns nearZ/farZ
+            // into a projection (Virtual Desktop's: far * near / (near - far)) gets NaN from it.
+            d.depth.nearZ = std::isinf(s.depthNearZ) && cfg_.depthFarM > 0.0f ? cfg_.depthFarM : s.depthNearZ;
+            ++depthOffered_;
         }
     } else if (hold) {
         // Both eyes keep their last image (nothing is read from the texture,
@@ -982,7 +1010,9 @@ void XrController::SubmitStereoFrame(const StereoSubmit& s) {
     PendingStereo ps;
     ps.submit = s;
     ps.submit.texture = nullptr;
+    ps.submit.depthTexture = nullptr;
     ps.texture = s.texture;  // keeps it alive until the Present that submits it
+    ps.depth = s.depthTexture;
     // A newer image for the same frame replaces the older one.
     auto same = std::find_if(stereoQueue_.begin(), stereoQueue_.end(), [&](const PendingStereo& e) { return e.submit.frameId == s.frameId; });
     if (same != stereoQueue_.end()) {
@@ -991,6 +1021,74 @@ void XrController::SubmitStereoFrame(const StereoSubmit& s) {
     }
     stereoQueue_.push_back(std::move(ps));
     while (stereoQueue_.size() > 4) stereoQueue_.pop_front();
+}
+
+bool XrController::DepthLayerWanted() const {
+    return depthOn_.load(std::memory_order_relaxed) && depthAvailable_.load(std::memory_order_relaxed) && ready_.load(std::memory_order_relaxed) &&
+           mode_.load(std::memory_order_relaxed) == Mode::Stereo;
+}
+
+bool XrController::RelocateViews(uint64_t frameId, xr::View views[2]) {
+    // Never wait: a teardown holds this lock only around Shutdown, and the render thread
+    // must not stall behind it (the frame then keeps the views it was built with).
+    std::unique_lock lk(relocMutex_, std::try_to_lock);
+    if (!lk.owns_lock()) {
+        ++relocBusy_;
+        return false;
+    }
+    if (!ready_.load(std::memory_order_acquire) || stopping_.load() || !backend_) return false;
+    xr::View v[2];
+    if (backend_->RelocateViews(frameId, v) != xr::Result::Ok) {
+        ++relocFailed_;
+        return false;
+    }
+    views[0] = v[0];
+    views[1] = v[1];
+    ++relocOk_;
+    return true;
+}
+
+std::string XrController::DepthCommand(const std::string& args) {
+    std::string verb = args, rest;
+    if (const size_t sp = args.find(' '); sp != std::string::npos) {
+        verb = args.substr(0, sp);
+        rest = args.substr(sp + 1);
+    }
+    if (verb == "on" || verb == "off") {
+        depthOn_ = verb == "on";
+        log::info("xr: depth layer switched {}", verb);
+    } else if (verb == "dump") {
+        if (rest.empty()) return "err usage: xr-depth dump <path prefix> [timeout ms] (writes <prefix>_depthL.png / _depthR.png with the eye images)";
+        uint32_t timeoutMs = 5000;
+        if (const size_t sp = rest.rfind(' '); sp != std::string::npos) {
+            uint32_t v = 0;
+            const char* end = rest.data() + rest.size();
+            const auto [p, ec] = std::from_chars(rest.data() + sp + 1, end, v);
+            if (ec == std::errc() && p == end && v > 0) {
+                timeoutMs = v;
+                rest.resize(sp);
+            }
+        }
+        return Capture(rest, timeoutMs);
+    } else if (!verb.empty() && verb != "status") {
+        return "err usage: xr-depth status | on | off | dump <path prefix>";
+    }
+    std::string fmt = "none", note;
+    xr::FrameStats st{};
+    {
+        std::lock_guard lk(rtMutex_);
+        if (backend_) {
+            const xr::RuntimeInfo ri = backend_->GetRuntimeInfo();
+            fmt = ri.depthSwapchainFormat == DXGI_FORMAT_UNKNOWN ? std::string("none") : xr::DxgiFormatName(ri.depthSwapchainFormat);
+            note = ri.depthNote;
+            st = backend_->GetStats();
+        }
+    }
+    return std::format("ok depth layer {} ({}); swapchains {}{}; frames offered the scene depth {}, depth images written {}, frames ended with depth {}, "
+                       "depth images not written {}; nearZ for infinite depth {} m; late view locations ok {} failed {} skipped (busy) {}",
+                       depthOn_.load() ? "on" : "off", DepthLayerWanted() ? "in use" : "not in use", fmt, note.empty() ? "" : " (" + note + ")",
+                       depthOffered_.load(), st.depthImages, st.depthLayers, st.depthFailures, cfg_.depthFarM, relocOk_.load(), relocFailed_.load(),
+                       relocBusy_.load());
 }
 
 bool XrController::UiLayerWanted() const {

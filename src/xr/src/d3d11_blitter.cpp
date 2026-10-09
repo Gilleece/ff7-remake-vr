@@ -2,8 +2,11 @@
 
 #include "ff7vr_xr_shaders/blit_ps.h"
 #include "ff7vr_xr_shaders/blit_vs.h"
+#include "ff7vr_xr_shaders/depth_ps.h"
+#include "ff7vr_xr_shaders/depth_vs.h"
 
 #include <algorithm>
+#include <cstring>
 #include <cmath>
 
 namespace ff7vr::xr {
@@ -304,6 +307,11 @@ void Blitter::Shutdown() {
     blend_.Reset();
     blendOver_.Reset();
     dss_.Reset();
+    depthVs_.Reset();
+    depthPs_.Reset();
+    depthCb_.Reset();
+    depthWrite_.Reset();
+    depthPipelineFailed_ = false;
     curveSrv_.Reset();
     curve_.Reset();
     curveValid_ = false;
@@ -312,10 +320,12 @@ void Blitter::Shutdown() {
 
 void Blitter::Forget(ID3D11Texture2D* tex) {
     std::erase_if(rtvs_, [&](const RtvEntry& e) { return e.tex.Get() == tex; });
+    std::erase_if(dsvs_, [&](const DsvEntry& e) { return e.tex.Get() == tex; });
 }
 
 void Blitter::ClearCache() {
     rtvs_.clear();
+    dsvs_.clear();
     temps_.clear();
 }
 
@@ -633,6 +643,132 @@ bool Blitter::BlendOver(ID3D11DeviceContext* ctx, const BlitSource& src, const R
     ctx->Draw(3, 0);
     ID3D11ShaderResourceView* nullSrv = nullptr;
     ctx->PSSetShaderResources(0, 1, &nullSrv);
+    return true;
+}
+
+}  // namespace ff7vr::xr
+
+namespace ff7vr::xr {
+
+namespace {
+struct DepthConstants {
+    float srcOrigin[2];
+    float srcScale[2];
+    float srcMax[2];
+    float pad[2];
+};
+}  // namespace
+
+bool Blitter::EnsureDepthPipeline() {
+    if (depthVs_ && depthPs_ && depthCb_ && depthWrite_) return true;
+    if (depthPipelineFailed_ || !device_) return false;
+    HRESULT hr = device_->CreateVertexShader(g_ff7vr_depth_vs, sizeof(g_ff7vr_depth_vs), nullptr, &depthVs_);
+    if (SUCCEEDED(hr)) hr = device_->CreatePixelShader(g_ff7vr_depth_ps, sizeof(g_ff7vr_depth_ps), nullptr, &depthPs_);
+    D3D11_BUFFER_DESC bd{};
+    bd.ByteWidth = sizeof(DepthConstants);
+    bd.Usage = D3D11_USAGE_DYNAMIC;
+    bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    if (SUCCEEDED(hr)) hr = device_->CreateBuffer(&bd, nullptr, &depthCb_);
+    D3D11_DEPTH_STENCIL_DESC dsd{};
+    dsd.DepthEnable = TRUE;
+    dsd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+    dsd.DepthFunc = D3D11_COMPARISON_ALWAYS;
+    dsd.StencilEnable = FALSE;
+    if (SUCCEEDED(hr)) hr = device_->CreateDepthStencilState(&dsd, &depthWrite_);
+    if (FAILED(hr)) {
+        log_->Error("blitter: depth pipeline creation failed {}", HResultString(hr));
+        depthPipelineFailed_ = true;
+        depthVs_.Reset();
+        depthPs_.Reset();
+        depthCb_.Reset();
+        depthWrite_.Reset();
+        return false;
+    }
+    return true;
+}
+
+bool Blitter::TransferDepth(ID3D11DeviceContext* ctx, ID3D11Texture2D* src, DXGI_FORMAT srvFormat, const Rect& rect, ID3D11Texture2D* dst,
+                            DXGI_FORMAT dsvFormat, uint32_t dstW, uint32_t dstH) {
+    if (!ctx || !src || !dst || rect.width == 0 || rect.height == 0 || dstW == 0 || dstH == 0 || !EnsureDepthPipeline()) return false;
+    D3D11_TEXTURE2D_DESC sd{}, dd{};
+    src->GetDesc(&sd);
+    dst->GetDesc(&dd);
+    if (sd.SampleDesc.Count != 1 || rect.x < 0 || rect.y < 0 || uint64_t(rect.x) + rect.width > sd.Width ||
+        uint64_t(rect.y) + rect.height > sd.Height || dstW > dd.Width || dstH > dd.Height || !(sd.BindFlags & D3D11_BIND_SHADER_RESOURCE) ||
+        !(dd.BindFlags & D3D11_BIND_DEPTH_STENCIL)) {
+        if (!depthWarned_)
+            log_->Warn("blitter: depth transfer refused (source {}x{} bind 0x{:X} samples {}, region {},{} {}x{}; target {}x{} bind 0x{:X}, image {}x{})",
+                       sd.Width, sd.Height, sd.BindFlags, sd.SampleDesc.Count, rect.x, rect.y, rect.width, rect.height, dd.Width, dd.Height,
+                       dd.BindFlags, dstW, dstH);
+        depthWarned_ = true;
+        return false;
+    }
+    // Source view: created per transfer (the host may release its texture at any time).
+    D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
+    vd.Format = srvFormat;
+    vd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    vd.Texture2D.MostDetailedMip = 0;
+    vd.Texture2D.MipLevels = 1;
+    ComPtr<ID3D11ShaderResourceView> srv;
+    HRESULT hr = device_->CreateShaderResourceView(src, &vd, &srv);
+    if (FAILED(hr)) {
+        if (!depthWarned_) log_->Warn("blitter: depth source view ({}) failed {}", DxgiFormatName(srvFormat), HResultString(hr));
+        depthWarned_ = true;
+        return false;
+    }
+    ID3D11DepthStencilView* dsv = nullptr;
+    for (const DsvEntry& e : dsvs_)
+        if (e.tex.Get() == dst && e.format == dsvFormat) dsv = e.dsv.Get();
+    if (!dsv) {
+        D3D11_DEPTH_STENCIL_VIEW_DESC dvd{};
+        dvd.Format = dsvFormat;
+        dvd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+        ComPtr<ID3D11DepthStencilView> v;
+        hr = device_->CreateDepthStencilView(dst, &dvd, &v);
+        if (FAILED(hr)) {
+            if (!depthWarned_) log_->Warn("blitter: depth target view ({}) failed {}", DxgiFormatName(dsvFormat), HResultString(hr));
+            depthWarned_ = true;
+            return false;
+        }
+        dsvs_.push_back(DsvEntry{dst, dsvFormat, v});
+        dsv = v.Get();
+    }
+    D3D11_MAPPED_SUBRESOURCE m{};
+    if (FAILED(ctx->Map(depthCb_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return false;
+    DepthConstants c{};
+    c.srcOrigin[0] = float(rect.x);
+    c.srcOrigin[1] = float(rect.y);
+    c.srcScale[0] = float(rect.width) / float(dstW);
+    c.srcScale[1] = float(rect.height) / float(dstH);
+    c.srcMax[0] = float(rect.x + int32_t(rect.width) - 1);
+    c.srcMax[1] = float(rect.y + int32_t(rect.height) - 1);
+    std::memcpy(m.pData, &c, sizeof(c));
+    ctx->Unmap(depthCb_.Get(), 0);
+
+    // Targets first, so the source is not bound for writing anywhere when its view is bound.
+    ctx->OMSetRenderTargets(0, nullptr, dsv);
+    ctx->OMSetDepthStencilState(depthWrite_.Get(), 0);
+    ctx->OMSetBlendState(blend_.Get(), nullptr, 0xffffffff);
+    D3D11_VIEWPORT vp{0.0f, 0.0f, float(dstW), float(dstH), 0.0f, 1.0f};
+    ctx->RSSetViewports(1, &vp);
+    ctx->RSSetState(rs_.Get());
+    ctx->IASetInputLayout(nullptr);
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx->IASetVertexBuffers(0, 0, nullptr, nullptr, nullptr);
+    ctx->VSSetShader(depthVs_.Get(), nullptr, 0);
+    ctx->GSSetShader(nullptr, nullptr, 0);
+    ctx->HSSetShader(nullptr, nullptr, 0);
+    ctx->DSSetShader(nullptr, nullptr, 0);
+    ctx->PSSetShader(depthPs_.Get(), nullptr, 0);
+    ID3D11Buffer* cb = depthCb_.Get();
+    ctx->PSSetConstantBuffers(0, 1, &cb);
+    ID3D11ShaderResourceView* s0 = srv.Get();
+    ctx->PSSetShaderResources(0, 1, &s0);
+    ctx->Draw(3, 0);
+    ID3D11ShaderResourceView* none = nullptr;
+    ctx->PSSetShaderResources(0, 1, &none);
+    ctx->OMSetRenderTargets(0, nullptr, nullptr);
     return true;
 }
 

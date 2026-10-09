@@ -105,9 +105,29 @@ struct StereoSubmit {
     xr::Rect eyeRects[2]{};                        // width/height 0 = left / right half
     bool haveRenderedViews = false;                // true: renderedViews are what the image was rendered with
     xr::View renderedViews[2]{};                   // (default: the views BeginGameFrame returned)
+    // Scene depth for the depth layer (XR_KHR_composition_layer_depth), only while
+    // DepthLayerWanted(): the texture (referenced until the frame's Present), the
+    // format to read its depth plane with, each eye's region (scaled to the eye image's
+    // size) and nearZ / farZ in metres as XrCompositionLayerDepthInfoKHR (distance at
+    // depth 0 and at depth 1; nearZ may be +infinity for the engine's reversed, infinite
+    // depth: this module replaces it by [xr] depth_far_m, see docs/render.md).
+    ID3D11Texture2D* depthTexture = nullptr;
+    DXGI_FORMAT depthSrvFormat = DXGI_FORMAT_UNKNOWN;
+    xr::Rect depthRects[2]{};
+    float depthNearZ = 0.0f, depthFarZ = 0.0f;
 };
 // RT, before the frame's Present. Records the image; the Present hook submits it.
 void SubmitStereoFrame(const StereoSubmit& submit);
+
+// Any thread: whether the projection layer takes the scene depth now (the session has
+// depth swapchains and [xr] depth_layer / `xr-depth` has it on).
+bool DepthLayerWanted();
+
+// Any thread (meant for the engine's render thread, before the frame's scene): the eye
+// views of frameId located again for its predicted display time, in the same space as
+// StereoFrame::views. Never blocks behind the presenting thread (false when it would,
+// when the frame is unknown or when the runtime does not report a fully tracked pose).
+bool RelocateViews(uint64_t frameId, xr::View views[2]);
 
 // Any thread. GPU time of the most recently measured stereo frame (from the start of
 // its scene to its Present, timestamp queries; measured by the foveation module, so

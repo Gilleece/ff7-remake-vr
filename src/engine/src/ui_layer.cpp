@@ -36,6 +36,7 @@
 
 #include "ff7vr/engine/ui_layer.h"
 
+#include "late_update.h"
 #include "rhi_command.h"
 
 #include "ff7vr/core/dev_commands.h"
@@ -437,6 +438,15 @@ using RenderFn = void(__fastcall*)(void* renderer, void* cmdList);
 using ProcessFn = void(__fastcall*)(void* self, void* cmdList, void* view, void* velocity);
 
 void __fastcall render_detour(void* renderer, void* cmdList) {
+    {
+        // Late update of the head pose (late_update.h): before anything of the scene uses the views.
+        auto* r = static_cast<std::uint8_t*>(renderer);
+        auto* views = *reinterpret_cast<std::uint8_t**>(r + g_mark.views);
+        const std::int32_t num = *reinterpret_cast<std::int32_t*>(r + g_mark.views + 8);
+        if (views && num == 2 && *reinterpret_cast<const std::int32_t*>(views + g_mark.stereoPass) == 1 &&
+            *reinterpret_cast<const std::int32_t*>(views + g_mark.viewStride + g_mark.stereoPass) == 2)
+            late_update::before_scene(views, views + g_mark.viewStride, g_mark.viewStride);
+    }
     if (g_sceneOpen) close_scene(cmdList);
     render::FoveationEye eyes[2];
     if (g_marksReady.load(std::memory_order_relaxed) && render::FoveationWanted() && stereo_eyes(renderer, eyes) && append_mark(cmdList, true, eyes)) {

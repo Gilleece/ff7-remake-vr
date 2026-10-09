@@ -92,6 +92,7 @@ struct Options {
     bool quad = false;             // submit the left eye image as a quad layer only (no projection layer)
     bool quadOver = false;         // projection layer plus the quad layer on top
     bool alphaQuad = false;        // projection layer, an opaque grey panel and an alpha-blended UI-style quad on it
+    bool depth = false;            // scene depth with the projection layer (XR_KHR_composition_layer_depth)
 };
 
 // Quad used by --quad / --quad-over: the left eye image on a 1.6 m wide panel 2 m ahead.
@@ -133,6 +134,9 @@ void PrintUsage() {
         "  --alpha-quad                projection layer, an opaque grey panel and a quad with Unreal-style\n"
         "                              inverted premultiplied alpha on top (empty | 50%% red | opaque white);\n"
         "                              captures are checked for the blended colours\n"
+        "  --depth                     submit a depth image with the projection layer (XR_KHR_composition_layer_depth):\n"
+        "                              a double-wide D32S8 texture like the game's, cleared to 0.1 (reversed depth:\n"
+        "                              1 m with a 0.1 m near plane); fails unless every frame was ended with depth\n"
         "  --verbose                   debug log output\n");
 }
 
@@ -226,6 +230,8 @@ bool ParseArgs(int argc, char** argv, Options& o) {
             o.quadOver = true;
         } else if (a == "--alpha-quad") {
             o.alphaQuad = true;
+        } else if (a == "--depth") {
+            o.depth = true;
         } else if (a == "--verbose" || a == "-v") {
             o.verbose = true;
         } else {
@@ -660,6 +666,8 @@ struct Run {
     xr::LayerHandle quadLayer = 0;
     xr::LayerHandle greyLayer = 0, uiLayer = 0;  // --alpha-quad
     ComPtr<ID3D11Texture2D> greyTex, uiTex;
+    ComPtr<ID3D11Texture2D> depthTex;                 // --depth
+    ComPtr<ID3D11DepthStencilView> depthDsv;
     static constexpr uint32_t kUiW = 192, kUiH = 108;
     std::vector<std::pair<uint64_t, xr::FrameInfo>> capturedFrames;  // frameId -> views, for quad checks
     std::mutex capturedMutex;
@@ -763,6 +771,16 @@ struct Run {
         if (opt.alternateEyes) {
             sd.eyes[0].update = (index % 2) == 0;
             sd.eyes[1].update = (index % 2) == 1;
+        }
+        if (depthTex && !opt.quad) {
+            // A flat surface 1 m ahead in reversed depth with a 0.1 m near plane (0.1 / 1 m).
+            ctx->ClearDepthStencilView(depthDsv.Get(), D3D11_CLEAR_DEPTH, 0.1f, 0);
+            sd.depth.texture = depthTex.Get();
+            sd.depth.srvFormat = DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
+            sd.depth.rect[0] = xr::Rect{0, 0, eyeW, eyeH};
+            sd.depth.rect[1] = xr::Rect{int32_t(eyeW), 0, eyeW, eyeH};
+            sd.depth.nearZ = 100000.0f;  // the game's finite stand-in for an infinite far plane
+            sd.depth.farZ = 0.1f;
         }
         const auto t0 = std::chrono::steady_clock::now();
         const xr::Result r = be->SubmitFrame(fi.frameId, sd);
@@ -970,6 +988,26 @@ int main(int argc, char** argv) {
     PatternRenderer pattern;
     if (!pattern.Init(dev.Get(), *opt.source, run.eyeW, run.eyeH)) return 1;
     run.pattern = &pattern;
+    if (opt.depth) {
+        Info("depth swapchains: {}{}", ri.depthSwapchainFormat == DXGI_FORMAT_UNKNOWN ? "none" : xr::DxgiFormatName(ri.depthSwapchainFormat),
+             ri.depthNote.empty() ? "" : " (" + ri.depthNote + ")");
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = 2 * run.eyeW;
+        td.Height = run.eyeH;
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_R32G8X24_TYPELESS;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+        D3D11_DEPTH_STENCIL_VIEW_DESC dv{};
+        dv.Format = DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+        dv.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+        if (FAILED(dev->CreateTexture2D(&td, nullptr, &run.depthTex)) || FAILED(dev->CreateDepthStencilView(run.depthTex.Get(), &dv, &run.depthDsv))) {
+            Fail("depth texture creation failed");
+            return 1;
+        }
+    }
     if (opt.quad || opt.quadOver) {
         xr::QuadLayerCreateDesc qd{run.eyeW, run.eyeH, opt.source->texture};
         if (const xr::Result r = be->CreateQuadLayer(qd, &run.quadLayer); r != xr::Result::Ok) {
@@ -1090,6 +1128,14 @@ int main(int argc, char** argv) {
          st.framesDiscarded, st.framesNotRendered);
     Info("image transfers: copy {}, shader blit {}; quad updates {}; swapchain image wait timeouts {}", st.copyPath, st.blitPath,
          st.quadUpdates, st.imageWaitTimeouts);
+    if (opt.depth) {
+        Info("depth: images written {}, frames ended with depth {}, images not written {}; {}", st.depthImages, st.depthLayers, st.depthFailures,
+             ri2.depthNote.empty() ? std::string("depth on") : ri2.depthNote);
+        if (st.depthLayers == 0 || st.depthLayers + 2 < st.framesSubmitted || st.depthFailures) {
+            Fail("depth was not submitted with every frame");
+            ok = false;
+        }
+    }
     Info("WaitFrame blocking : {}", run.waitMs.Summary());
     Info("frame interval     : {}", run.intervalMs.Summary());
     Info("SubmitFrame (CPU)  : {}", run.submitMs.Summary());

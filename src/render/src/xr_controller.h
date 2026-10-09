@@ -81,6 +81,8 @@ struct RenderConfig {
     // brightness_step: change [picture] brightness while the game window has the focus.
     int brightnessUpKey = 0, brightnessDownKey = 0;
     float brightnessStep = 0.05f;
+    bool depthLayer = true;     // [xr] depth_layer: depth swapchains and the scene depth with the projection layer
+    float depthFarM = 100000.0f;  // [xr] depth_far_m: distance given for depth 0 (0 = infinite)
 };
 
 // Limits of the [picture] keys (also applied to the `picture` command).
@@ -125,6 +127,9 @@ public:
     bool GetEyeSetup(EyeSetup* out);
     StereoFrame BeginGameFrame();
     void SubmitStereoFrame(const StereoSubmit& s);
+    bool DepthLayerWanted() const;
+    std::string DepthCommand(const std::string& args);
+    bool RelocateViews(uint64_t frameId, xr::View views[2]);
     bool UiLayerWanted() const;
     // Any thread. The runtime's hidden area of an eye (cached from the backend; false: none).
     // `version` changes whenever the mesh does; `out` may be null.
@@ -233,7 +238,13 @@ private:
     struct PendingStereo {
         StereoSubmit submit;
         Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> depth;
     };
+    std::atomic<bool> depthOn_{true};         // [xr] depth_layer, `xr-depth on|off`
+    std::atomic<bool> depthAvailable_{false};  // the session has depth swapchains
+    std::atomic<uint64_t> depthOffered_{0};    // stereo frames submitted with the scene depth
+    std::mutex relocMutex_;                    // RelocateViews (any thread) vs. teardown
+    std::atomic<uint64_t> relocOk_{0}, relocFailed_{0}, relocBusy_{0};
     std::mutex stereoMutex_;
     std::deque<PendingStereo> stereoQueue_;
     std::atomic<Mode> mode_{Mode::Screen};

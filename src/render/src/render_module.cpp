@@ -109,6 +109,8 @@ RenderConfig LoadConfig(const StartupContext& ctx) {
     r.brightnessUpKey = static_cast<int>(std::clamp<long long>(c.get_int("controls", "brightness_up_key", 0), 0, 255));
     r.brightnessDownKey = static_cast<int>(std::clamp<long long>(c.get_int("controls", "brightness_down_key", 0), 0, 255));
     r.brightnessStep = static_cast<float>(std::clamp(c.get_float("controls", "brightness_step", r.brightnessStep), 0.005, 0.5));
+    r.depthLayer = c.get_bool("xr", "depth_layer", r.depthLayer);
+    r.depthFarM = static_cast<float>(std::clamp(c.get_float("xr", "depth_far_m", r.depthFarM), 0.0, 1.0e7));
     return r;
 }
 
@@ -273,6 +275,10 @@ float GetSnapYawDeg() { return g_started.load(std::memory_order_relaxed) ? XrCon
 StereoFrame BeginGameFrame() { return XrController::Get().BeginGameFrame(); }
 void SubmitStereoFrame(const StereoSubmit& submit) { XrController::Get().SubmitStereoFrame(submit); }
 bool UiLayerWanted() { return g_started.load(std::memory_order_relaxed) && XrController::Get().UiLayerWanted(); }
+bool DepthLayerWanted() { return g_started.load(std::memory_order_relaxed) && XrController::Get().DepthLayerWanted(); }
+bool RelocateViews(uint64_t frameId, xr::View views[2]) {
+    return g_started.load(std::memory_order_relaxed) && XrController::Get().RelocateViews(frameId, views);
+}
 bool UiDumpRequested() { return g_started.load(std::memory_order_relaxed) && XrController::Get().UiDumpRequested(); }
 void SubmitUiLayer(const UiLayerSource& source) { XrController::Get().SubmitUiLayer(source); }
 bool FoveationWanted() { return g_started.load(std::memory_order_relaxed) && foveation::Wanted(); }

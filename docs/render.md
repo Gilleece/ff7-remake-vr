@@ -154,6 +154,8 @@ All keys are optional. `ff7vr.ini` sits next to the DLL.
 | `[xr] reconnect_after_exit` | `0` | after the runtime asked the application to exit (user quit it from the VR dashboard, runtime shutting down): `0` stay off until `xr-restart`, `1` retry like after a lost session |
 | `[xr] frame_wait` | `thread` | `thread` or `present`, see [Frame wait and pacing](#frame-wait-and-pacing) |
 | `[xr] null_refresh_hz`, `null_pace`, `null_motion` | `90`, `1`, `static` | Null backend: emulated refresh rate, whether `WaitFrame` paces to it, head motion (`static`, `yaw`, `sway`, `yawsway`) |
+| `[xr] depth_layer` | `1` | create depth swapchains when the runtime offers `XR_KHR_composition_layer_depth` and send the scene depth with each stereo image (see [Depth layer](#depth-layer)); `0`: no depth swapchains |
+| `[xr] depth_far_m` | `100000` | the distance in metres given as `nearZ` (the distance at depth 0) for the engine's infinite reversed depth; `0` = infinity as the specification allows (Virtual Desktop's runtime turns that into NaN) |
 | `[screen] distance` | `2.0` | metres from the recentered head to the screen |
 | `[screen] width` | `1.8` | screen width in metres (height follows the back buffer's aspect ratio) |
 | `[screen] offset_y` | `0` | vertical offset of the screen centre from eye height, metres |
@@ -387,6 +389,69 @@ stand-in used before any orientation was seen. The game thread
 (`BeginGameFrame`) checks once more that every pose is finite and a unit
 rotation and otherwise repeats the last views given to the game.
 
+## Depth layer
+
+With `XR_KHR_composition_layer_depth` (Virtual Desktop's runtime, SteamVR and Meta's
+runtime offer it) the scene's depth goes to the runtime with each stereo image, so a frame
+that arrives late can be re-projected positionally with the depth of what is in it, not
+only rotated. `[xr] depth_layer = 1` (default) uses it whenever the runtime offers it;
+`xr-depth on|off` switches it at run time (off: no depth info is chained, the swapchains
+stay).
+
+How (all of it on the presenting thread, inside the frame's submission):
+
+- **Swapchains.** At session start, one depth swapchain per eye at the eye swapchains'
+  size, in the first of `D32_FLOAT`, `D24_UNORM_S8_UINT`, `D16_UNORM` the runtime offers
+  (`XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT`). None without the extension or with
+  `depth_layer = 0`; the log says which (`xr: depth layer available, swapchains ...` or
+  `... not available: <why>`).
+- **Source.** The engine module hands over the engine's scene depth with the eye texture
+  (`StereoSubmit::depthTexture`, found among the scene render targets:
+  `docs/engine-module.md`, "Depth layer"), with each eye's region of it: the rectangle the
+  eye's view was rendered to (smaller than the half at a render scale below 1).
+- **Copy.** Each eye's region is written into the eye's depth image by a full-screen pass
+  that writes the depth (`SV_Depth`, depth test always, no colour target;
+  `src/xr/src/shaders/depth.hlsl`), scaled with nearest sampling to the size of the eye's
+  colour image, so the depth image always matches the submitted `imageRect` whatever
+  produced the colour: a render scale below 1, dynamic resolution, or DLSS with
+  `output = runtime`, whose colour image is larger than the rendered views. Values pass
+  through unchanged.
+- **Values.** Unreal's depth is reversed and infinite: 1 at the near plane, 0 at infinity,
+  `depth = near / distance`. In `XrCompositionLayerDepthInfoKHR` terms: `minDepth 0`,
+  `maxDepth 1`, `farZ` (the distance at depth 1) = the engine's near plane in metres of
+  tracking space (`GNearClippingPlane`, 10 cm, divided by `WorldToMeters` x
+  `[stereo] world_scale`, so 0.1 m at world scale 1), `nearZ` (the distance at depth 0) =
+  infinity. The specification allows an infinite `nearZ`, but Virtual Desktop's runtime
+  (public source, `frame.cpp`) turns `nearZ`/`farZ` into Oculus's projection terms
+  `farZ * nearZ / (nearZ - farZ)`, which is NaN for an infinite `nearZ`; so the module
+  gives `[xr] depth_far_m` (100 km by default) instead, which changes the distance read
+  back at 100 m by 0.1 %. `0` gives infinity.
+- **Chaining.** The depth info is chained to both projection views or to neither (both
+  eyes' depth images must belong to their colour images). An eye that keeps its last
+  image (a held frame, alternate eyes) keeps its last depth image with it. If
+  `xrEndFrame` fails while depth is chained, depth is switched off for the rest of the
+  session with an error line (`xr: depth layer switched off for this session ...`).
+- **Not affected:** the quad layers (virtual screen, UI) carry no depth; screen mode has
+  no projection layer.
+
+Measured (2026-10-09, without a headset):
+
+| Run | Result |
+|---|---|
+| Null backend, 2 x 3072x3264, the harness's save, 90 Hz paced (`captures/frame-wt/s1`) | scene depth found once (`+0x68`, 6144x3264, `R32G8X24_TYPELESS`); 8 877 frames ended with depth, 0 depth images not written. GPU time of the module's copies (`gpu copy` in the timing block) 0.317-0.319 ms with depth, 0.168-0.169 ms with `xr-depth off`: **the depth pass costs 0.15 ms per frame** for both eyes. Frame time unchanged (paced at 11.11 ms either way) |
+| Its depth images (`d1_depthL.png`, `gt_head0_depthL.png`) | the same geometry as the colour image of the same frame (pillars, railings, the floor grate); values 7.5e-5 to 0.077 (1.3 m to 1.3 km), centre 16 to 85 m depending on the frame's view |
+| `xr_smoke --backend openxr --runtime steamvr --depth`, SteamVR 2.18.2 null driver (`captures/frame-wt/s2/smoke.txt`) | depth swapchains `D32_FLOAT` (images `R32_TYPELESS`, bind flags depth-stencil + shader resource); 300 of 300 frames ended with depth chained, 600 depth images, no error; result PASS |
+| The game on the same SteamVR (2 x 1512x1680, `captures/frame-wt/s2`) | 5 602 frames ended with depth in 70 s, no `xrEndFrame` error; `gpu copy` 0.107 ms with depth, 0.060 ms without (0.047 ms) |
+| Null backend at `[stereo] render_scale = 0.75` (`captures/frame-wt/s8`) | the depth images are 2304x2448, the eye images' size, with the same content as at scale 1 (centre 46.5 m in both) |
+
+DLSS with `output = runtime` (the colour image larger than the rendered views) takes the
+same path (the depth region is scaled to the colour image) but was not run.
+
+Not checked: Virtual Desktop's and Meta's runtimes (no headset here; Virtual Desktop's
+source shows it hands the depth to its compositor with the projection terms above), and
+whether a runtime actually uses the depth when it re-projects (that only shows in a
+headset, on frames that miss their slot).
+
 ## Dev commands
 
 Sent through the dev pipe (`[dev] pipe = 1`), for example:
@@ -422,7 +487,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev\send-input.ps1 -Pi
 | `menu dump <png>` | write the panel texture as uploaded to the GPU (premultiplied alpha) to a PNG; the panel must be open |
 | `menu pad <hex buttons> [user]` | one XInput state through the panel's pad filter, as the game's poll passes it; replies with what the game receives |
 | `menu focus any\|window` | tests: the panel's keyboard and gamepad input also without the window focus (`any`) or only with it (default) |
-| `xr-sim status` | Null backend: emulated tracker head, LOCAL origin, head in LOCAL, recenter offset, the head the game sees, validity |
+| `xr-depth status` / `on` / `off` | the depth layer: on or off, whether it is in use, the depth swapchains' format (or why there are none), frames offered the scene depth, depth images written, frames ended with depth, late view locations ([Depth layer](#depth-layer)) |
+| `xr-depth dump <prefix> [timeout ms]` | a `capture` that also writes the frame's depth images as `<prefix>_depthL.png` / `_depthR.png` (grey = 255 * depth^(1/4), depth 0 black) and logs their range and the distance at the centre |
+| `xr-sim status` | Null backend: emulated tracker head, LOCAL origin, head in LOCAL, recenter offset, the head the game sees, validity, and the yaw the last submitted left image was rendered at against the yaw its frame was located at |
+| `xr-sim yawrate <deg/s>` | Null backend: the head turns at a constant rate with the wall clock, so every location (the frame wait's and a late one) sees the yaw of its own moment (`0` = off) |
+| `xr-sim late-yaw <deg>` | Null backend: an extra yaw that only late locations (`RelocateViews`) see, a deterministic test of the late update (`docs/engine-module.md`, "Late update of the head pose") |
+| `xr-sim depth` | Null backend: depth images written, frames with a depth layer, the last nearZ / farZ |
 | `xr-sim head <yaw deg> [pitch deg] [x y z m]` | Null backend: sets the emulated head pose (on top of `[xr] null_motion`) |
 | `xr-sim motion static\|yaw\|sway\|yawsway\|ini` | Null backend: replaces the scripted motion of `[xr] null_motion` from the next frame (`ini` goes back to the configured one) |
 | `xr-sim recenter-event [nopose] [delay <frames>]` | Null backend: the headset's own recenter: LOCAL moves to the current leveled head and a LOCAL change event is sent, with `poseInPreviousSpace` or without (`nopose`, like Virtual Desktop), change time `delay` frames ahead (default 3) |

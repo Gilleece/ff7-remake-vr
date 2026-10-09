@@ -105,6 +105,10 @@ ff7vr_compile_shader(OUT_VAR _quad_vs SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/shad
   PROFILE vs_5_0 ENTRY VSMain VAR g_ff7vr_quad_vs OUTPUT "${_shader_out}/quad_vs.h")
 ff7vr_compile_shader(OUT_VAR _quad_ps SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/shaders/quad.hlsl"
   PROFILE ps_5_0 ENTRY PSMain VAR g_ff7vr_quad_ps OUTPUT "${_shader_out}/quad_ps.h")
+ff7vr_compile_shader(OUT_VAR _depth_vs SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/shaders/depth.hlsl"
+  PROFILE vs_5_0 ENTRY VSMain VAR g_ff7vr_depth_vs OUTPUT "${_shader_out}/depth_vs.h")
+ff7vr_compile_shader(OUT_VAR _depth_ps SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/shaders/depth.hlsl"
+  PROFILE ps_5_0 ENTRY PSMain VAR g_ff7vr_depth_ps OUTPUT "${_shader_out}/depth_ps.h")
 
 add_library(ff7vr_xr STATIC
   include/ff7vr/xr/xr.h
@@ -128,9 +132,10 @@ add_library(ff7vr_xr STATIC
   src/openxr_backend.cpp
   src/shaders/blit.hlsl
   src/shaders/quad.hlsl
-  ${_blit_vs} ${_blit_ps} ${_quad_vs} ${_quad_ps}
+  src/shaders/depth.hlsl
+  ${_blit_vs} ${_blit_ps} ${_quad_vs} ${_quad_ps} ${_depth_vs} ${_depth_ps}
 )
-set_source_files_properties(src/shaders/blit.hlsl src/shaders/quad.hlsl PROPERTIES HEADER_FILE_ONLY TRUE)
+set_source_files_properties(src/shaders/blit.hlsl src/shaders/quad.hlsl src/shaders/depth.hlsl PROPERTIES HEADER_FILE_ONLY TRUE)
 target_compile_features(ff7vr_xr PUBLIC cxx_std_20)
 target_include_directories(ff7vr_xr
   PUBLIC  "${CMAKE_CURRENT_LIST_DIR}/include"

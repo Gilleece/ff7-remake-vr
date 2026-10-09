@@ -7,6 +7,7 @@
 #include "audio_listener.h"
 #include "graphics.h"
 #include "menu_items.h"
+#include "late_update.h"
 #include "rhi_command.h"
 #include "bloom_fix.h"
 #include "distortion_fix.h"
@@ -17,6 +18,7 @@
 #include "movie_watch.h"
 #include "player.h"
 #include "shaders.h"
+#include "scene_depth.h"
 #include "stereo_device.h"
 
 #if FF7VR_ENGINE_WITH_RENDER
@@ -228,6 +230,7 @@ void resolve_and_prepare() {
         bloom_fix::init(g_addr.BloomReduceProcess, g_opt.bloom_fix, g_opt.ao_fix);
         distortion_fix::init(g_addr.DistortionComposite, g_opt.distortion_fix);
         lens_vignette::init(g_addr.PostProcessSettingsCtor, g_opt.game_vignette);
+        scene_depth::init(g_addr.base, g_addr.known_build);
         if (!g_tick_hook->create(g_addr.GameEngineVtable, g_addr.slot_Tick / sizeof(void*), &tick_detour)) {
             g_addr.stereo_ok = false;
             g_addr.failure = "could not hook UGameEngine::Tick";
@@ -278,6 +281,7 @@ bool start(const StartupContext& ctx) {
         controls::read_config(cfg);
         snap_turn::read_config(cfg);
         device::configure_render_scale(cfg);
+        late_update::configure(cfg);
         std::vector<std::pair<std::wstring, std::wstring>> stereo_cvars;
         if (cfg.get_bool("stereo", "comfort_cvars", true))
             for (const auto& [name, value] : kComfortCvars) stereo_cvars.emplace_back(name, value);

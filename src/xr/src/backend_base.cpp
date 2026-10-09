@@ -478,6 +478,40 @@ bool BackendBase::TransferEye(Eye eye, const SubmitDesc& desc, const EyeTarget& 
     return ok;
 }
 
+DXGI_FORMAT BackendBase::DepthViewFormat(DXGI_FORMAT f) {
+    switch (f) {
+        case DXGI_FORMAT_D32_FLOAT:
+        case DXGI_FORMAT_R32_TYPELESS:
+        case DXGI_FORMAT_R32_FLOAT: return DXGI_FORMAT_D32_FLOAT;
+        case DXGI_FORMAT_D24_UNORM_S8_UINT:
+        case DXGI_FORMAT_R24G8_TYPELESS: return DXGI_FORMAT_D24_UNORM_S8_UINT;
+        case DXGI_FORMAT_D16_UNORM:
+        case DXGI_FORMAT_R16_TYPELESS:
+        case DXGI_FORMAT_R16_UNORM: return DXGI_FORMAT_D16_UNORM;
+        case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
+        case DXGI_FORMAT_R32G8X24_TYPELESS: return DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+        default: return DXGI_FORMAT_UNKNOWN;
+    }
+}
+
+bool BackendBase::TransferDepthEye(Eye eye, const SubmitDesc& desc, const EyeTarget& t, uint32_t w, uint32_t h) {
+    const int e = eye == Eye::Left ? 0 : 1;
+    if (gpuTiming_) gpuCopy_.Before(context_.Get());
+    const bool ok = blitter_.TransferDepth(context_.Get(), desc.depth.texture, desc.depth.srvFormat, desc.depth.rect[e], t.texture,
+                                           DepthViewFormat(depthFormat_), std::min(w, t.width), std::min(h, t.height));
+    if (gpuTiming_) gpuCopy_.After(context_.Get());
+    return ok;
+}
+
+void BackendBase::CaptureDepthImages() {
+    if (!capture_.Active()) return;
+    static const char* kSuffix[2] = {"_depthL.png", "_depthR.png"};
+    for (int e = 0; e < 2; ++e)
+        if (depthValid_[e] && depth_[e].hasImage)
+            capture_.CaptureDepth(context_.Get(), depth_[e].Image(depth_[e].lastIndex), depth_[e].lastW, depth_[e].lastH, depthNear_[e], depthFar_[e],
+                                  kSuffix[e]);
+}
+
 bool BackendBase::TransferQuad(const SubmitDesc& desc, const QuadLayer& q, const EyeTarget& t, uint32_t* outW, uint32_t* outH) {
     BlitSource src;
     src.texture = q.texture;

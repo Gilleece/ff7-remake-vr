@@ -112,6 +112,13 @@ public:
     bool Transfer(ID3D11DeviceContext* ctx, const BlitSource& src, const Rect& rect, const BlitDest& dst, Path* usedPath,
                   uint32_t* outW, uint32_t* outH);
 
+    // Writes the region `rect` of a depth texture (read through `srvFormat`, the
+    // depth plane) into `dst` (a depth texture, written through a depth-stencil view
+    // of `dsvFormat`) at (0, 0, dstW, dstH), scaled with nearest sampling; the values
+    // are passed through. Caller must have saved the context state.
+    bool TransferDepth(ID3D11DeviceContext* ctx, ID3D11Texture2D* src, DXGI_FORMAT srvFormat, const Rect& rect, ID3D11Texture2D* dst,
+                       DXGI_FORMAT dsvFormat, uint32_t dstW, uint32_t dstH);
+
     // Drops cached render-target views of `tex` (call before releasing a
     // destination texture). Source textures are never cached: their views are
     // created per transfer and released before Transfer returns, so the host
@@ -132,6 +139,11 @@ private:
         DXGI_FORMAT format;
         uint32_t slice;
         ComPtr<ID3D11RenderTargetView> rtv;
+    };
+    struct DsvEntry {
+        ComPtr<ID3D11Texture2D> tex;
+        DXGI_FORMAT format;
+        ComPtr<ID3D11DepthStencilView> dsv;
     };
     struct TempEntry {
         DXGI_FORMAT format;
@@ -160,6 +172,15 @@ private:
     ComPtr<ID3D11RasterizerState> rs_;
     ComPtr<ID3D11BlendState> blend_, blendOver_;
     ComPtr<ID3D11DepthStencilState> dss_;
+    // Depth transfer (TransferDepth): created on first use.
+    bool EnsureDepthPipeline();
+    ComPtr<ID3D11VertexShader> depthVs_;
+    ComPtr<ID3D11PixelShader> depthPs_;
+    ComPtr<ID3D11Buffer> depthCb_;
+    ComPtr<ID3D11DepthStencilState> depthWrite_;
+    bool depthPipelineFailed_ = false;
+    bool depthWarned_ = false;
+    std::vector<DsvEntry> dsvs_;
     std::vector<RtvEntry> rtvs_;
     std::vector<TempEntry> temps_;
     bool warnedOnce_ = false;
