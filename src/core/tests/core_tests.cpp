@@ -10,6 +10,7 @@
 #include "ff7vr/core/crash.h"
 #include "ff7vr/core/graphics_profile.h"
 #include "ff7vr/core/hook.h"
+#include "ff7vr/core/ini_file.h"
 #include "ff7vr/core/log.h"
 #include "ff7vr/core/module.h"
 #include "ff7vr/core/pattern.h"
@@ -109,6 +110,61 @@ static void test_config() {
     std::printf("config: ok\n");
 }
 
+
+static void test_ini_file() {
+    using ff7vr::ini_file::Update;
+    const std::string src =
+        "; header comment\r\n"
+        "[comfort]\r\n"
+        "vignette = 0.0               ; strength (0 = off)\r\n"
+        "snap_turn = 0                ; degrees\r\n"
+        "\r\n"
+        "[Picture]\r\n"
+        "contrast=1.2\r\n"
+        "sharpen =   ; empty\r\n"
+        "\r\n"
+        "[ui]\r\n"
+        "distance = 3.0\r\n";
+    ff7vr::ini_file::Report r;
+    const std::string out = ff7vr::ini_file::apply(
+        src,
+        {{"comfort", "vignette", "0.4"}, {"picture", "CONTRAST", "1.25"}, {"picture", "sharpen", "0.3"}, {"comfort", "snap_turn", "0"},
+         {"ui", "size", "1.5"}, {"menu", "key", "46"}, {"comfort", "verylongkeyvalue", "x"}},
+        &r);
+    const std::string want =
+        "; header comment\r\n"
+        "[comfort]\r\n"
+        "vignette = 0.4               ; strength (0 = off)\r\n"
+        "snap_turn = 0                ; degrees\r\n"
+        "verylongkeyvalue = x\r\n"
+        "\r\n"
+        "[Picture]\r\n"
+        "contrast=1.25\r\n"
+        "sharpen = 0.3 ; empty\r\n"
+        "\r\n"
+        "[ui]\r\n"
+        "distance = 3.0\r\n"
+        "size = 1.5\r\n"
+        "\r\n"
+        "[menu]\r\n"
+        "key = 46\r\n";
+    CHECK(out == want);
+    if (out != want) std::printf("--- got:\n%s--- want:\n%s", out.c_str(), want.c_str());
+    CHECK(r.changed.size() == 3 && r.unchanged.size() == 1 && r.added.size() == 3);
+    // A value longer than its padding keeps one space before the comment; Config reads it back.
+    const std::string longer = ff7vr::ini_file::apply("[a]\nk = 1   ; c\n", {{"a", "k", "123456"}});
+    CHECK(longer == "[a]\nk = 123456 ; c\n");
+    Config c;
+    c.load_from_string(out);
+    CHECK(c.get_float("comfort", "vignette", 0) == 0.4);
+    CHECK(c.get_float("picture", "sharpen", 0) == 0.3);
+    CHECK(c.get_int("menu", "key", 0) == 46);
+    // No trailing newline, no sections.
+    CHECK(ff7vr::ini_file::apply("[a]\nk = 1", {{"a", "k", "2"}, {"a", "j", "3"}}) == "[a]\nk = 2\nj = 3\n");
+    CHECK(ff7vr::ini_file::apply("", {{"a", "k", "2"}}) == "[a]\r\nk = 2\r\n");
+    std::printf("ini_file: ok\n");
+}
+
 static int (*g_orig_add)(int, int) = nullptr;
 __declspec(noinline) int add_fn(int a, int b) { return a + b + (g_keep[0] == 'x'); }
 static hook::InlineHook g_add_hook;
@@ -204,6 +260,7 @@ int main(int argc, char** argv) {
     }
     if (argc >= 2 && std::strcmp(argv[1], "crash") == 0) return crash_test();
     test_config();
+    test_ini_file();
     test_graphics_profile();
     test_pattern();
     test_hook();
