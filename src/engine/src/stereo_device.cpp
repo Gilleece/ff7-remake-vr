@@ -818,15 +818,18 @@ void configure_render_scale(const Config& cfg) {
         int mode = 2;
         if (v == "0" || v == "off" || v == "false" || v == "no") mode = 0;
         else if (v == "1" || v == "on" || v == "true" || v == "yes") mode = 1;
+        else if (v == "3") mode = 3;
         else if (v != "2") log::warn("stereo: ssr_fix = '{}' not understood; using 2", v);
         fixes::set_ssr_fix(mode);
     }
-    dev_commands::add("ssr", "ssr [status] | on | off | fix 0-2 | poison 0-3: screen-space reflections per eye half, right-eye reflections fix",
+    dev_commands::add("ssr", "ssr [status] | on | off | fix 0-3 | poison 0-3 | test equal|halves|shift|result | shader <prefix>: screen-space reflections per eye half, right-eye reflections fix",
                       [](std::string_view args) {
                           if (args == "on" || args == "off") fixes::set_ssr_per_eye(args == "on");
-                          else if (args == "fix 0" || args == "fix 1" || args == "fix 2") fixes::set_ssr_fix(args[4] - '0');
+                          else if (args.size() == 5 && args.substr(0, 4) == "fix " && args[4] >= '0' && args[4] <= '3') fixes::set_ssr_fix(args[4] - '0');
+                          else if (args.size() > 5 && args.substr(0, 5) == "test ") return fixes::ssr_test(std::string(args.substr(5)));
                           else if (args.size() == 8 && args.substr(0, 7) == "poison " && args[7] >= '0' && args[7] <= '3') fixes::set_ssr_poison(args[7] - '0');
-                          else if (!args.empty() && args != "status") return std::string("err usage: ssr [status] | on | off | fix 0-2 | poison 0-3");
+                          else if (args.size() > 7 && args.substr(0, 7) == "shader ") return fixes::ssr_shader_dump(std::string(args.substr(7)));
+                          else if (!args.empty() && args != "status") return std::string("err usage: ssr [status] | on | off | fix 0-3 | poison 0-3 | test equal|halves|shift|result | shader <prefix>");
                           return "ok " + fixes::ssr_status();
                       });
     fixes::set_hzb_skip(static_cast<int>(cfg.get_int("stereo", "hzb_skip", 0)));
