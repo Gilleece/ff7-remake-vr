@@ -21,10 +21,9 @@ using ue::FRotator;
 using ue::FVector;
 
 // ------------------------------------------------------------------ FViewMatrices (UE 4.18)
-// FMatrix members in this order, then PreViewTranslation, ViewOrigin, ProjectionScale,
-// TemporalAAProjectionJitter, ScreenScale. This game's build has 13 of them: no
-// ProjectionNoAAMatrix (docs/re/engine.md, "FViewMatrices in FViewInfo"); the search
-// accepts both forms and the check proves which one.
+// The matrices of FViewMatrices as the engine computes them (indices of ViewSet::m; not
+// their order in memory, which is found by value: see "layout" below), then
+// PreViewTranslation and ViewOrigin.
 enum Mat : int {
     kProjection = 0,
     kProjectionNoAA,
@@ -43,20 +42,14 @@ enum Mat : int {
     kMatCount
 };
 constexpr int kMaxCopies = 4;
-// Byte offset of a matrix in an FViewMatrices of `n` (13 or 14) matrices, -1 when absent.
-int slot(int m, int n) {
-    if (n == 14) return m * 64;
-    if (m == kProjectionNoAA) return -1;
-    return (m < kProjectionNoAA ? m : m - 1) * 64;
-}
-std::size_t pre_view_translation(int n) { return static_cast<std::size_t>(n) * 64; }
-std::size_t view_origin(int n) { return pre_view_translation(n) + 12; }
 
 // FConvexVolume: TArray<FPlane, TInlineAllocator<6>> Planes, then
-// TArray<FPlane, TInlineAllocator<8>> PermutedPlanes. An inline array is its elements,
-// then the heap pointer of the secondary allocator, then ArrayNum and ArrayMax.
-constexpr std::size_t kPlanesHeap = 6 * 16, kPlanesNum = kPlanesHeap + 8, kPermuted = kPlanesNum + 8;
-constexpr std::size_t kPermutedHeap = kPermuted + 8 * 16, kPermutedNum = kPermutedHeap + 8, kConvexSize = kPermutedNum + 8;
+// TArray<FPlane, TInlineAllocator<8>> PermutedPlanes. An inline array is its elements, then
+// the heap pointer of the secondary allocator (the pair padded to 16 bytes, FPlane's
+// alignment), then ArrayNum and ArrayMax, the whole padded to 16 (LIVE: Planes 0x80 bytes,
+// PermutedPlanes 0xA0; docs/re/engine.md, "FViewMatrices in FViewInfo").
+constexpr std::size_t kPlanesHeap = 6 * 16, kPlanesNum = 0x70, kPermuted = 0x80;
+constexpr std::size_t kPermutedHeap = kPermuted + 8 * 16, kPermutedNum = kPermuted + 0x90, kConvexSize = kPermuted + 0xA0;
 
 struct M4 {
     double m[4][4]{};
@@ -204,17 +197,77 @@ bool readable(const void* p, std::size_t n) {
 }
 
 // ------------------------------------------------------------------ layout (render thread)
+// Where the view-dependent matrices of FViewMatrices are is found by value, not assumed:
+// around each copy of PreViewTranslation / ViewOrigin (the exact eye position), every
+// 16-byte aligned 4x4 block is compared with the matrices rebuilt from the frame's eye
+// camera. This build's FViewMatrices does not follow UE 4.18's member order (LIVE: 13 or
+// 14 matrices before PreViewTranslation both leave most of them unmatched).
+enum Cls : int { cView, cInvView, cViewProj, cInvViewProj, cRot, cRotT, cTVP, cITVP, cClsCount };
+constexpr const char* kClsName[cClsCount] = {"View",        "InvView",          "ViewProjection",          "InvViewProjection",
+                                              "ViewRotation", "InvViewRotation", "TranslatedViewProjection", "InvTranslatedViewProjection"};
+constexpr int kMaxSlots = 6;
+constexpr std::size_t kWindow = 0x480;  // bytes before PreViewTranslation that are searched
+
+M4 cls_matrix(const ViewSet& s, int k) {
+    switch (k) {
+        case cView: return s.m[kView];
+        case cInvView: return s.m[kInvView];
+        case cViewProj: return s.m[kViewProjection];
+        case cInvViewProj: return s.m[kInvViewProjection];
+        case cRot: return s.m[kTranslatedView];
+        case cRotT: return s.m[kInvTranslatedView];
+        case cTVP: return s.m[kTranslatedViewProjection];
+        default: return s.m[kInvTranslatedViewProjection];
+    }
+}
+
+// General 4x4 inverse (Gauss-Jordan with partial pivoting).
+M4 inverse(const M4& a) {
+    double m[4][8];
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 8; ++j) m[i][j] = j < 4 ? a.m[i][j] : (j - 4 == i ? 1.0 : 0.0);
+    for (int c = 0; c < 4; ++c) {
+        int p = c;
+        for (int r = c + 1; r < 4; ++r)
+            if (std::fabs(m[r][c]) > std::fabs(m[p][c])) p = r;
+        if (p != c)
+            for (int j = 0; j < 8; ++j) std::swap(m[p][j], m[c][j]);
+        const double d = m[c][c];
+        if (std::fabs(d) < 1e-30) return identity();
+        for (int j = 0; j < 8; ++j) m[c][j] /= d;
+        for (int r = 0; r < 4; ++r)
+            if (r != c) {
+                const double f = m[r][c];
+                for (int j = 0; j < 8; ++j) m[r][j] -= f * m[c][j];
+            }
+    }
+    M4 r;
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j) r.m[i][j] = m[i][j + 4];
+    return r;
+}
+
+// This engine's reversed-Z infinite projection: [xs 0 0 0; 0 ys 0 0; ox oy 0 1; 0 0 n 0].
+bool is_projection(const float* m) {
+    return m[1] == 0 && m[2] == 0 && m[3] == 0 && m[4] == 0 && m[6] == 0 && m[7] == 0 && m[10] == 0 && m[11] == 1.0f && m[12] == 0 &&
+           m[13] == 0 && m[15] == 0 && m[0] > 0.05f && m[0] < 20.0f && m[5] > 0.05f && m[5] < 20.0f && m[14] > 0.0f && m[14] < 1000.0f;
+}
+
+struct Copy {
+    std::size_t origin = 0;  // PreViewTranslation; ViewOrigin follows at +12
+    std::size_t proj = 0;    // the projection matrix the view matrices were built with
+    int n[cClsCount]{};
+    std::size_t off[cClsCount][kMaxSlots]{};
+};
 struct Layout {
     bool found = false;
     int copies = 0;
-    int nmats = 13;                      // FMatrix members of FViewMatrices in this build
-    std::size_t matrices[kMaxCopies]{};  // FViewMatrices copies (ViewMatrices first)
-    bool hmd_no_roll[kMaxCopies]{};      // the copy holds HMDViewMatrixNoRoll without the roll
-    long long frustum = -1;              // FConvexVolume ViewFrustum
+    Copy copy[kMaxCopies];
+    long long frustum = -1;     // FConvexVolume ViewFrustum
     int planes = 0;
-    int plane_kind[6]{};                 // frustum_plane index of each stored plane
-    int perm_index[8]{};                 // which plane each column of PermutedPlanes holds
-    long long near_plane = -1;           // FPlane NearClippingPlane (-1: not found)
+    int plane_kind[6]{};        // frustum_plane index of each stored plane
+    int perm_index[8]{};        // which plane each column of PermutedPlanes holds
+    long long near_plane = -1;  // FPlane NearClippingPlane (-1: not found)
 };
 Layout g_layout;
 std::uint64_t g_layout_failures = 0, g_layout_next_warn = 1;
@@ -226,6 +279,7 @@ std::atomic<bool> g_dump{false};
 struct Stats {
     std::atomic<std::uint64_t> scenes{0}, relocated{0}, no_frame{0}, unpaired{0}, mismatch{0}, not_located{0}, unusable{0}, commit_failed{0};
     std::atomic<double> last_yaw_deg{0}, sum_abs_yaw_deg{0}, max_abs_yaw_deg{0}, sum_shift_cm{0};
+    std::atomic<double> sum_ms{0}, max_ms{0};  // render thread time of the whole update, relocated frames
 };
 Stats g_stats;
 // Pose age at the hand-over (RHI thread writes).
@@ -245,28 +299,62 @@ bool same(const float* f, const FVector& v, bool negate) {
     return f[0] == s * v.X && f[1] == s * v.Y && f[2] == s * v.Z;
 }
 
-// Compares the stored matrices of one copy with those rebuilt from the eye camera. Returns
-// the largest normalised error (<= 1: equal). HMDViewMatrixNoRoll: `variant` 0 = with the
-// roll, 1 = without, -1 = whichever matches better (reported in *no_roll).
-double check_copy(const std::uint8_t* base, int n, const FVector& loc, const FRotator& rot, int variant, bool* no_roll, std::string* detail) {
-    const M4 proj = load(base + slot(kProjection, n)), inv_proj = load(base + slot(kInvProjection, n));
-    const ViewSet s = build(loc, rot, proj, inv_proj);
+ViewSet build_for(const std::uint8_t* view, const Copy& cp, const FVector& loc, const FRotator& rot) {
+    const M4 proj = load(view + cp.proj);
+    return build(loc, rot, proj, inverse(proj));
+}
+
+// Largest normalised error (<= 1: equal) of the copy's matched matrices against those
+// rebuilt from the eye camera.
+double check_copy(const std::uint8_t* view, const Copy& cp, const FVector& loc, const FRotator& rot) {
+    const ViewSet s = build_for(view, cp, loc, rot);
     double worst = 0;
-    for (int i = kView; i < kMatCount; ++i) {
-        double e = max_error(s.m[i], load(base + slot(i, n)));
-        if (i == kHmdViewNoRoll) {
-            const double e2 = max_error(s.hmdNoRoll, load(base + slot(i, n)));
-            if (variant < 0) {
-                if (no_roll) *no_roll = e2 < e;
-                e = std::min(e, e2);
-            } else if (variant == 1) {
-                e = e2;
-            }
-        }
-        if (detail) *detail += std::format(" m{}={:.2g}", i, e);
-        worst = std::max(worst, e);
+    for (int k = 0; k < cClsCount; ++k) {
+        const M4 m = cls_matrix(s, k);
+        for (int i = 0; i < cp.n[k]; ++i) worst = std::max(worst, max_error(m, load(view + cp.off[k][i])));
     }
     return worst;
+}
+
+// Maps the matrices around one copy of PreViewTranslation (at `origin`) in both views.
+bool map_copy(std::uint8_t* v[2], std::size_t origin, const device::LateCandidate& c, Copy& cp, std::string& notes) {
+    cp = Copy{};
+    cp.origin = origin;
+    const std::size_t lo = origin > kWindow ? (origin - kWindow) & ~std::size_t{15} : 0;
+    bool proj = false;
+    for (std::size_t b = lo; b + 64 <= origin && !proj; b += 16)
+        if (is_projection(reinterpret_cast<const float*>(v[0] + b)) && is_projection(reinterpret_cast<const float*>(v[1] + b))) {
+            cp.proj = b;
+            proj = true;
+        }
+    if (!proj) {
+        notes += std::format(" | copy +0x{:x}: no projection matrix in the 0x{:x} bytes before it", origin, kWindow);
+        return false;
+    }
+    const ViewSet s0 = build_for(v[0], cp, c.loc[0], c.rot[0]);
+    const ViewSet s1 = build_for(v[1], cp, c.loc[1], c.rot[1]);
+    std::string unknown;
+    for (std::size_t b = lo; b + 64 <= origin; b += 16) {
+        bool any = b == cp.proj;
+        for (int k = 0; k < cClsCount; ++k)
+            if (max_error(cls_matrix(s0, k), load(v[0] + b)) <= 1.0 && max_error(cls_matrix(s1, k), load(v[1] + b)) <= 1.0) {
+                any = true;
+                if (cp.n[k] < kMaxSlots) cp.off[k][cp.n[k]++] = b;
+            }
+        if (!any && b % 64 == cp.proj % 64) {
+            const float* f = reinterpret_cast<const float*>(v[0] + b);
+            unknown += std::format(" +0x{:x}[{:.3g} {:.3g} {:.3g} {:.3g} / {:.3g} {:.3g} {:.3g} {:.3g}]", b, f[0], f[1], f[2], f[3], f[12], f[13], f[14], f[15]);
+        }
+    }
+    std::string map;
+    for (int k = 0; k < cClsCount; ++k) {
+        map += std::format(" {}:", kClsName[k]);
+        if (!cp.n[k]) map += "-";
+        for (int i = 0; i < cp.n[k]; ++i) map += std::format("{}+0x{:x}", i ? "," : "", cp.off[k][i]);
+    }
+    notes += std::format(" | copy +0x{:x}: projection +0x{:x};{}; blocks matching none (at the projection's 64-byte phase):{}", origin, cp.proj, map,
+                         unknown.empty() ? std::string(" none") : unknown);
+    return cp.n[cView] && cp.n[cInvView] && cp.n[cViewProj] && cp.n[cRot] && cp.n[cTVP];
 }
 
 void find_layout(std::uint8_t* v[2], std::size_t stride, const device::LateCandidate* cands, std::size_t n) {
@@ -276,30 +364,17 @@ void find_layout(std::uint8_t* v[2], std::size_t stride, const device::LateCandi
     for (std::size_t ci = 0; ci < n && !g_layout.found; ++ci) {
         const device::LateCandidate& c = cands[ci];
         Layout L;
-        // FViewMatrices copies: PreViewTranslation (-origin) right before ViewOrigin (origin),
-        // after 13 or 14 matrices.
-        for (int nm = 13; nm <= 14 && !L.copies; ++nm)
-        for (std::size_t o = pre_view_translation(nm); o + 24 <= stride && L.copies < kMaxCopies; o += 4) {
+        // Copies of FViewMatrices: PreViewTranslation (-origin) right before ViewOrigin (origin).
+        for (std::size_t o = 0; o + 24 <= stride && L.copies < kMaxCopies; o += 4) {
             const float* a = reinterpret_cast<const float*>(v[0] + o);
             const float* b = reinterpret_cast<const float*>(v[1] + o);
             if (!same(a, c.loc[0], true) || !same(a + 3, c.loc[0], false) || !same(b, c.loc[1], true) || !same(b + 3, c.loc[1], false)) continue;
-            const std::size_t base = o - pre_view_translation(nm);
-            if (base % 16) continue;
-            std::string d0, d1;
-            bool nr0 = false, nr1 = false;
-            const double e0 = check_copy(v[0] + base, nm, c.loc[0], c.rot[0], -1, &nr0, &d0);
-            const double e1 = check_copy(v[1] + base, nm, c.loc[1], c.rot[1], -1, &nr1, &d1);
-            notes += std::format(" | candidate frame {} copy +0x{:x} ({} matrices): left{} right{}", c.frame_id, base, nm, d0, d1);
-            if (e0 <= 1.0 && e1 <= 1.0) {
-                L.nmats = nm;
-                L.matrices[L.copies] = base;
-                L.hmd_no_roll[L.copies] = nr0 || nr1;
-                ++L.copies;
-            }
+            Copy cp;
+            if (map_copy(v, o, c, cp, notes)) L.copy[L.copies++] = cp;
         }
         if (!L.copies) continue;
         // The view frustum: planes rebuilt from the view-projection match the stored ones.
-        const M4 vp = load(v[0] + L.matrices[0] + slot(kViewProjection, L.nmats));
+        const M4 vp = load(v[0] + L.copy[0].off[cViewProj][0]);
         double formula[6][4];
         bool have[6];
         for (int k = 0; k < 6; ++k) have[k] = frustum_plane(vp, k, formula[k]);
@@ -307,7 +382,22 @@ void find_layout(std::uint8_t* v[2], std::size_t stride, const device::LateCandi
             const auto* num = reinterpret_cast<const std::int32_t*>(v[0] + o + kPlanesNum);
             const auto* heap = reinterpret_cast<void* const*>(v[0] + o + kPlanesHeap);
             const auto* pnum = reinterpret_cast<const std::int32_t*>(v[0] + o + kPermutedNum);
-            if (num[0] < 4 || num[0] > 6 || num[1] != 6 || *heap || pnum[0] != (num[0] + 3) / 4 * 4 || pnum[1] != 8) continue;
+            const auto* pheap = reinterpret_cast<void* const*>(v[0] + o + kPermutedHeap);
+            // A run of planes of the view-projection starts here?
+            int run = 0;
+            for (int i = 0; i < 6; ++i) {
+                bool m = false;
+                for (int k = 0; k < 6 && !m; ++k) m = have[k] && plane_equal(reinterpret_cast<const float*>(v[0] + o + i * 16), formula[k]);
+                if (!m) break;
+                ++run;
+            }
+            if (run < 4) continue;
+            if (num[0] != run || num[1] < num[0] || num[1] > 64 || *heap || pnum[0] != (num[0] + 3) / 4 * 4 || pnum[1] < pnum[0] || pnum[1] > 64 ||
+                *pheap) {
+                notes += std::format(" | {} planes at +0x{:x}, but the arrays' headers read num {} max {} heap {} / permuted num {} max {} heap {}", run, o,
+                                     num[0], num[1], *heap, pnum[0], pnum[1], *pheap);
+                continue;
+            }
             bool all = true;
             int kinds[6]{};
             for (int i = 0; i < num[0] && all; ++i) {
@@ -344,32 +434,44 @@ void find_layout(std::uint8_t* v[2], std::size_t stride, const device::LateCandi
             std::copy(perm, perm + 8, L.perm_index);
         }
         if (L.frustum < 0) {
-            notes += " | view frustum not found";
-            continue;
+            // The matrices are still updated; culling then uses the frame wait's view (logged).
+            notes += " | VIEW FRUSTUM NOT FOUND (culling keeps the frame wait's view); planes of the view-projection seen at:";
+            for (int k = 0; k < 6; ++k)
+                for (std::size_t o = 0; o + 16 <= stride && have[k]; o += 4)
+                    if (plane_equal(reinterpret_cast<const float*>(v[0] + o), formula[k])) notes += std::format(" k{}@+0x{:x}", k, o);
         }
         // The near clipping plane: the "far" formula's plane outside the frustum arrays.
         if (have[5])
             for (std::size_t o = 0; o + 16 <= stride && L.near_plane < 0; o += 16) {
-                if (o + 16 > static_cast<std::size_t>(L.frustum) && o < static_cast<std::size_t>(L.frustum) + kConvexSize) continue;
+                if (L.frustum >= 0 && o + 16 > static_cast<std::size_t>(L.frustum) && o < static_cast<std::size_t>(L.frustum) + kConvexSize) continue;
                 if (plane_equal(reinterpret_cast<const float*>(v[0] + o), formula[5])) L.near_plane = static_cast<long long>(o);
             }
         L.found = true;
         g_layout = L;
     }
     if (!g_layout.found) return log_failure("view matrices not found or not as expected:" + (notes.empty() ? std::string(" no copy of the eye origin") : notes));
-    std::string copies;
-    for (int i = 0; i < g_layout.copies; ++i) copies += std::format(" +0x{:x}{}", g_layout.matrices[i], g_layout.hmd_no_roll[i] ? " (no roll)" : "");
-    copies += std::format(" ({} matrices each)", g_layout.nmats);
     std::string kinds;
     for (int i = 0; i < g_layout.planes; ++i) kinds += std::format("{}{}", i ? "," : "", g_layout.plane_kind[i]);
-    log::info("lateupdate: FViewInfo layout found{}: FViewMatrices at{}; view frustum at +0x{:x} ({} planes, kinds {}); near clipping plane {}{}",
-              g_layout_failures ? std::format(" after {} failed search(es)", g_layout_failures) : std::string(), copies, g_layout.frustum, g_layout.planes,
-              kinds, g_layout.near_plane >= 0 ? std::format("at +0x{:x}", g_layout.near_plane) : std::string("not found"), notes);
+    log::info("lateupdate: FViewInfo layout found{}: {} copies of the view matrices; view frustum {} ({} planes, kinds {}); near clipping "
+              "plane {}{}",
+              g_layout_failures ? std::format(" after {} failed search(es)", g_layout_failures) : std::string(), g_layout.copies,
+              g_layout.frustum >= 0 ? std::format("at +0x{:x}", g_layout.frustum) : std::string("NOT FOUND"), g_layout.planes, kinds,
+              g_layout.near_plane >= 0 ? std::format("at +0x{:x}", g_layout.near_plane) : std::string("not found"), notes);
 }
 
 // FConvexVolume::Init: the planes in groups of four, X of four planes, then Y, Z, W; the
 // last group padded with repeated planes.
 void write_frustum(std::uint8_t* view, const M4& vp) {
+    if (g_layout.frustum < 0) {
+        if (g_layout.near_plane >= 0) {
+            double p[4];
+            if (frustum_plane(vp, 5, p)) {
+                float* np = reinterpret_cast<float*>(view + g_layout.near_plane);
+                for (int k = 0; k < 4; ++k) np[k] = static_cast<float>(p[k]);
+            }
+        }
+        return;
+    }
     float* planes = reinterpret_cast<float*>(view + g_layout.frustum);
     float* perm = reinterpret_cast<float*>(view + g_layout.frustum + kPermuted);
     for (int i = 0; i < g_layout.planes; ++i) {
@@ -392,20 +494,24 @@ void write_frustum(std::uint8_t* view, const M4& vp) {
 }
 
 void write_view(std::uint8_t* view, const FVector& loc, const FRotator& rot) {
+    M4 vp;
     for (int c = 0; c < g_layout.copies; ++c) {
-        std::uint8_t* base = view + g_layout.matrices[c];
-        const int n = g_layout.nmats;
-        const ViewSet s = build(loc, rot, load(base + slot(kProjection, n)), load(base + slot(kInvProjection, n)));
-        for (int i = kView; i < kMatCount; ++i) store(i == kHmdViewNoRoll && g_layout.hmd_no_roll[c] ? s.hmdNoRoll : s.m[i], base + slot(i, n));
-        float* pre = reinterpret_cast<float*>(base + pre_view_translation(n));
+        const Copy& cp = g_layout.copy[c];
+        const ViewSet s = build_for(view, cp, loc, rot);
+        for (int k = 0; k < cClsCount; ++k) {
+            const M4 m = cls_matrix(s, k);
+            for (int i = 0; i < cp.n[k]; ++i) store(m, view + cp.off[k][i]);
+        }
+        float* pre = reinterpret_cast<float*>(view + cp.origin);
         pre[0] = -loc.X;
         pre[1] = -loc.Y;
         pre[2] = -loc.Z;
         pre[3] = loc.X;
         pre[4] = loc.Y;
         pre[5] = loc.Z;
+        if (c == 0) vp = s.m[kViewProjection];
     }
-    write_frustum(view, load(view + g_layout.matrices[0] + slot(kViewProjection, g_layout.nmats)));
+    write_frustum(view, vp);
 }
 
 bool usable(const HostView& v) {
@@ -436,6 +542,8 @@ void before_scene(std::uint8_t* left, std::uint8_t* right, std::size_t stride) {
     const bool dump = g_dump.exchange(false);
     if (!g_on.load(std::memory_order_relaxed) && !dump) return;
     ++g_stats.scenes;
+    LARGE_INTEGER t0;
+    QueryPerformanceCounter(&t0);
     device::LateCandidate cands[8];
     const std::size_t n = device::late_candidates(cands, 8);
     if (!n) {
@@ -448,8 +556,8 @@ void before_scene(std::uint8_t* left, std::uint8_t* right, std::size_t stride) {
     if (!g_layout.found) return;
     // Which frame these views belong to: the eye positions are exact copies of the
     // cameras built for it.
-    const float* o0 = reinterpret_cast<const float*>(left + g_layout.matrices[0] + view_origin(g_layout.nmats));
-    const float* o1 = reinterpret_cast<const float*>(right + g_layout.matrices[0] + view_origin(g_layout.nmats));
+    const float* o0 = reinterpret_cast<const float*>(left + g_layout.copy[0].origin + 12);
+    const float* o1 = reinterpret_cast<const float*>(right + g_layout.copy[0].origin + 12);
     const device::LateCandidate* c = nullptr;
     for (std::size_t i = 0; i < n && !c; ++i)
         if (same(o0, cands[i].loc[0], false) && same(o1, cands[i].loc[1], false)) c = &cands[i];
@@ -460,7 +568,7 @@ void before_scene(std::uint8_t* left, std::uint8_t* right, std::size_t stride) {
     // The views hold what this frame's cameras give (layout and math, every frame).
     for (int e = 0; e < 2; ++e)
         for (int k = 0; k < g_layout.copies; ++k) {
-            if (check_copy(v[e] + g_layout.matrices[k], g_layout.nmats, c->loc[e], c->rot[e], g_layout.hmd_no_roll[k] ? 1 : 0, nullptr, nullptr) > 1.0) {
+            if (check_copy(v[e], g_layout.copy[k], c->loc[e], c->rot[e]) > 1.0) {
                 if (g_stats.mismatch++ < 3) log::warn("lateupdate: frame {} eye {}: the view's matrices are not the ones its camera gives; not updated", c->frame_id, e);
                 return;
             }
@@ -506,6 +614,12 @@ void before_scene(std::uint8_t* left, std::uint8_t* right, std::size_t stride) {
     if (std::fabs(dyaw) > g_stats.max_abs_yaw_deg.load()) g_stats.max_abs_yaw_deg = std::fabs(dyaw);
     const double sx = loc[0].X - c->loc[0].X, sy = loc[0].Y - c->loc[0].Y, sz = loc[0].Z - c->loc[0].Z;
     add(g_stats.sum_shift_cm, std::sqrt(sx * sx + sy * sy + sz * sz));
+    LARGE_INTEGER t1, f;
+    QueryPerformanceCounter(&t1);
+    QueryPerformanceFrequency(&f);
+    const double ms = 1000.0 * static_cast<double>(t1.QuadPart - t0.QuadPart) / static_cast<double>(f.QuadPart);
+    add(g_stats.sum_ms, ms);
+    if (ms > g_stats.max_ms.load()) g_stats.max_ms = ms;
 }
 
 void note_handover(double game_age_ms, double late_age_ms) {
@@ -537,6 +651,8 @@ std::string command(const std::vector<std::string>& a) {
         g_stats.sum_abs_yaw_deg = 0;
         g_stats.max_abs_yaw_deg = 0;
         g_stats.sum_shift_cm = 0;
+        g_stats.sum_ms = 0;
+        g_stats.max_ms = 0;
     } else if (verb != "status") {
         return "err usage: stereo lateupdate status | on | off | dump | reset";
     }
@@ -552,11 +668,15 @@ std::string command(const std::vector<std::string>& a) {
     const std::uint64_t r = g_stats.relocated.load();
     return std::format("ok late update {}; layout {}; stereo scenes {}, relocated {}, no queued frame {}, not paired {}, matrices not as built {}, "
                        "not located {}, unusable {}, hand-over not found {}; eye yaw change last {:.3f} avg |{:.3f}| max {:.3f} deg, eye shift avg {:.3f} cm; "
-                       "pose age at the hand-over: game-thread location {:.2f} ms (n {}), late location {:.2f} ms (n {})",
-                       g_on.load() ? "on" : "off", g_layout.found ? std::format("found ({} copies)", g_layout.copies) : std::string("not found"),
+                       "pose age at the hand-over: game-thread location {:.2f} ms (n {}), late location {:.2f} ms (n {}); render thread time per "
+                       "relocated frame avg {:.3f} max {:.3f} ms",
+                       g_on.load() ? "on" : "off",
+                       g_layout.found ? std::format("found ({} copies, frustum {})", g_layout.copies, g_layout.frustum >= 0 ? "found" : "NOT found")
+                                      : std::string("not found"),
                        g_stats.scenes.load(), r, g_stats.no_frame.load(), g_stats.unpaired.load(), g_stats.mismatch.load(), g_stats.not_located.load(),
                        g_stats.unusable.load(), g_stats.commit_failed.load(), g_stats.last_yaw_deg.load(), r ? g_stats.sum_abs_yaw_deg.load() / r : 0.0,
-                       g_stats.max_abs_yaw_deg.load(), r ? g_stats.sum_shift_cm.load() / r : 0.0, game, gn, late, ln);
+                       g_stats.max_abs_yaw_deg.load(), r ? g_stats.sum_shift_cm.load() / r : 0.0, game, gn, late, ln,
+                       r ? g_stats.sum_ms.load() / r : 0.0, g_stats.max_ms.load());
 }
 
 }  // namespace ff7vr::engine::late_update
