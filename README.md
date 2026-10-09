@@ -19,7 +19,7 @@ Known problems right now (details in `GUIDE.md`):
 - Screen-space reflections are off in 3D: the game's reflection pass gets the right eye wrong, so the eyes would not match. `[stereo] ssr_fix = 1` brings them back (wrong in the right eye).
 - Pre-rendered movies can drop to a slideshow. It looks like a GPU upload slowdown rather than the movie itself and is still being looked at; waiting a minute and a half between restarts of the game helps.
 - Heat haze over fire broke the right eye; fixed, not yet confirmed in a headset.
-- The gamepad combinations need an XInput pad (Xbox, 8BitDo in XInput mode); a DualSense or any pad in DirectInput mode is read by the game itself and the combinations do not apply (use the keys).
+- PlayStation pads (DualShock 4, DualSense): the combinations now also work when the game reads the pad itself, with the touch pad click in place of View/Back, not yet tried with a real pad. The recommended setup is Steam Input on for the game (Steam then hands the game an Xbox pad and the combinations work as for one). Other DirectInput pads are still read by the game alone (use the keys).
 - Wait a minute and a half between quitting the game and starting it again, or it can run at 10 fps for minutes (the launcher waits by itself; a start from Steam does not).
 
 ## Requirements
@@ -88,6 +88,8 @@ combinations):
 | **Insert** | hold View/Back + Menu/Start | 3D off (the game on the virtual screen) and on again. If the headset has lost the game (for example after Virtual Desktop or SteamVR was closed and opened again), the same key reconnects it |
 | **Page Down** / **Page Up** | hold View/Back + D-pad down / up | HUD/menu panel 0.25 m nearer / farther |
 | **Delete** | hold View/Back + Y | **settings panel** in the headset: change settings live and save them to `ff7vr.ini` (D-pad: choose and change, A: select, X: save, B: close) |
+
+On a DualShock 4 or DualSense the touch pad click takes the place of View/Back. To walk where your head points instead of where the game camera faces, set `[first_person] move = head` (and `[camera] move = head` for third person); this turns the left stick only, not WASD.
 
 ## If something is wrong
 

@@ -11,6 +11,7 @@
 #include "bloom_fix.h"
 #include "distortion_fix.h"
 #include "controls.h"
+#include "sce_pad.h"
 #include "snap_turn.h"
 #include "movie_watch.h"
 #include "player.h"
@@ -228,6 +229,7 @@ void resolve_and_prepare() {
             g_addr.failure = "could not hook UGameEngine::Tick";
         }
     }
+    sce_pad::init(g_addr.ScePadReadState);
     if (g_addr.GEngine && *g_addr.GEngine && !g_hmd_hook_called) {
         g_addr.stereo_ok = false;
         g_addr.failure = "the engine was initialised before the mod could hook it";
@@ -314,7 +316,7 @@ bool start(const StartupContext& ctx) {
                               if (args.starts_with("audio")) reply = audio_listener::command(std::string(args.substr(5)));
                               return reply;
                           });
-        dev_commands::add("controls", "controls status | pad <hex buttons> | recenter | stereo | nearer | farther: the player's keys and gamepad combinations",
+        dev_commands::add("controls", "controls status | pad <hex> | psfilter <hex> | ps <hex>|off | source | move status|camera|head | recenter | stereo | nearer | farther: the player's keys, gamepad combinations, movement direction",
                           [](std::string_view args) { return controls::command(std::string(args)); });
         dev_commands::add("snapturn", "snapturn status | snap <deg>|off | deadzone | repeat | log | stick <lx> <ly> <rx> <ry>: snap turn ([comfort] snap_turn)",
                           [](std::string_view args) { return snap_turn::command(std::string(args)); });

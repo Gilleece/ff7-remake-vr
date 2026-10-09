@@ -98,6 +98,17 @@ constexpr Sig kDistortionComposite{"Distortion composite",
                                    "?? ?? ?? ?? 48 33 C4 48 89 85 C0 00 00 00 33 FF",
                                    Rule::Match, 0, 0, 0, 0x220e5b0};
 constexpr std::uint8_t kDistortionCompositeArgs[] = {0x4d, 0x8b, 0xa0, 0x80, 0x28, 0x00, 0x00, 0x4d, 0x8b, 0xe8, 0x4c, 0x8b, 0xf9};
+// The WinDualShock plugin's per-user poll (FWinDualShock::SendControllerEvents -> 0x38ca210)
+// calls libScePad's scePadReadState(handle = slot+0x218, data = slot+0x78), skips the result
+// when the buttons' top bit (intercepted) is set and reads `connected` at data+0x4C. The call's
+// target is the function; the pattern pins the offsets the hook relies on.
+constexpr Sig kScePadReadStateCall{"scePadReadState call in the WinDualShock poll",
+                                   "8B 8E 18 02 00 00 48 8D 56 78 F2 0F 58 35 ?? ?? ?? ?? E8 ?? ?? ?? ?? 83 7E 78 00 0F 8C ?? ?? ?? ?? "
+                                   "0F B6 8E 28 02 00 00 4C 89 A4 24 58 01 00 00 85 C0 75 0C 38 86 C4 00 00 00",
+                                   Rule::Rip, 18, 1, 5, 0x3f7ec50};
+// scePadReadState itself: prologue, the "not initialised" check and its error code.
+constexpr std::uint8_t kScePadReadStateHead[] = {0x48, 0x89, 0x5c, 0x24, 0x08, 0x57, 0x48, 0x83, 0xec, 0x20, 0x80, 0x3d};
+constexpr std::uint8_t kScePadReadStateErr[] = {0xb8, 0x05, 0x00, 0x92, 0x80};
 constexpr Sig kFindFreeElement{"FRenderTargetPool::FindFreeElement", "40 55 53 41 56 41 57 48 8D AC 24 D8 FE FF FF", Rule::Match, 0, 0, 0,
                                0x253d6b0};
 
@@ -332,6 +343,13 @@ Addresses resolve_addresses(bool allow_unknown_build, const void* hmd_detour) {
     if (std::uintptr_t p = addr(kGUObjectArray, false)) a.GUObjectArray = reinterpret_cast<std::uint8_t*>(p - 0x10);
     a.FNamePool = reinterpret_cast<std::uint8_t*>(addr(kFNamePool, false));
     a.FindFreeElement = addr(kFindFreeElement, false);
+    if (std::uintptr_t p = addr(kScePadReadStateCall, false)) {
+        if (std::memcmp(reinterpret_cast<const void*>(p), kScePadReadStateHead, sizeof(kScePadReadStateHead)) == 0 &&
+            std::memcmp(reinterpret_cast<const void*>(p + 0x18), kScePadReadStateErr, sizeof(kScePadReadStateErr)) == 0)
+            a.ScePadReadState = p;
+        else
+            log::warn("engine: the WinDualShock poll calls a function that does not look like scePadReadState");
+    }
     if (std::uintptr_t p = addr(kBloomReduceProcess, false)) {
         if (std::memcmp(reinterpret_cast<const void*>(p + 0x85), kBloomReduceFields, sizeof(kBloomReduceFields)) == 0 &&
             std::memcmp(reinterpret_cast<const void*>(p + 0xd5), kBloomReduceRect, sizeof(kBloomReduceRect)) == 0)

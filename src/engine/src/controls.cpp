@@ -1,6 +1,8 @@
 #include "controls.h"
 
+#include "head_move.h"
 #include "player.h"
+#include "sce_pad.h"
 #include "stereo_device.h"
 
 #include "ff7vr/core/dev_commands.h"
@@ -130,7 +132,9 @@ Key g_keys[] = {
 constexpr unsigned short kUp = 0x0001, kDown = 0x0002, kStart = 0x0010, kView = 0x0020, kLeftThumb = 0x0040,
                          kRightThumb = 0x0080;
 constexpr std::int64_t kViewReplayUs = 120000;
-constexpr unsigned long kPads = 4;
+// Pad slots: XInput user indexes 0..3, then PlayStation pads (read by the game through
+// libScePad, sce_pad.h) 0..3 as slots 4..7.
+constexpr unsigned long kXInputPads = 4, kPads = 8;
 std::mutex g_pad_mutex;
 
 enum class Chord { Idle, Pending, Fired, Passed };
@@ -227,6 +231,10 @@ std::string chord_name(unsigned short m) {
     return s;
 }
 
+std::string pad_name(unsigned long user) {
+    return user < kXInputPads ? std::format("pad {}", user) : std::format("PlayStation pad {}", user - kXInputPads);
+}
+
 // Counters for `controls status` and the timing block (totals; the timing line shows the
 // change since the previous line).
 struct Counters {
@@ -305,6 +313,20 @@ bool chord_filter(Pad& p, unsigned short& b, unsigned short chord, std::int64_t 
     return fired;
 }
 
+bool parse_source(const std::string& text, int& out) {
+    std::string t;
+    for (char c : text) t += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (t == "auto" || t == "both") out = kSourceAuto;
+    else if (t == "xinput") out = kSourceXInput;
+    else if (t == "playstation" || t == "ps" || t == "dinput" || t == "sony") out = kSourcePlayStation;
+    else return false;
+    return true;
+}
+
+const char* source_name(int v) {
+    return v == kSourceXInput ? "xinput" : v == kSourcePlayStation ? "playstation" : "auto (xinput and playstation)";
+}
+
 }  // namespace
 
 Settings& settings() { return g_settings; }
@@ -332,6 +354,11 @@ void read_config(const Config& cfg) {
     s.fp_chord = chord;
     s.fp_chord_ms = static_cast<int>(std::clamp<long long>(cfg.get_int("controls", "fp_toggle_chord_ms", s.fp_chord_ms.load()), 0, 2000));
     g_pad_log = static_cast<int>(std::clamp<long long>(cfg.get_int("controls", "pad_log", 0), -1, 100000));
+    const std::string source = cfg.get_string("controls", "pad_source", "auto");
+    int src = kSourceAuto;
+    if (!parse_source(source, src)) log::warn("controls: pad_source '{}' is not auto, xinput or playstation; using auto", source);
+    s.pad_source = src;
+    head_move::read_config(cfg);
     log::info("controls: first/third person chord {} (within {} ms){}", chord_name(s.fp_chord.load()), s.fp_chord_ms.load(),
               g_pad_log.load() ? std::format("; logging the first {} pad state changes", g_pad_log.load()) : std::string());
 }
@@ -348,7 +375,65 @@ void tick() {
     }
 }
 
+namespace {
+
+// PlayStation buttons (ScePadData::buttons, libScePad's SCE_PAD_BUTTON_* bits) and the
+// XInput button the filter treats them as. The game maps them the same way (WinDualShock:
+// Options = SpecialRight like Menu/Start, the touch pad click = SpecialLeft like View/Back;
+// Share/Create is not reported). L2/R2 (0x100/0x200) are not mapped and pass unchanged.
+constexpr struct {
+    std::uint32_t sce;
+    unsigned short xi;
+} kSceMap[] = {
+    {0x00000002, 0x0040},  // L3
+    {0x00000004, 0x0080},  // R3
+    {0x00000008, 0x0010},  // Options -> Start/Menu
+    {0x00000010, 0x0001},  // D-pad up
+    {0x00000020, 0x0008},  // D-pad right
+    {0x00000040, 0x0002},  // D-pad down
+    {0x00000080, 0x0004},  // D-pad left
+    {0x00000400, 0x0100},  // L1 -> LB
+    {0x00000800, 0x0200},  // R1 -> RB
+    {0x00001000, 0x8000},  // triangle -> Y
+    {0x00002000, 0x2000},  // circle -> B
+    {0x00004000, 0x1000},  // cross -> A
+    {0x00008000, 0x4000},  // square -> X
+    {0x00100000, 0x0020},  // touch pad click -> View/Back
+};
+
+void filter_buttons(unsigned long user, unsigned short* buttons);
+
+}  // namespace
+
 void filter_pad(unsigned long user, unsigned short* buttons) {
+    if (user >= kXInputPads || g_settings.pad_source.load(std::memory_order_relaxed) == kSourcePlayStation) return;
+    filter_buttons(user, buttons);
+}
+
+unsigned short sce_to_xinput(std::uint32_t sce) {
+    unsigned short xi = 0;
+    for (const auto& m : kSceMap)
+        if (sce & m.sce) xi = static_cast<unsigned short>(xi | m.xi);
+    return xi;
+}
+
+void filter_sce(unsigned long index, std::uint32_t* buttons) {
+    if (index >= kPads - kXInputPads || !buttons || g_settings.pad_source.load(std::memory_order_relaxed) == kSourceXInput) return;
+    const unsigned short in = sce_to_xinput(*buttons);
+    unsigned short out = in;
+    filter_buttons(kXInputPads + index, &out);
+    if (out == in) return;
+    std::uint32_t b = *buttons;
+    for (const auto& m : kSceMap) {
+        if ((in & m.xi) && !(out & m.xi)) b &= ~m.sce;  // withheld from the game
+        if (!(in & m.xi) && (out & m.xi)) b |= m.sce;   // a held-back press handed over
+    }
+    *buttons = b;
+}
+
+namespace {
+
+void filter_buttons(unsigned long user, unsigned short* buttons) {
     if (user >= kPads || !buttons) return;
     const unsigned short combos = combo_buttons();
     const unsigned short chord = player::settings().fp_available.load() ? g_settings.fp_chord.load() : 0;
@@ -415,7 +500,7 @@ void filter_pad(unsigned long user, unsigned short* buttons) {
             while (left != 0 && !g_pad_log.compare_exchange_weak(left, left > 0 ? left - 1 : left)) {
             }
             if (left != 0)
-                log_line = std::format("controls: pad {} in {:#06x} -> game {:#06x} (poll +{:.1f} ms, {}{}{})", user, in, b,
+                log_line = std::format("controls: {} in {:#06x} -> game {:#06x} (poll +{:.1f} ms, {}{}{})", pad_name(user), in, b,
                                        p.last_poll ? double(now - p.last_poll) / 1000.0 : 0.0,
                                        p.last_change ? std::format("previous change {:.1f} ms before", double(now - p.last_change) / 1000.0)
                                                      : std::string("first change"),
@@ -442,6 +527,8 @@ void filter_pad(unsigned long user, unsigned short* buttons) {
     }
 }
 
+}  // namespace
+
 std::uint64_t pad_polls() { return g_count.polls.load(); }
 
 namespace {
@@ -460,14 +547,14 @@ std::string timing_line() {
     {
         std::lock_guard lock(g_pad_mutex);
         for (unsigned long u = 0; u < kPads; ++u)
-            if (g_pads[u].last_poll) states += std::format("{}pad {} {}", states.empty() ? "" : ", ", u, chord_state_name(g_pads[u].chord));
+            if (g_pads[u].last_poll) states += std::format("{}{} {}", states.empty() ? "" : ", ", pad_name(u), chord_state_name(g_pads[u].chord));
     }
     const Settings& s = g_settings;
     return std::format("ok pad filter: {} polls, {} state changes; chord {} ({} ms){}: started {}, fired {}, passed late {}, replayed short {}, "
-                       "ignored while View held {}; View combinations {}; now {}; last pad {} in {:#06x} -> game {:#06x}",
+                       "ignored while View held {}; View combinations {}; now {}; last {} in {:#06x} -> game {:#06x}",
                        d[0], d[1], chord_name(s.fp_chord.load()), s.fp_chord_ms.load(), player::settings().fp_available.load() ? "" : " (first person off)",
-                       d[2], d[3], d[4], d[5], d[6], d[7], states.empty() ? "no pad polled" : states, g_last_user.load(), g_last_in.load(),
-                       g_last_out.load());
+                       d[2], d[3], d[4], d[5], d[6], d[7], states.empty() ? "no pad polled" : states, pad_name(g_last_user.load()), g_last_in.load(),
+                       g_last_out.load()) + "; " + sce_pad::timing();
 }
 
 }  // namespace
@@ -479,15 +566,15 @@ std::string command(const std::string& args) {
     const Settings& s = g_settings;
     if (a.empty() || a[0] == "status") {
         return std::format("ok keys recenter {} stereo {} ui nearer {} farther {}; pad {} hold view {}; ui step {:.2f} m ({:.2f}..{:.2f}); "
-                           "triggers {} (gamepad {}), pad polls {}; stereo {}",
+                           "triggers {} (gamepad {}), pad polls {}; pad source {}; stereo {}",
                            s.recenter_key.load(), s.stereo_key.load(), s.ui_nearer_key.load(), s.ui_farther_key.load(),
                            s.pad.load() ? 1 : 0, s.pad_hold_view.load() ? 1 : 0, s.ui_step.load(), s.ui_min.load(), s.ui_max.load(),
-                           g_triggers.load(), g_pad_triggers.load(), g_count.polls.load(), device::wanted() ? "on" : "off") +
-               std::format("; fp chord {} within {} ms: started {}, fired {}, passed late {}, replayed short {}; last pad {} in {:#06x} -> game {:#06x}; "
-                           "pad log {}",
+                           g_triggers.load(), g_pad_triggers.load(), g_count.polls.load(), source_name(s.pad_source.load()), device::wanted() ? "on" : "off") +
+               std::format("; fp chord {} within {} ms: started {}, fired {}, passed late {}, replayed short {}; last {} in {:#06x} -> game {:#06x}; "
+                           "pad log {}; {}; {}",
                            chord_name(s.fp_chord.load()), s.fp_chord_ms.load(), g_count.chord_pending.load(), g_count.chord_fired.load(),
-                           g_count.chord_passed.load(), g_count.chord_replayed.load(), g_last_user.load(), g_last_in.load(), g_last_out.load(),
-                           g_pad_log.load());
+                           g_count.chord_passed.load(), g_count.chord_replayed.load(), pad_name(g_last_user.load()), g_last_in.load(), g_last_out.load(),
+                           g_pad_log.load(), sce_pad::status(), head_move::status());
     }
     if (a[0] == "timing") return timing_line();
     if (a[0] == "padlog" && a.size() == 2) {
@@ -508,9 +595,27 @@ std::string command(const std::string& args) {
         // one given second).
         unsigned short b = static_cast<unsigned short>(std::strtoul(a[1].c_str(), nullptr, 16));
         const unsigned long user = a.size() == 3 ? std::strtoul(a[2].c_str(), nullptr, 10) : 0;
-        if (user >= kPads) return "err user index 0..3";
-        filter_pad(user, &b);
+        if (user >= kXInputPads) return "err user index 0..3";
+        filter_buttons(user, &b);
         return std::format("ok buttons after filter {:#06x}", b);
+    }
+    if (a[0] == "psfilter" && (a.size() == 2 || a.size() == 3)) {
+        // Test without a pad: one PlayStation button word (ScePadData::buttons) through the
+        // filter (pad 0, or the one given second).
+        std::uint32_t b = static_cast<std::uint32_t>(std::strtoul(a[1].c_str(), nullptr, 16));
+        const unsigned long index = a.size() == 3 ? std::strtoul(a[2].c_str(), nullptr, 10) : 0;
+        if (index >= kPads - kXInputPads) return "err pad index 0..3";
+        const std::uint32_t before = b;
+        filter_sce(index, &b);
+        return std::format("ok PlayStation buttons {:#010x} -> game {:#010x}", before, b);
+    }
+    if (a[0] == "ps") return sce_pad::command(args.substr(args.find("ps") + 2));
+    if (a[0] == "move") return head_move::command(args.substr(args.find("move") + 4));
+    if (a[0] == "source" && a.size() == 2) {
+        int v = 0;
+        if (!parse_source(a[1], v)) return "err usage: controls source auto|xinput|playstation";
+        g_settings.pad_source = v;
+        return std::string("ok pad source ") + source_name(v);
     }
     const struct {
         const char* word;
@@ -522,7 +627,8 @@ std::string command(const std::string& args) {
             return std::string("ok ") + action_name(w.action);
         }
     }
-    return "err usage: controls status | timing | pad <hex buttons> [user] | padlog <n>|on | chord <L3+R3|off> [ms] | recenter | stereo | nearer | farther";
+    return "err usage: controls status | timing | pad <hex buttons> [user] | psfilter <hex> [pad] | ps <hex>|off|status | source auto|xinput|playstation | "
+           "move status|camera|head [first|third] | padlog <n>|on | chord <L3+R3|off> [ms] | recenter | stereo | nearer | farther";
 }
 
 }  // namespace ff7vr::engine::controls

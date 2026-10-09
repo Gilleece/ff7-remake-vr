@@ -237,9 +237,23 @@ up to 150 ms late, because the mod waits that long for the second click; a quick
 is handed over as a short press when you release it. `[controls] fp_toggle_chord`
 changes the buttons (empty = off) and `fp_toggle_chord_ms` the window. All keys can be
 changed in `ff7vr.ini` (`[controls]`, `[first_person] toggle_key`).
-The gamepad combinations go through the mod only for an XInput pad (an Xbox pad or a pad
-in XInput mode); a DualSense or a pad in DirectInput mode is read by the game itself, and
-the combinations do not apply to it (use the keys).
+PlayStation pads (DualShock 4, DualSense) work two ways. With Steam Input on for the game
+(in Steam: the game's Properties, Controller, Steam Input enabled; or Steam's PlayStation
+controller support), Steam hands the game an Xbox pad and everything above applies as
+written: this is the recommended setup. Without Steam Input the game reads the pad itself;
+the mod then applies the same combinations to it, with the **touch pad click** in place of
+View/Back (the game uses the touch pad where an Xbox pad has View/Back) and Options in place
+of Menu/Start: L3+R3 switches first/third person, touch pad + left stick click recenters,
+touch pad + Options switches 3D, touch pad + D-pad up/down moves the HUD panel. This second
+route was only tested with a simulated pad so far. `[controls] pad_source = xinput` turns
+it off, `playstation` leaves Xbox pads alone. Other DirectInput pads are read by the game
+alone and the combinations do not apply to them (use the keys).
+
+Movement direction: by default the left stick moves Cloud relative to the game camera, as
+in the flat game. `[first_person] move = head` makes forward on the left stick walk where
+your head points (turn your head right, push forward, and he walks right), with smooth
+turning or snap turn alike; `[camera] move = head` does the same in third person. Keyboard
+movement (W/A/S/D) is not turned.
 
 3D starts in first person outside battles. First person puts the view between the
 character's eyes, leaves Cloud's body out of the picture (his shadow and footsteps stay;
@@ -261,7 +275,8 @@ the same job.
 Snap turn (gamepad): `[comfort] snap_turn = 45` (or 30) makes the right stick turn your
 view in steps of that many degrees instead of smoothly; push it again after letting go
 for the next step. The left stick then moves Cloud where you look; keyboard movement is
-not turned with it. Recenter makes the way you face forward again.
+not turned with it. Recenter makes the way you face forward again. With `move = head`
+(above) the left stick follows your head instead, snap turns included.
 
 Taking the headset off (or opening the headset's own menu) while 3D runs pauses the game:
 the mod presses M, the game's menu, once (`[xr] pause_on_remove = 0` turns this off,

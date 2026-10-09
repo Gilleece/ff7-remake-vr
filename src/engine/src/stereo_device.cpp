@@ -1,6 +1,7 @@
 #include "stereo_device.h"
 
 #include "fixed_host.h"
+#include "head_move.h"
 #include "bloom_fix.h"
 #if FF7VR_ENGINE_WITH_DLSS
 #include "dlss.h"
@@ -384,6 +385,13 @@ void CalculateStereoViewOffset(void*, EStereoscopicPass pass, FRotator* rotation
     math::compose_eye(in, out_rot, out_loc);
 
     if (e == 0) {
+        // The head's direction in the world, for head-directed movement: the eye base
+        // composed with the head pose the same way as the eyes.
+        ue::FRotator base_level = base_rot;
+        if (in.decouple_pitch) base_level.Pitch = base_level.Roll = 0.0f;
+        const ue::FRotator head_world =
+            math::rotator_from_quat(math::normalize(math::mul(math::quat_from_rotator(base_level), math::xr_to_ue_quat(in.head.orientation))));
+        head_move::publish(game_rot, head_world, force_decouple);
         ++g.stereo_draws;
         g.views_built = true;
         if (g.logged_order < 3) {

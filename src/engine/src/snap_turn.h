@@ -23,7 +23,8 @@ void read_config(const Config& cfg);
 // Game thread, once per engine frame: the optional snap keys.
 void tick();
 
-// Any thread (the game's XInput poll), user index 0..3: hides the right stick's X while
+// Any thread (the game's XInput poll with user index 0..3, or its libScePad poll with PlayStation
+// pad 0..3 as 4..7): hides the right stick's X while
 // snap turn is on, fires the steps, rotates the left stick by the turn in effect.
 void filter_sticks(unsigned long user, short* lx, short* ly, short* rx, short* ry);
 

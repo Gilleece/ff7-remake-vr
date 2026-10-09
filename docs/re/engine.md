@@ -1131,14 +1131,60 @@ The object is created in the `FWindowsApplication` constructor (`0x1d1d720`) and
 Method: `dumpbin /imports`, `tools/re/ff7re.py` (`code_refs` on the IAT slot, the vtable and
 the +0x1d8 member), `re peek` live.
 
-**DirectInput / HID (Square Enix).** `HID.DLL` is a static import (`HidD_GetAttributes`,
-`HidD_GetProductString`, `HidD_GetFeature`, `HidD_SetFeature`, ...), SetupAPI device
-enumeration too, and `dinput8.dll` (UTF-16 string) is loaded at run time (seen in the live
-module list). Strings: `EndDirectInput`, `WinDualShock`, `Wireless Controller` (the product
-string of Sony's pads), `Wireless Gamepad (L/R)`, `EEndMenuGamepadType::XInput` /
-`DirectInput`, `DirectInput_Button1` to `32`. A DualShock, DualSense or other DirectInput pad
-is read here and never reaches the XInput proxy. (Not traced further: which pads this path
-takes and whether it also reads XInput pads.)
+**PlayStation pads: WinDualShock + libScePad (STATIC, 2026-10-09).** Sony pads are not read
+through DirectInput but through Unreal's `WinDualShock` input-device plugin on top of Sony's
+libScePad for Windows, statically linked (no symbols; its HID code is the `HID.DLL` and
+SetupAPI imports: `HidD_GetAttributes`, `HidD_GetProductString`, `HidD_Get/SetFeature`,
+`SetupDiGetClassDevsW` at 0x3f86140, `CreateFileW` + overlapped `ReadFile` /
+`GetOverlappedResult[Ex]` / `CancelIo` in 0x3f82f20 and 0x3f878c0, product string
+L"Wireless Controller" compared in 0x3fe6320 and 0x3fe7030). Chain, all verified by
+disassembly:
+- String `WinDualShock` -> static module registration 0x38cbf80 -> module factory 0x38cc150
+  (vtable 0x4f47598); slot 8 = `CreateInputDevice` 0x38cbec0: allocates 0xB08 bytes,
+  constructor 0x38cb8a0 (IInputDevice vtable 0x4f47608: slot 2 `SendControllerEvents`
+  0x38cbaf0; it reads `[PS5Application] bDSTouchEvents`, `bDSTouchAxisButtons`,
+  `bDSMouseEvents`, `bDSMotionEvents` from the ini).
+- The controllers object at +0x18 (constructor 0x38c9da0): calls 0x3f7eb00 (`scePadInit`), and
+  for users 0..3 0x3f7ebb0 (`scePadOpen`) whatever is connected; per-user slot = this+0xF0 +
+  user*0x270 (handle at slot+0x218).
+- `SendControllerEvents` 0x38cbaf0 loops users 0..3 calling 0x38ca210, which calls
+  **0x3f7ec50 = `scePadReadState(int handle, ScePadData* data)`** with data = slot+0x78 (its
+  only caller; error returns 0x80920005 not initialised, 0x80920001 null data, 0x80920003 bad
+  handle, 0x809200ff), skips the state when `buttons` bit 31 (`SCE_PAD_BUTTON_INTERCEPTED`)
+  is set, takes `connected` from data+0x4C, the sticks from +4..+7 (bytes, 0x80 centre; Y
+  inverted), L2/R2 analog from +8/+9, then turns bits 0..20 of `buttons` plus eight stick
+  directions (29 entries) into `FGamepadKeyNames` through a name table at this+8.
+- The name table (constructor 0x38ca07a on): bit 0x1 -> `Invalid` (Share/Create is not
+  reported), 0x2 LeftThumb (L3), 0x4 RightThumb (R3), 0x8 SpecialRight (Options), 0x10 DPadUp,
+  0x20 DPadRight, 0x40 DPadDown, 0x80 DPadLeft, 0x100 LeftTriggerThreshold (L2), 0x200
+  RightTriggerThreshold (R2), 0x400 LeftShoulder (L1), 0x800 RightShoulder (R1), 0x1000
+  FaceButtonTop (triangle), 0x2000 FaceButtonRight (circle), 0x4000 FaceButtonBottom (cross),
+  0x8000 FaceButtonLeft (square), 0x10000..0x80000 Invalid, 0x100000 SpecialLeft (touch pad
+  click; the same key as View/Back on an Xbox pad). The `FGamepadKeyNames` globals were
+  identified by their order (0x5919310 Invalid, 0x5919318 LeftAnalogX ...) and checked against
+  the analog axes the same function sends (LeftAnalogX/Y from bytes +4/+5, RightAnalogX/Y from
+  +6/+7, the trigger axes from +8/+9). The bit values are libScePad's documented
+  `SCE_PAD_BUTTON_*` values (also in the open PS4 SDKs).
+- ScePadData layout (0x78 bytes): buttons u32 +0, left stick x/y +4/+5, right +6/+7, analog
+  L2/R2 +8/+9, orientation quaternion +0xC, acceleration +0x1C, angular velocity +0x28, touch
+  data +0x34, connected +0x4C, timestamp +0x50, extension data +0x58, connected count +0x64,
+  device-unique data +0x67.
+Signature: `scePadReadState call in the WinDualShock poll` in `tools/re/signatures.json`
+(the call site with the offsets above; the target's prologue and its "not initialised" error
+code are checked by the mod). The mod hooks this function to apply its gamepad combinations
+to PlayStation pads (`src/engine/src/sce_pad.cpp`). Live (Null backend, no physical pad): see
+docs/engine-module.md, "PlayStation pads".
+
+**DirectInput (Square Enix).** `dinput8.dll` (UTF-16 string) is loaded at run time by
+0x16efe00 (`DirectInput8Create` by name; seen in the live module list); strings
+`EndDirectInput`, `Wireless Gamepad (L/R)` (Joy-Con names, 0x16eb540, 0x16ea3f0),
+`EEndMenuGamepadType::XInput` / `DirectInput`, `DirectInput_Button1` to `32`. Other
+DirectInput pads are read here and reach neither the XInput proxy nor the libScePad hook.
+(Not traced further: its device filter and button layout.)
+
+**Raw input** (`RegisterRawInputDevices` 0x1d1f120, `GetRawInputData` 0x1d200c0,
+`GetRawInputDeviceList` / `GetRawInputDeviceInfoA` 0x1d24480) is, inferred from where it sits (next to `FWindowsApplication`, 0x1d1d720) and Unreal's source, Unreal's own mouse code in
+`FWindowsApplication`, not a pad path.
 
 **The Steam overlay hooks the proxy's export (LIVE).** `gameoverlayrenderer64.dll` is in the
 process even when the exe is started directly (through `steam_api64`). It patches the first
