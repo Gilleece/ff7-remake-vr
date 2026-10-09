@@ -34,7 +34,7 @@ add_subdirectory(src/core)
 # Optional modules: added when the directory has a CMakeLists.txt. Each can be
 # switched off with -DFF7VR_WITH_<NAME>=OFF (e.g. FF7VR_WITH_XR) to build the
 # rest while one module is broken.
-foreach(_dir src/xr tools/xr_smoke src/engine src/render src/dev)
+foreach(_dir src/xr tools/xr_smoke tools/upload_probe src/engine src/render src/dev)
     get_filename_component(_name ${_dir} NAME)
     string(TOUPPER ${_name} _NAME)
     option(FF7VR_WITH_${_NAME} "Build ${_dir} if present" ON)
