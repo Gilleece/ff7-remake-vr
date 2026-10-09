@@ -6,6 +6,7 @@
 #include "ue_math.h"
 #include "uobj.h"
 
+#include "ff7vr/core/dev_commands.h"
 #include "ff7vr/core/log.h"
 #if FF7VR_ENGINE_WITH_RENDER
 #include "ff7vr/render/render.h"
@@ -1448,6 +1449,7 @@ std::string command(const std::string& args) {
         }
         return std::format("ok {} propert(ies){}", count, r);
     }
+    if (a[0] == "call" && !dev_commands::unsafe_allowed()) return dev_commands::kUnsafeDisabledReply;
     if (a[0] == "call" && a.size() >= 3) {
         // fp call <object hex | class name> <Class.Function> [hex bytes of the parameters]:
         // calls the function on the game thread and prints the first 48 bytes of the

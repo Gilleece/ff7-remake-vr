@@ -45,6 +45,7 @@
 #define FF7VR_HOST_RENDER_HELP ""
 #endif
 
+#include "ff7vr/core/dev_commands.h"
 #include "ff7vr/core/hook.h"
 #include "ff7vr/core/log.h"
 #include "ff7vr/core/module.h"
@@ -94,6 +95,7 @@ std::string command(const std::vector<std::string>& a) {
             if (!read_guarded(reinterpret_cast<const void*>(base() + rva), buf.data(), n)) return "err not readable";
             return std::format("ok {:#x}: {}", rva, hex_bytes(buf.data(), n));
         }
+        if (a.size() >= 2 && a[1] == "poke" && !dev_commands::unsafe_allowed()) return dev_commands::kUnsafeDisabledReply;
         if (a.size() >= 4 && a[1] == "poke") {
             const std::uintptr_t rva = std::stoull(a[2], nullptr, 16);
             std::vector<std::uint8_t> bytes;

@@ -10,11 +10,13 @@
 #endif
 
 #include <windows.h>
+#include <sddl.h>
 #include <xinput.h>
 
 #include <atomic>
 #include <charconv>
 #include <cmath>
+#include <cstdint>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -166,13 +168,48 @@ void serve_client(HANDLE pipe) {
     }
 }
 
+// A security descriptor whose DACL grants the pipe to the user the game runs as and
+// to nobody else (the default descriptor also lets other accounts and the anonymous
+// logon read it). Freed with LocalFree. nullptr on failure.
+PSECURITY_DESCRIPTOR current_user_only_sd() {
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return nullptr;
+    DWORD size = 0;
+    GetTokenInformation(token, TokenUser, nullptr, 0, &size);
+    std::vector<std::uint8_t> buf(size ? size : 1);
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    LPWSTR sid = nullptr;
+    if (size && GetTokenInformation(token, TokenUser, buf.data(), size, &size) &&
+        ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER*>(buf.data())->User.Sid, &sid)) {
+        const std::wstring sddl = std::wstring(L"D:P(A;;GA;;;") + sid + L")";
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1, &sd, nullptr)) sd = nullptr;
+        LocalFree(sid);
+    }
+    CloseHandle(token);
+    return sd;
+}
+
 DWORD WINAPI pipe_thread(void*) {
-    log::info("dev_input: listening on \\\\.\\pipe\\ff7vr-dev");
+    PSECURITY_DESCRIPTOR sd = current_user_only_sd();
+    if (!sd) {
+        log::error("dev_input: no security descriptor for the pipe ({}); the pipe stays closed", GetLastError());
+        return 1;
+    }
+    SECURITY_ATTRIBUTES sa{sizeof(sa), sd, FALSE};
+    log::info("dev_input: listening on \\\\.\\pipe\\ff7vr-dev (current user only, local clients only)");
     while (!g_stop) {
-        HANDLE pipe = CreateNamedPipeW(kPipeName, PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-                                       1, 4096, 4096, 0, nullptr);
+        // FILE_FLAG_FIRST_PIPE_INSTANCE: fail rather than join a pipe of that name that another
+        // process created first. A few retries cover a previous instance still closing.
+        HANDLE pipe = INVALID_HANDLE_VALUE;
+        for (int attempt = 0; attempt < 10 && pipe == INVALID_HANDLE_VALUE; ++attempt) {
+            if (attempt) Sleep(200);
+            pipe = CreateNamedPipeW(kPipeName, PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                                    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1, 4096,
+                                    4096, 0, &sa);
+        }
         if (pipe == INVALID_HANDLE_VALUE) {
             log::error("dev_input: CreateNamedPipe failed ({})", GetLastError());
+            LocalFree(sd);
             return 1;
         }
         BOOL connected = ConnectNamedPipe(pipe, nullptr) ? TRUE : (GetLastError() == ERROR_PIPE_CONNECTED);
@@ -188,6 +225,7 @@ DWORD WINAPI pipe_thread(void*) {
             xinput::set_virtual_pad(p);
         }
     }
+    LocalFree(sd);
     return 0;
 }
 

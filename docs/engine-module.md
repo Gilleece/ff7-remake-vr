@@ -803,14 +803,14 @@ Through the dev pipe (`[dev] pipe = 1`, `tools\dev\send-input.ps1 -Pipe "<comman
 | `stereo swap <0\|1>` | test: render the right eye into the left half of the target and the left eye into the right half (the eyes then come out swapped). Tells a bug that follows a view's position in the target from one that follows the view |
 | `gpu names on`, `gpu trace <prefix> [dump fullscreen \| dump <from> <to>] [scale <n>]`, `gpu status` | one-frame GPU trace (`docs/re/engine.md`, Tools); every bound pixel-shader constant buffer slot is listed, and for read-back events slots 12 and 13 (add-ons such as Luma) are dumped |
 | `tonemapshift [0\|1\|2]`, `lumadlss [0\|1]` | with Luma loaded: the right view's bloom-combine input shift (2 = auto) and Luma's own DLSS in stereo (0 = refused); both print their counters (see "ReShade and Luma: the tonemapping shift and Luma's DLSS") |
-| `re peek <rva> <n>`, `re poke <rva> <hex bytes>` | read or patch the game image (to try a patch in a running game) |
+| `re peek <rva> <n>`, `re poke <rva> <hex bytes>` | read or patch the game image (to try a patch in a running game); `poke` needs `[dev] unsafe_commands = 1` |
 | `stereo host <render\|fixed>` | switch the source of eye size and views (for tests; switching away from `render` leaves the render module in stereo mode) |
 | `fp status` | controlled pawn, view target, follow camera, mode, blend, hidden meshes, toggles (keyboard/dev and pad), pawn location, which eye base the last frame used |
 | `fp toggle`, `fp first`, `fp third` | switch first person (manual: holds until the next automatic switch) |
 | `fp available <0\|1>`, `fp hide <none\|meshes>`, `fp offset <fwd> <right> <up>`, `fp eye <head\|offset>`, `fp headoffset <fwd> <right> <up>`, `fp blend <s>` | first-person settings |
 | `fp bones [text]` | bones of the character's skeletal meshes whose name contains the text (default `head`), with world location and offset from the pawn's location |
 | `fp funcs <text> [class text]`, `fp props <text> [class text]` | reverse engineering: reflected functions or properties whose name contains the text, with their class |
-| `fp call <object address \| class name> <Class.Function> [hex parameters]` | reverse engineering: calls a reflected function on the game thread and prints the first 48 bytes of its parameter block afterwards (return values follow the arguments) |
+| `fp call <object address \| class name> <Class.Function> [hex parameters]` | reverse engineering: calls a reflected function on the game thread and prints the first 48 bytes of its parameter block afterwards (return values follow the arguments); needs `[dev] unsafe_commands = 1` |
 | `fp combat <1\|0\|auto>` | test: pretend a battle is or is not in progress |
 | `fp signal <Class.Function> [world] [result=<offset>:<size>] \| none` | switch the battle signal while the game runs (same form as `battle_signal`); `fp status` shows its raw value |
 | `fp pad <hex buttons>`, `controls pad <hex buttons>` | test: feed an XInput button state through the gamepad filter, prints what the game would get |

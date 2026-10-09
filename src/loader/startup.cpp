@@ -28,6 +28,7 @@
 #include "dev_input.h"
 #include "xinput_proxy.h"
 
+#include "ff7vr/core/dev_commands.h"
 #include "ff7vr/core/log.h"
 
 #if FF7VR_HAVE_DEV
@@ -47,6 +48,10 @@ void start_modules(const StartupContext& ctx) {
     const Config& cfg = *ctx.config;
 
     // Dev command pipe and virtual pad (send-input.ps1). Off unless the ini enables it.
+    // Commands that patch memory or call game functions need [dev] unsafe_commands = 1 as well.
+    dev_commands::set_unsafe_allowed(cfg.get_bool("dev", "unsafe_commands", false));
+    if (dev_commands::unsafe_allowed())
+        log::warn("dev: unsafe_commands = 1: the pipe's `re poke` and `fp call` can patch memory and call game functions");
     if (cfg.get_bool("dev", "pipe", false)) dev_input::start();
 
 #if FF7VR_HAVE_ENGINE

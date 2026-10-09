@@ -30,4 +30,11 @@ bool dispatch(std::string_view line, std::string& reply);
 // "word: help" for every registered command, sorted.
 std::vector<std::string> help();
 
+// Commands that write game memory or call game functions with arbitrary arguments
+// (`re poke`, `fp call`) run only when [dev] unsafe_commands = 1. Set once at start.
+void set_unsafe_allowed(bool allowed);
+bool unsafe_allowed();
+// The reply of such a command while it is disabled.
+inline constexpr const char* kUnsafeDisabledReply = "err disabled ([dev] unsafe_commands=0)";
+
 }  // namespace ff7vr::dev_commands

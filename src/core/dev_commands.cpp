@@ -1,6 +1,7 @@
 #include "ff7vr/core/dev_commands.h"
 
 #include <algorithm>
+#include <atomic>
 #include <exception>
 #include <map>
 #include <memory>
@@ -23,7 +24,12 @@ std::map<std::string, Entry, std::less<>>& registry() {
     return r;
 }
 
+std::atomic<bool> g_unsafe{false};
+
 }  // namespace
+
+void set_unsafe_allowed(bool allowed) { g_unsafe = allowed; }
+bool unsafe_allowed() { return g_unsafe.load(); }
 
 void add(std::string_view word, std::string_view help, Handler handler) {
     std::lock_guard lk(registry_mutex());

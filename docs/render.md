@@ -427,6 +427,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev\send-input.ps1 -Pi
 Modules register commands with `ff7vr::dev_commands::add` (`src/core`); the
 pipe passes every line it does not handle itself to `dev_commands::dispatch`.
 
+The pipe is created with a DACL that grants access only to the user the game runs
+as, rejects remote clients and refuses to join a pipe of the same name that another
+process created first. Commands that patch the game's memory or call its functions
+with arbitrary arguments (`re poke`, `fp call`) also need `[dev] unsafe_commands = 1`
+(default `0`; they then reply `err disabled ([dev] unsafe_commands=0)`, and the log
+warns at start when it is on). Capture and trace output paths are not restricted.
+
 ## Captures
 
 `capture` writes what each eye would see: the layers composited the way the
