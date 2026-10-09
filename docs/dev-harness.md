@@ -161,7 +161,7 @@ the game.
 Example:
 
 ```
-2026-10-05 12:41:20.238 [tid 19240] INFO  ff7vr 0.1.0 loaded (commit 24c5ff5..., built ... RelWithDebInfo)
+2026-10-05 12:41:20.238 [tid 19240] INFO  ff7vr v1.2-3-g1a2b3c4 loaded (commit 1a2b3c4d5e6f..., built ... RelWithDebInfo)
 2026-10-05 12:41:20.238 [tid 19240] INFO  exe: file version 1.0.0.7, file size 96927560 bytes, PE timestamp 0x698ba49c
 2026-10-05 12:41:20.239 [tid 19240] INFO  env: XR_RUNTIME_JSON=(unset)
 2026-10-05 12:41:20.239 [tid 19240] INFO  ff7vr: initialised, idle
@@ -530,6 +530,12 @@ game process once started. `collect-diagnostics.cmd` (`ff7vr-launcher.ps1 diagno
 the last session's log folder, the ini, `VERSION.txt` and a `system.txt`
 (Windows, GPU and driver, OpenXR runtimes, game folder state, the key lines of
 the log) into `diagnostics-<time>.zip` next to the launcher; it changes nothing.
+Every text file in the zip has `%USERPROFILE%` and the user name (as a word)
+replaced; any other non-dump file is left out; crash dumps only with `-IncludeDumps`.
+Restore only acts on the names in the launcher's `$ModFiles`, keeps a changed
+`ff7vr.ini` as the package's settings (`ff7vr.ini.previous` = the one before), and
+removes a changed `xinput1_3.dll`, or any file when the session record is unreadable,
+only when it is identical to the package's copy.
 The launcher's session record is separate from `ff7vr.deploy-manifest.json`; each
 refuses to overwrite files the other put there. On a development machine take the
 game lock (`lock.ps1 -Acquire`) before running the launcher by hand.

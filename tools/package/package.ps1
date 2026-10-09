@@ -15,7 +15,7 @@
        GUIDE.md             the detailed player guide (from docs\guide.md)
        LICENSE              the mod's licence
        THIRD-PARTY-NOTICES.md  the licences of the components built into the mod
-       VERSION.txt          commit and build time
+       VERSION.txt          version (git describe), commit, build time, SHA-256 of the DLL
      and a .zip of that folder next to it.
   3. A drop-in zip next to it, ff7vr-<date>-<commit>-dropin.zip, for installing
      the mod by hand without the launcher. It holds only what goes into the
@@ -24,6 +24,9 @@
        ff7vr-docs\README.md, GUIDE.md, LICENSE, THIRD-PARTY-NOTICES.md, VERSION.txt
      Installing = unzipping it into End\Binaries\Win64; see GUIDE.md,
      "Installing without the launcher".
+  4. dist\<package>-SHA256SUMS.txt (the zips' SHA-256, "<hash>  <file>") and
+     dist\<package>-release-notes-snippet.md (a "Verify your download" section for the
+     release notes). See docs\releasing.md.
   An existing folder of the same name is refreshed; its logs\ folder is kept.
 
   The package does not need this repository: copy the folder anywhere.
@@ -84,6 +87,13 @@ try {
     $st = @(& git -C $repo status --porcelain --untracked-files=no)
     $dirty = ($st.Count -gt 0)
 } catch { }
+# The version the DLL was built with (generated header), else git describe, else 'unknown'.
+$version = 'unknown'
+$hdr = Join-Path $bd 'generated\ff7vr_buildinfo.h'
+$m = $null
+if (Test-Path -LiteralPath $hdr) { $m = Select-String -LiteralPath $hdr -Pattern '#define FF7VR_VERSION "([^"]*)"' | Select-Object -First 1 }
+if ($m) { $version = $m.Matches[0].Groups[1].Value }
+else { try { $d = (& git -C $repo describe --tags --always --dirty 2>$null); if ($LASTEXITCODE -eq 0 -and $d) { $version = "$d".Trim() } } catch { } }
 $date = (Get-Date).ToString('yyyyMMdd')
 $name = "ff7vr-$date-$commit"
 if ($dirty) {
@@ -126,7 +136,8 @@ if ($Dlss) {
     [System.IO.File]::WriteAllText($iniPath, $ini)
 }
 $ver = @(
-    "ff7vr $name",
+    "ff7vr $version ($commit)",
+    "package: $name",
     "commit:  $commit$(if ($dirty) { ' (with uncommitted changes)' })",
     "built:   $((Get-Item -LiteralPath $dll).LastWriteTime.ToString('yyyy-MM-dd HH:mm'))",
     "dll sha256: $((Get-FileHash -LiteralPath $dll -Algorithm SHA256).Hash)",
@@ -164,6 +175,37 @@ if (-not $NoZip) {
         }
     } finally { $za.Dispose() }
     Step "Drop-in zip: $dropin"
+
+    # Hashes of the zips, for the release notes and for players to check their download.
+    $sums = @()
+    foreach ($z in @($zip, $dropin)) {
+        $sums += ('{0}  {1}' -f (Get-FileHash -LiteralPath $z -Algorithm SHA256).Hash.ToLowerInvariant(), (Split-Path -Leaf $z))
+    }
+    $sumsFile = Join-Path $od "$name-SHA256SUMS.txt"
+    [System.IO.File]::WriteAllLines($sumsFile, [string[]]$sums)
+    Step "SHA-256: $sumsFile"
+
+    $ghRepo = $env:GITHUB_REPOSITORY
+    if (-not $ghRepo) {
+        try {
+            $url = (& git -C $repo remote get-url origin 2>$null)
+            if ($LASTEXITCODE -eq 0 -and "$url" -match 'github\.com[:/]([^/]+/[^/]+?)(\.git)?$') { $ghRepo = $Matches[1] }
+        } catch { }
+    }
+    $notes = @('## Verify your download', '',
+               'SHA-256 of each file of this release:', '', '```')
+    $notes += $sums
+    $notes += @('```', '',
+                'To check a download on Windows, run this in a command prompt in the folder of the zip and compare',
+                'the result with the line above (upper or lower case does not matter):', '',
+                '```', "certutil -hashfile $(Split-Path -Leaf $zip) SHA256", '```')
+    if ($ghRepo) {
+        $notes += @('', 'Zips built by the release workflow also carry a signed build provenance attestation; with the',
+                    'GitHub CLI:', '', '```', "gh attestation verify $(Split-Path -Leaf $zip) --repo $ghRepo", '```')
+    }
+    $notesFile = Join-Path $od "$name-release-notes-snippet.md"
+    [System.IO.File]::WriteAllLines($notesFile, [string[]]$notes)
+    Step "Release notes snippet: $notesFile"
 }
 
 Step "Package ready: $pkg"

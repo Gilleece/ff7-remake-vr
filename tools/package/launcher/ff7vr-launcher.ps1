@@ -37,10 +37,12 @@
 
   diagnostics
     Collects what is needed to look into a problem into one zip next to this
-    script (diagnostics-<time>.zip): the last session's log folder (log and
-    crash dumps), the ff7vr.ini in use, VERSION.txt, and a system.txt with
-    Windows version, graphics card and driver, the OpenXR runtimes, and the
-    state of the game folder. Changes nothing else.
+    script (diagnostics-<time>.zip): the last session's log folder, the
+    ff7vr.ini in use, VERSION.txt, and a system.txt with Windows version,
+    graphics card and driver, the OpenXR runtimes, and the state of the game
+    folder. Your Windows user name and profile path are replaced by
+    %USERNAME% and %USERPROFILE% in every text file of the zip. Crash dumps
+    (*.dmp) are left out unless -IncludeDumps is given. Changes nothing else.
 
 .PARAMETER KeepInstalled
   Leave the mod (and the Luma rename, unless -KeepLuma) in place after the game
@@ -54,6 +56,10 @@
 .PARAMETER GameDir
   The game's install folder (the one containing End\). Found through Steam when
   not given; the environment variable FF7VR_GAME_DIR also works.
+
+.PARAMETER IncludeDumps
+  diagnostics only: also put the mod's crash dumps (*.dmp) into the zip. A dump
+  holds part of the game's memory; include it only when asked for.
 
 .PARAMETER ExtraArgs
   Extra command-line arguments for the game.
@@ -80,7 +86,8 @@ param(
     [string]$GameDir = '',
     [string]$ExtraArgs = '',
     [switch]$NoPause,
-    [switch]$NoIdleWait
+    [switch]$NoIdleWait,
+    [switch]$IncludeDumps
 )
 
 Set-StrictMode -Version 2.0
@@ -303,6 +310,15 @@ function Get-RunningVrRuntimes {
 
 function Get-Sha256([string]$path) { return (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash }
 
+# The package's version, the first line of VERSION.txt ("ff7vr v1.2 (abc1234)"), or 'ff7vr'.
+function Get-PackageVersion {
+    try {
+        $l = (Get-Content -LiteralPath (Join-Path $Here 'VERSION.txt') -TotalCount 1 -ErrorAction Stop).Trim()
+        if ($l) { return $l }
+    } catch { }
+    return 'ff7vr'
+}
+
 # ---- the graphics card after a game exit
 # A game started again soon after the previous one's exit can stay slow for minutes: about 10
 # frames per second from the load on, the graphics card busy at a third of its power. In the
@@ -355,6 +371,7 @@ function Wait-AfterGameExit([string]$bin) {
 #   state       'session' while a session runs, 'installed' after -KeepInstalled
 #   lumaSetAside true once dxgi.dll was renamed to dxgi.dll.vr-disabled
 #   files       the mod's files copied in (name, sha256 of what was copied)
+# Names read from the record are only acted on when they are in $ModFiles.
 
 function Read-Session([string]$bin) {
     $p = Join-Path $bin $SessionFile
@@ -369,10 +386,11 @@ function Read-Session([string]$bin) {
         if ($o.PSObject.Properties['state']) { $state = [string]$o.state }
         $started = ''
         if ($o.PSObject.Properties['started']) { $started = [string]$o.started }
-        return [pscustomobject]@{ state = $state; started = $started; lumaSetAside = $luma; files = $files }
+        return [pscustomobject]@{ state = $state; started = $started; lumaSetAside = $luma; files = $files; unreadable = $false }
     } catch {
-        # Unreadable record: treat it as an unfinished session with every file of ours possibly present.
-        return [pscustomobject]@{ state = 'session'; started = ''; lumaSetAside = $true;
+        # Unreadable record: treat it as an unfinished session with every file of ours possibly present;
+        # restore then only removes a file that is identical to this package's own copy.
+        return [pscustomobject]@{ state = 'session'; started = ''; lumaSetAside = $true; unreadable = $true;
                                   files = @($ModFiles | ForEach-Object { [pscustomobject]@{ name = $_; sha256 = '' } }) }
     }
 }
@@ -406,6 +424,59 @@ function Save-Logs([string]$bin, [string]$stamp) {
     return $dest
 }
 
+# A name from the session record is acted on only when it is one of the mod's own files
+# (a plain file name, no folder part).
+function Test-ModFileName([string]$name) {
+    if (-not $name -or $name -match '[\\/:]' -or $name.Trim('.') -eq '') { return $false }
+    return ($ModFiles -contains $name)
+}
+
+# Removes one of the mod's files from the game folder. Returns $true when it is gone.
+#   unchanged since it was copied  -> removed
+#   ff7vr.ini changed (settings saved during the session) -> copied back next to this script as the
+#                                     player's settings (the earlier copy kept as ff7vr.ini.previous), removed
+#   anything else changed, or no record of what was copied -> removed only when identical to this
+#                                     package's own copy, otherwise left in place with a warning
+function Remove-ModFile([string]$bin, [string]$name, [string]$recorded, [bool]$unreadable) {
+    $p = Join-Path $bin $name
+    $cur = Get-Sha256 $p
+    $known = (-not $unreadable) -and [bool]$recorded
+    $pkgCopy = Join-Path $Here $name
+    $pkgHash = $null
+    if (Test-Path -LiteralPath $pkgCopy) { $pkgHash = Get-Sha256 $pkgCopy }
+
+    if ($known -and $cur -eq $recorded) {
+        # as copied
+    } elseif ($known -and $name -eq 'ff7vr.ini') {
+        if ($cur -ne $pkgHash) {
+            try {
+                if ($pkgHash) { Copy-Item -LiteralPath $pkgCopy -Destination (Join-Path $Here 'ff7vr.ini.previous') -Force -ErrorAction Stop }
+                Copy-Item -LiteralPath $p -Destination $pkgCopy -Force -ErrorAction Stop
+            } catch {
+                Fail "ff7vr.ini in the game folder holds settings changed during the session, and copying it to $pkgCopy failed: $_"
+                Say  "           It was left in $bin. Copy it next to start-vr.cmd by hand, then run restore.cmd again."
+                return $false
+            }
+            Info "Kept the settings changed during the session: $pkgCopy (the one before is ff7vr.ini.previous)"
+        }
+    } elseif ($pkgHash -and $cur -eq $pkgHash) {
+        # identical to this package's copy
+    } else {
+        $why = $(if ($known) { 'it changed after the launcher copied it' } else { "$SessionFile could not be read" })
+        Warn "Left $p in place: $why, and it differs from this package's own $name."
+        if ($name -eq 'ff7vr.ini') {
+            Say  '           If it holds settings you want to keep, copy it next to start-vr.cmd. Then delete it from the'
+            Say  '           game folder by hand and run restore.cmd again.'
+        } else {
+            Say  '           It may belong to another mod or tool, or to another version of this mod. If you installed'
+            Say  "           nothing else that uses $name, delete it by hand; otherwise leave it there. Then run"
+            Say  '           restore.cmd again.'
+        }
+        return $false
+    }
+    try { Remove-WithRetry $p; return $true } catch { Fail "$_"; return $false }
+}
+
 # Puts the game folder back to normal. Returns $true when it is.
 function Invoke-Restore([string]$bin, [string]$why) {
     $ok = $true
@@ -420,10 +491,13 @@ function Invoke-Restore([string]$bin, [string]$why) {
     if ($session) {
         Info "Removing the mod's files ($why)"
         foreach ($f in @($session.files)) {
+            if (-not (Test-ModFileName $f.name)) {
+                Warn "Skipped '$($f.name)' named in $SessionFile`: not one of the mod's files ($($ModFiles -join ', '))."
+                continue
+            }
             $p = Join-Path $bin $f.name
             if (-not (Test-Path -LiteralPath $p)) { continue }
-            if ($f.sha256 -and (Get-Sha256 $p) -ne $f.sha256) { Warn "$($f.name) was changed after it was copied; removing it anyway (it belongs to the mod)" }
-            try { Remove-WithRetry $p } catch { Fail "$_"; $ok = $false }
+            if (-not (Remove-ModFile $bin $f.name $f.sha256 $session.unreadable)) { $ok = $false }
         }
     }
 
@@ -517,6 +591,32 @@ function Get-SystemLines([string]$root, [string]$bin, [string]$logFile) {
     return $out
 }
 
+# Replaces the user's profile path (as written in paths, in JSON with doubled backslashes, and with
+# forward slashes) by %USERPROFILE% and the user name as a word by %USERNAME%.
+function Protect-Text([string]$text) {
+    $ic = [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+    if ($env:USERPROFILE) {
+        $up = $env:USERPROFILE.TrimEnd('\')
+        foreach ($form in @($up.Replace('\', '\\'), $up, $up.Replace('\', '/'))) {
+            $text = [regex]::Replace($text, [regex]::Escape($form), '%USERPROFILE%', $ic)
+        }
+    }
+    if ($env:USERNAME) {
+        $text = [regex]::Replace($text, '(?<![A-Za-z0-9_])' + [regex]::Escape($env:USERNAME) + '(?![A-Za-z0-9_])', '%USERNAME%', $ic)
+    }
+    return $text
+}
+
+# Scrubs one file in place with Protect-Text. Returns $false (file untouched) when it is not text.
+function Protect-TextFile([string]$path) {
+    $bytes = [System.IO.File]::ReadAllBytes($path)
+    if ([Array]::IndexOf($bytes, [byte]0) -ge 0) { return $false }
+    $text = [System.Text.Encoding]::UTF8.GetString($bytes)
+    if ($text.Length -gt 0 -and $text[0] -eq [char]0xFEFF) { $text = $text.Substring(1) }
+    [System.IO.File]::WriteAllText($path, (Protect-Text $text), (New-Object System.Text.UTF8Encoding($false)))
+    return $true
+}
+
 function Invoke-Diagnostics([string]$root, [string]$bin) {
     $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss')
     $stage = Join-Path ([System.IO.Path]::GetTempPath()) "ff7vr-diagnostics-$stamp"
@@ -549,11 +649,36 @@ function Invoke-Diagnostics([string]$root, [string]$bin) {
             if (Test-Path -LiteralPath $p) { Copy-Item -LiteralPath $p -Destination $stage }
         }
         [System.IO.File]::WriteAllLines((Join-Path $stage 'system.txt'), [string[]](Get-SystemLines $root $bin $logFile))
+
+        # Crash dumps stay out unless asked for; every other file must be text and has the user
+        # name and profile path replaced. Anything else is left out.
+        $dumps = 0
+        $included = @()
+        foreach ($f in @(Get-ChildItem -LiteralPath $stage -File -Recurse)) {
+            $rel = $f.FullName.Substring($stage.Length).TrimStart('\')
+            if ($f.Extension -eq '.dmp') {
+                if ($IncludeDumps) { $included += "$rel (crash dump)" } else { Remove-Item -LiteralPath $f.FullName -Force; $dumps++ }
+                continue
+            }
+            if (-not (Protect-TextFile $f.FullName)) {
+                Remove-Item -LiteralPath $f.FullName -Force
+                Info "Left out $rel (not a text file)"
+                continue
+            }
+            $included += $rel
+        }
         $zip = Join-Path $Here "diagnostics-$stamp.zip"
         Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -Force
         Info "Diagnostics collected: $zip"
-        Say  'Send this file along with a sentence on what happened and when. It contains the logs, your'
-        Say  'ff7vr.ini, and system.txt (Windows version, graphics card and driver, OpenXR runtimes); open it to check.'
+        Say  'It contains:'
+        foreach ($r in $included) { Say "  $r" }
+        if ($IncludeDumps) {
+            Say 'Crash dumps are included (-IncludeDumps).'
+        } else {
+            Say ("Crash dumps (*.dmp) are left out{0}; add -IncludeDumps only when asked for one." -f $(if ($dumps) { " ($dumps found)" } else { '' }))
+        }
+        Say  'Your Windows user name and profile folder are replaced by %USERNAME% and %USERPROFILE% in every file.'
+        Say  'Send the zip along with a sentence on what happened and when; open it first to check what it holds.'
         return $true
     } catch {
         Fail "Collecting diagnostics failed: $_"
@@ -584,7 +709,7 @@ if ($Action -eq 'status') { Show-Status $root $bin; Finish 0 }
 # Never two game processes at once (a VR runtime serves one application at a time,
 # even while the previous one is still shutting down), and never two launchers
 # working on the game folder at once.
-if ($Action -eq 'restore') { $what = 'run restore' } else { $what = 'start the VR session'; Say 'ff7vr: VR session for FINAL FANTASY VII REMAKE INTERGRADE' }
+if ($Action -eq 'restore') { $what = 'run restore' } else { $what = 'start the VR session'; Say "$(Get-PackageVersion): VR session for FINAL FANTASY VII REMAKE INTERGRADE" }
 if (-not (Wait-ClearToStart $what)) { Finish 2 }
 
 if ($Action -eq 'restore') {

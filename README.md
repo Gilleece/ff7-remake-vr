@@ -85,8 +85,10 @@ combinations):
 
 After quitting the game, double-click `collect-diagnostics.cmd`: it zips the last
 session's log, your settings and basic system facts into the package folder and
-changes nothing. Send that with a sentence on what you saw and when. To narrow it
-down, change one setting at a time:
+changes nothing. Your Windows user name and profile path are replaced in every file,
+and crash dumps are left out unless you add `-IncludeDumps` (only when asked for one);
+the window lists what the zip holds. Send that with a sentence on what you saw and
+when. To narrow it down, change one setting at a time:
 
 - anything in 3D: `[stereo] enabled = 0` (if the virtual screen works, 3D is at fault)
 - HUD or menus missing or cut off: `[ui] layer = 0`

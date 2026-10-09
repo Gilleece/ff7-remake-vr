@@ -58,6 +58,13 @@ Leave the launcher's window open while you play. If it gets closed anyway, or th
 restarts during a session, double-click `restore.cmd` (or just start the next session:
 it tidies up first). `restore.cmd` is harmless when nothing needs doing.
 
+When the launcher removes the mod's files it only touches `xinput1_3.dll` and
+`ff7vr.ini`. If `ff7vr.ini` in the game folder was changed during the session (settings
+saved while playing), it is copied back into the package folder as your settings, the
+one before kept as `ff7vr.ini.previous`. A `xinput1_3.dll` that differs from the one
+the launcher copied and from the package's own is left where it is with a warning
+(it may belong to another mod); the warning says what to check.
+
 To play again straight away, quit the game and start `start-vr.cmd` again; if the
 previous session is still closing, the new one waits for it by itself.
 
@@ -250,7 +257,7 @@ session it is `ff7vr.log` in the game's `End\Binaries\Win64` folder).
 
 1. **The launcher ran through.** Its window says the mod was installed and the game
    started, and after quitting: "The game folder is back to normal".
-2. **The mod loaded.** The log starts with `ff7vr 0.1.0 loaded` and contains
+2. **The mod loaded.** The log starts with `ff7vr <version> loaded` (the version in `VERSION.txt`) and contains
    `engine: stereo device installed`. If it says `engine: stereo will NOT be enabled`,
    the reason follows on the same line.
 3. **The headset was reached.** `OpenXR runtime (auto): chose ...` names the runtime,
@@ -410,12 +417,17 @@ Fixed and confirmed in the headset:
 
 1. **The diagnostics zip.** After quitting the game, double-click
    `collect-diagnostics.cmd`. It writes `diagnostics-<date-time>.zip` into the
-   package folder with the last session's log folder (`ff7vr.log`, and a
-   `ff7vr-crash-*.dmp` if the game crashed), your `ff7vr.ini`, `VERSION.txt` and a
-   `system.txt` (Windows version, graphics card and driver, the OpenXR runtimes
-   and which one the mod used, the state of the game folder). It changes nothing.
-   If you ran several sessions since the problem, send that session's folder from
-   `logs\` as well.
+   package folder with the last session's log folder (`ff7vr.log`), your
+   `ff7vr.ini`, `VERSION.txt` and a `system.txt` (Windows version, graphics card and
+   driver, the OpenXR runtimes and which one the mod used, the state of the game
+   folder), and lists the files it put in. Your Windows user name and profile path
+   are replaced by `%USERNAME%` and `%USERPROFILE%` in every file. Crash dumps
+   (`ff7vr-crash-*.dmp`) are left out: they hold part of the game's memory. When
+   asked for one, run `collect-diagnostics.cmd -IncludeDumps` from a command prompt
+   in the package folder. `[crash] full_memory = 1` writes a dump of the whole game
+   memory (several GB, and everything in it); leave it at 0 unless asked. It changes
+   nothing. If you ran several sessions since the problem, send that session's
+   folder from `logs\` as well.
 2. A sentence on what you saw in the headset and when (the log has times; note the
    time on the clock), and a screenshot of the monitor if it shows the problem.
 
