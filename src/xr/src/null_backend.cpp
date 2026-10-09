@@ -141,6 +141,39 @@ public:
             eyes_[e].hasImage = false;
         }
         format_ = fmt;
+        // Emulated depth swapchains (XR_KHR_composition_layer_depth): D32_FLOAT images,
+        // typeless like a runtime's, readable for captures.
+        depthFormat_ = DXGI_FORMAT_UNKNOWN;
+        depthOff_ = false;
+        for (int e = 0; e < 2; ++e) {
+            depth_[e] = SwapImages{};
+            depthValid_[e] = false;
+        }
+        if (desc.depthLayer) {
+            bool ok = true;
+            for (int e = 0; e < 2 && ok; ++e) {
+                D3D11_TEXTURE2D_DESC d{};
+                d.Width = opt_.eyeWidth;
+                d.Height = opt_.eyeHeight;
+                d.MipLevels = 1;
+                d.ArraySize = 1;
+                d.Format = DXGI_FORMAT_R32_TYPELESS;
+                d.SampleDesc.Count = 1;
+                d.Usage = D3D11_USAGE_DEFAULT;
+                d.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+                const HRESULT hr = device_->CreateTexture2D(&d, nullptr, depth_[e].owned.ReleaseAndGetAddressOf());
+                if (FAILED(hr)) {
+                    log_.Warn("null backend: depth image {}x{} failed {}; no depth layer", d.Width, d.Height, HResultString(hr));
+                    ok = false;
+                    break;
+                }
+                depth_[e].width = d.Width;
+                depth_[e].height = d.Height;
+                depth_[e].format = DXGI_FORMAT_D32_FLOAT;
+            }
+            if (ok) depthFormat_ = DXGI_FORMAT_D32_FLOAT;
+            else for (auto& d : depth_) d = SwapImages{};
+        }
 
         {
             std::lock_guard lk(infoMutex_);
@@ -160,6 +193,9 @@ public:
             info_.availableRefreshHz = {opt_.refreshHz};
             info_.runtimeFormats = {fmt};
             info_.orientationTracking = info_.positionTracking = true;
+            info_.depthLayerSupported = desc.requestDepthExtension;
+            info_.depthSwapchainFormat = depthFormat_;
+            if (depthFormat_ == DXGI_FORMAT_UNKNOWN) info_.depthNote = desc.depthLayer ? "depth images could not be created" : "depth layer not wanted";
             info_.lastPredictedDisplayPeriod = Period();
             gazeEnabled_ = desc.eyeGaze;
             if (gazeEnabled_) {
@@ -199,6 +235,11 @@ public:
             quads_ = {};
         }
         for (auto& e : eyes_) e = EyeImage{};
+        for (auto& d : depth_) {
+            if (d.owned) blitter_.Forget(d.owned.Get());
+            d = SwapImages{};
+        }
+        depthFormat_ = DXGI_FORMAT_UNKNOWN;
         initialized_ = false;
         ShutdownCommon();
     }
@@ -232,7 +273,7 @@ public:
             }
             // The emulated tracker: scripted motion, then the head pose set with `head`.
             const NullMotion motion = sim.motion >= 0 ? static_cast<NullMotion>(sim.motion) : opt_.motion;
-            const Pose tracker = PoseMultiply(sim.head, HeadPose(r.id, motion));
+            const Pose tracker = PoseMultiply(PoseMultiply(sim.head, YawRatePose(sim, QpcNowNs())), HeadPose(r.id, motion));
             if (sim.recenterEventRequested) {
                 // Like a runtime's own recenter: the current leveled head becomes the new
                 // LOCAL origin, from a change time a few frames ahead (midway between two
@@ -295,12 +336,28 @@ public:
         return Result::Ok;
     }
 
+    // The emulated tracker located again now: the scripted motion of the frame, the
+    // `head` pose, the yaw rate at the current time and the `late-yaw` test offset
+    // (which only late locations see), in the frame's LOCAL space and recenter.
     Result RelocateViews(uint64_t frameId, View outViews[2]) override {
         if (!initialized_) return Result::NotInitialized;
+        Sim sim;
+        {
+            std::lock_guard sl(simMutex_);
+            sim = sim_;
+        }
         std::lock_guard lk(frameMutex_);
         FrameRecord* r = FindFrameLocked(frameId);
         if (!r) return Result::CallOrder;
-        for (int e = 0; e < 2; ++e) outViews[e] = ApplyRecenter(r->recenter, r->raw[e]);
+        if (!(r->orientationValid && r->positionValid) || sim.loseOrientation || sim.losePosition) return Result::Error;
+        const NullMotion motion = sim.motion >= 0 ? static_cast<NullMotion>(sim.motion) : opt_.motion;
+        const Pose late = QuatPose(QuatFromAxisAngle(Vec3{0, 1, 0}, float(sim.lateYawDeg) * kDegToRad));
+        const Pose tracker = PoseMultiply(PoseMultiply(PoseMultiply(sim.head, YawRatePose(sim, QpcNowNs())), late), HeadPose(r->id, motion));
+        const Pose rawHead = PoseMultiply(PoseInverse(origin_), tracker);
+        View raw[2];
+        ComputeViews(rawHead, raw);
+        for (int e = 0; e < 2; ++e) outViews[e] = ApplyRecenter(r->recenter, raw[e]);
+        ++relocations_;
         return Result::Ok;
     }
 
@@ -334,14 +391,30 @@ public:
                     if (update) {
                         uint32_t w = 0, h = 0;
                         const EyeTarget t{img.texture.Get(), format_, opt_.eyeWidth, opt_.eyeHeight, 0};
-                        if (TransferEye(static_cast<Eye>(e), desc, t, &w, &h)) {
+                        const bool copied = TransferEye(static_cast<Eye>(e), desc, t, &w, &h);
+                        if (copied) {
                             img.hasImage = true;
                             img.w = w;
                             img.h = h;
                             img.view = SubmittedView(rec, desc, e);
+                            if (e == 0) {
+                                // What the runtime would be told the image was rendered with, against
+                                // the frame's own (frame wait) location: `xr-sim status`.
+                                std::lock_guard lk(frameMutex_);
+                                lastSubmittedYaw_ = QuatYaw(img.view.pose.orientation) * kRadToDeg;
+                                lastSubmittedFrameYaw_ = QuatYaw(rec.raw[0].pose.orientation) * kRadToDeg;
+                                lastSubmittedId_ = rec.id;
+                            }
                         } else {
                             ok = false;
+                            depthValid_[e] = false;
                         }
+                        UpdateDepthEye(e, desc, copied, img.w, img.h, [&](SwapImages& ds, auto&& transfer) {
+                            const EyeTarget dt{ds.owned.Get(), depthFormat_, ds.width, ds.height, 0};
+                            const bool done = transfer(dt);
+                            ds.hasImage = ds.hasImage || done;
+                            return done;
+                        });
                     }
                     // Alternate-eye mode: an eye that is not updated shows its previous image.
                     if (img.hasImage) projection[e] = LayerImage{img.texture.Get(), format_, img.w, img.h};
@@ -349,6 +422,9 @@ public:
                 // Same rule as the OpenXR backend: no projection layer without real poses.
                 if (!rec.posesUsable && !(desc.eyes[0].viewOverride && desc.eyes[1].viewOverride)) projection[0] = projection[1] = LayerImage{};
             }
+            // A runtime would get depth chained to both views (OpenXR backend: same rule).
+            const bool depthLayer = projection[0].texture && projection[1].texture && depthValid_[0] && depthValid_[1] &&
+                                    depthFormat_ != DXGI_FORMAT_UNKNOWN && !depthOff_.load();
             for (uint32_t i = 0; i < desc.quadCount; ++i) {
                 const QuadLayer& q = desc.quads[i];
                 QuadSlot* s = FindQuad(q.layer);
@@ -365,6 +441,12 @@ public:
             }
             GpuFrameEnd();
             CaptureComposited(rec, desc, projection, opt_.eyeWidth, opt_.eyeHeight);
+            if (depthLayer) {
+                CaptureDepthImages();
+                CountStat(&FrameStats::depthLayers);
+                lastDepthNear_ = depthNear_[0];
+                lastDepthFar_ = depthFar_[0];
+            }
             capture_.EndFrame();
         }
         CountStat(&FrameStats::framesSubmitted);
@@ -463,7 +545,7 @@ public:
         const char* usage =
             "err usage: xr-sim status | head <yaw deg> [pitch deg] [x y z m] | recenter-event [nopose] [delay <frames>] | lose "
             "orientation|position <frames> | gaze <yaw> <pitch> | gaze off | gaze sweep [radius deg] [period s] | gaze blink <frames> | "
-            "motion static|yaw|sway|yawsway|ini | focus 0|1 | presence 0|1|off";
+            "motion static|yaw|sway|yawsway|ini | focus 0|1 | presence 0|1|off | yawrate <deg/s> | late-yaw <deg> | depth";
         if (!initialized_) return "err null backend not initialised";
         if (a.empty() || a[0] == "status") {
             std::lock_guard lk(frameMutex_);
@@ -476,10 +558,13 @@ public:
             };
             const Pose seen = ApplyRecenter(lastRecenter_, lastRawHead_);
             return std::format("ok frame {} tracker head {} | LOCAL origin {}{} | head in LOCAL {} | recenter {} | head seen by the game {} | "
-                               "orientation {} position {} | lose orientation {} position {} frames",
+                               "orientation {} position {} | lose orientation {} position {} frames | last image submitted for frame {}: left eye "
+                               "rendered at yaw {:.3f} deg (LOCAL), the frame wait located it at {:.3f} deg | yaw rate {:.1f} deg/s, late yaw {:.2f} deg, "
+                               "late locations {}",
                                lastId_, text(lastTracker_), text(origin_), originChange_ ? " (change pending)" : "", text(lastRawHead_),
                                text(lastRecenter_), text(seen), lastO_ ? "valid" : "INVALID", lastP_ ? "valid" : "INVALID", sim_.loseOrientation,
-                               sim_.losePosition);
+                               sim_.losePosition, lastSubmittedId_, lastSubmittedYaw_, lastSubmittedFrameYaw_, sim_.yawRateDegS, sim_.lateYawDeg,
+                               relocations_.load());
         }
         if (a[0] == "head") {
             double v[5]{};
@@ -514,6 +599,36 @@ public:
             const NullMotion now = m >= 0 ? static_cast<NullMotion>(m) : opt_.motion;
             log_.Info("null backend: scripted head motion now {}", MotionName(now));
             return std::format("ok motion {}", MotionName(now));
+        }
+        if (a[0] == "yawrate" && a.size() == 2) {
+            // The head turns at a constant rate with the wall clock: every location (the
+            // frame wait's and a late one) sees the yaw of the moment it is made.
+            double rate = 0;
+            if (!num(a[1], &rate) || std::fabs(rate) > 3600) return usage;
+            {
+                std::lock_guard sl(simMutex_);
+                sim_.yawRateDegS = rate;
+                sim_.yawRateStartNs = QpcNowNs();
+            }
+            log_.Info("null backend: head yaw rate {:.1f} deg/s", rate);
+            return std::format("ok head yaw rate {:.1f} deg/s (from 0 now)", rate);
+        }
+        if (a[0] == "late-yaw" && a.size() == 2) {
+            // Test of late view updates: only RelocateViews sees this extra yaw.
+            double deg = 0;
+            if (!num(a[1], &deg) || std::fabs(deg) > 90) return usage;
+            {
+                std::lock_guard sl(simMutex_);
+                sim_.lateYawDeg = deg;
+            }
+            log_.Info("null backend: late locations add {:.2f} deg of yaw", deg);
+            return std::format("ok late locations add {:.2f} deg of yaw ({} late locations so far)", deg, relocations_.load());
+        }
+        if (a[0] == "depth") {
+            const FrameStats st = GetStats();
+            return std::format("ok depth images {} ({}), frames with a depth layer {}, depth images not written {}, last nearZ {} farZ {}",
+                               depthFormat_ == DXGI_FORMAT_UNKNOWN ? "none" : DxgiFormatName(depthFormat_), st.depthImages, st.depthLayers,
+                               st.depthFailures, lastDepthNear_, lastDepthFar_);
         }
         if (a[0] == "focus" && a.size() == 2) {
             // The runtime's session state: focus 0 = VISIBLE (headset off, the runtime's menu), 1 = FOCUSED.
@@ -624,7 +739,24 @@ private:
         double sweepRadiusDeg = 15, sweepPeriodS = 4;        // mode 2
         uint32_t gazeBlink = 0;                              // the next frames report the gaze not tracked
         int motion = -1;                                     // `motion`: replaces [xr] null_motion (-1 = the ini's)
+        double yawRateDegS = 0;                              // `yawrate`: head yaw grows with the wall clock
+        int64_t yawRateStartNs = 0;
+        double lateYawDeg = 0;                               // `late-yaw`: extra yaw seen by RelocateViews only
     };
+    static Pose QuatPose(const Quat& q) {
+        Pose p;
+        p.orientation = q;
+        return p;
+    }
+    static Pose YawRatePose(const Sim& sim, int64_t nowNs) {
+        if (sim.yawRateDegS == 0) return Pose{};
+        const double deg = sim.yawRateDegS * double(nowNs - sim.yawRateStartNs) / 1e9;
+        return QuatPose(QuatFromAxisAngle(Vec3{0, 1, 0}, float(std::fmod(deg, 360.0)) * kDegToRad));
+    }
+    std::atomic<uint64_t> relocations_{0};
+    float lastSubmittedYaw_ = 0, lastSubmittedFrameYaw_ = 0;  // under frameMutex_
+    uint64_t lastSubmittedId_ = 0;
+    float lastDepthNear_ = 0, lastDepthFar_ = 0;
     bool gazeEnabled_ = false;
     std::atomic<int> simPresence_{-1};
 

@@ -1,8 +1,11 @@
 #include "capture.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <format>
 #include <string_view>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -216,6 +219,104 @@ void CaptureManager::CaptureRaw(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, 
         }
     }
     ctx->Unmap(staging.Get(), 0);
+}
+
+void CaptureManager::CaptureDepth(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, uint32_t w, uint32_t h, float nearZ, float farZ,
+                                  const std::string& suffix) {
+    if (!active_) return;
+    RawImage& img = current_.raws.emplace_back();
+    img.suffix = suffix;
+    if (!ctx || !tex) {
+        img.error = "no depth texture";
+        return;
+    }
+    D3D11_TEXTURE2D_DESC d{};
+    tex->GetDesc(&d);
+    DXGI_FORMAT fam = DXGI_FORMAT_UNKNOWN;
+    switch (d.Format) {
+        case DXGI_FORMAT_D32_FLOAT:
+        case DXGI_FORMAT_R32_TYPELESS:
+        case DXGI_FORMAT_R32_FLOAT: fam = DXGI_FORMAT_R32_TYPELESS; break;
+        case DXGI_FORMAT_D24_UNORM_S8_UINT:
+        case DXGI_FORMAT_R24G8_TYPELESS: fam = DXGI_FORMAT_R24G8_TYPELESS; break;
+        case DXGI_FORMAT_D16_UNORM:
+        case DXGI_FORMAT_R16_TYPELESS:
+        case DXGI_FORMAT_R16_UNORM: fam = DXGI_FORMAT_R16_TYPELESS; break;
+        default: break;
+    }
+    if (fam == DXGI_FORMAT_UNKNOWN || d.SampleDesc.Count != 1) {
+        img.error = std::string("unsupported depth format ") + DxgiFormatName(d.Format);
+        return;
+    }
+    w = std::min(w, d.Width);
+    h = std::min(h, d.Height);
+    D3D11_TEXTURE2D_DESC sd = d;
+    sd.Format = fam;
+    sd.MipLevels = 1;
+    sd.ArraySize = 1;
+    sd.Usage = D3D11_USAGE_STAGING;
+    sd.BindFlags = 0;
+    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    sd.MiscFlags = 0;
+    ComPtr<ID3D11Texture2D> staging;
+    HRESULT hr = device_->CreateTexture2D(&sd, nullptr, &staging);
+    if (FAILED(hr)) {
+        img.error = "depth staging texture: " + HResultString(hr);
+        return;
+    }
+    // Depth-stencil resources are copied whole (D3D11 allows no sub-box for them).
+    ctx->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, tex, 0, nullptr);
+    D3D11_MAPPED_SUBRESOURCE m{};
+    hr = ctx->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &m);
+    if (FAILED(hr)) {
+        img.error = "depth map: " + HResultString(hr);
+        return;
+    }
+    img.w = w;
+    img.h = h;
+    img.rgba.resize(size_t(w) * h * 4);
+    double sum = 0;
+    float lo = 1e30f, hi = -1e30f;
+    uint64_t zero = 0, n = 0;
+    float centre = 0;
+    for (uint32_t y = 0; y < h; ++y) {
+        const uint8_t* row = static_cast<const uint8_t*>(m.pData) + size_t(y) * m.RowPitch;
+        uint8_t* o = img.rgba.data() + size_t(y) * w * 4;
+        for (uint32_t x = 0; x < w; ++x, o += 4) {
+            float v = 0;
+            if (fam == DXGI_FORMAT_R32_TYPELESS) {
+                std::memcpy(&v, row + size_t(x) * 4, 4);
+            } else if (fam == DXGI_FORMAT_R24G8_TYPELESS) {
+                uint32_t u = 0;
+                std::memcpy(&u, row + size_t(x) * 4, 4);
+                v = float(u & 0xFFFFFFu) / 16777215.0f;
+            } else {
+                uint16_t u = 0;
+                std::memcpy(&u, row + size_t(x) * 2, 2);
+                v = float(u) / 65535.0f;
+            }
+            if (!(v == v)) v = 0;  // NaN
+            if (x == w / 2 && y == h / 2) centre = v;
+            lo = std::min(lo, v);
+            hi = std::max(hi, v);
+            if (v <= 0.0f) ++zero;
+            sum += v;
+            ++n;
+            const float g = v > 0.0f ? std::pow(std::min(v, 1.0f), 0.25f) : 0.0f;
+            const uint8_t b = static_cast<uint8_t>(std::lround(g * 255.0f));
+            o[0] = o[1] = o[2] = b;
+            o[3] = 255;
+        }
+    }
+    ctx->Unmap(staging.Get(), 0);
+    // OpenXR's mapping: 1/z is linear in the depth value between nearZ (0) and farZ (1).
+    const double invNear = std::isinf(nearZ) ? 0.0 : 1.0 / nearZ, invFar = std::isinf(farZ) ? 0.0 : 1.0 / farZ;
+    const double invZ = invNear + double(centre) * (invFar - invNear);
+    const std::string dist = invZ > 1e-12 ? std::format("{:.3f} m", 1.0 / invZ) : std::string("infinite");
+    if (log_)
+        log_->Info("capture depth{}: {}x{} {}, values {:.6g}..{:.6g}, mean {:.6g}, at 0 (far) {:.1f} %, centre {:.6g} = {} (nearZ {} farZ {})", suffix, w, h,
+                   DxgiFormatName(d.Format), n ? lo : 0.0f, n ? hi : 0.0f, n ? sum / double(n) : 0.0, n ? 100.0 * double(zero) / double(n) : 0.0,
+                   centre, dist, nearZ, farZ);
 }
 
 void CaptureManager::ReleaseTextures() {

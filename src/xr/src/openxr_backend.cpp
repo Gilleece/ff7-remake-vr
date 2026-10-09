@@ -103,7 +103,7 @@ private:
     Result EndFrameLocked(int64_t displayTime, const XrCompositionLayerBaseHeader* const* layers, uint32_t layerCount);
     Result StaleOrUnknown(uint64_t frameId);
     Result BeginLocked(FrameRecord& r);
-    Result CreateSwapchain(uint32_t w, uint32_t h, DXGI_FORMAT fmt, SwapImages* out);
+    Result CreateSwapchain(uint32_t w, uint32_t h, DXGI_FORMAT fmt, SwapImages* out, bool depth = false);
     void DestroySwapchain(SwapImages& sc);
     // Acquires an image and waits for it (retrying a wait that timed out on an
     // earlier frame instead of acquiring another one).
@@ -556,10 +556,11 @@ Result OpenXrBackend::InitImpl(const InitDesc& desc) {
     SetupGaze(info);  // never fails the session: without a usable source the gaze is simply not available
 
     // ---- swapchain format ----
+    std::vector<int64_t> formats;
     {
         uint32_t n = 0;
         if (!Check(xrEnumerateSwapchainFormats(session_, 0, &n, nullptr), "xrEnumerateSwapchainFormats")) return Result::Error;
-        std::vector<int64_t> formats(n);
+        formats.resize(n);
         if (!Check(xrEnumerateSwapchainFormats(session_, n, &n, formats.data()), "xrEnumerateSwapchainFormats")) return Result::Error;
         for (int64_t f : formats) info.runtimeFormats.push_back(static_cast<DXGI_FORMAT>(f));
         auto offered = [&](DXGI_FORMAT f) { return std::find(formats.begin(), formats.end(), static_cast<int64_t>(f)) != formats.end(); };
@@ -599,6 +600,40 @@ Result OpenXrBackend::InitImpl(const InitDesc& desc) {
         log_.Info("eye {} swapchain: {}x{} {} ({} images, texture format {}, bind 0x{:X})", e, w, h, DxgiFormatName(format_),
                   eyes_[e].images.size(), DxgiFormatName(td.Format), td.BindFlags);
     }
+
+    // ---- depth swapchains, one per eye (XR_KHR_composition_layer_depth) ----
+    depthFormat_ = DXGI_FORMAT_UNKNOWN;
+    depthOff_ = false;
+    for (int e = 0; e < 2; ++e) depthValid_[e] = false;
+    if (!hasDepth_) {
+        info.depthNote = desc.requestDepthExtension ? "the runtime does not offer XR_KHR_composition_layer_depth" : "not requested";
+    } else if (!desc.depthLayer) {
+        info.depthNote = "depth layer not wanted";
+    } else {
+        constexpr DXGI_FORMAT kDepthFormats[] = {DXGI_FORMAT_D32_FLOAT, DXGI_FORMAT_D24_UNORM_S8_UINT, DXGI_FORMAT_D16_UNORM};
+        DXGI_FORMAT df = DXGI_FORMAT_UNKNOWN;
+        for (DXGI_FORMAT f : kDepthFormats)
+            if (df == DXGI_FORMAT_UNKNOWN && std::find(formats.begin(), formats.end(), static_cast<int64_t>(f)) != formats.end()) df = f;
+        if (df == DXGI_FORMAT_UNKNOWN) {
+            info.depthNote = "the runtime offers none of D32_FLOAT, D24_UNORM_S8_UINT, D16_UNORM for swapchains";
+        } else {
+            bool ok = true;
+            for (int e = 0; e < 2 && ok; ++e)
+                ok = CreateSwapchain(info.eyeSwapchain[e].width, info.eyeSwapchain[e].height, df, &depth_[e], true) == Result::Ok;
+            if (ok) {
+                depthFormat_ = df;
+                D3D11_TEXTURE2D_DESC td{};
+                if (!depth_[0].images.empty()) depth_[0].images[0]->GetDesc(&td);
+                log_.Info("depth swapchains: {}x{} {} ({} images, texture format {}, bind 0x{:X})", info.eyeSwapchain[0].width,
+                          info.eyeSwapchain[0].height, DxgiFormatName(df), depth_[0].images.size(), DxgiFormatName(td.Format), td.BindFlags);
+            } else {
+                for (auto& d : depth_) DestroySwapchain(d);
+                info.depthNote = std::string("depth swapchain creation failed (") + DxgiFormatName(df) + ")";
+            }
+        }
+    }
+    info.depthSwapchainFormat = depthFormat_;
+    if (depthFormat_ == DXGI_FORMAT_UNKNOWN) log_.Info("no depth layer: {}", info.depthNote);
 
     // ---- refresh rate ----
     if (hasRefreshRate_) {
@@ -671,6 +706,9 @@ void OpenXrBackend::DestroyAll() {
         }
     }
     for (auto& e : eyes_) DestroySwapchain(e);
+    for (auto& d : depth_) DestroySwapchain(d);
+    depthFormat_ = DXGI_FORMAT_UNKNOWN;
+    for (int e = 0; e < 2; ++e) depthValid_[e] = false;
     DestroyGaze();
     if (viewSpace_ != XR_NULL_HANDLE) xrDestroySpace(viewSpace_);
     if (localSpace_ != XR_NULL_HANDLE) xrDestroySpace(localSpace_);
@@ -1162,25 +1200,22 @@ Result OpenXrBackend::RelocateViews(uint64_t frameId, View outViews[2]) {
         if (!r) return Result::CallOrder;
         t = r->displayTime;
     }
+    if (!sessionRunning_) return Result::Error;
     View raw[2];
     bool ov = false, pv = false;
     if (!LocateViews(t, raw, &ov, &pv)) return Result::Error;
-    std::lock_guard fl(frameMutex_);
-    FrameRecord* r = FindFrameLocked(frameId);
-    if (!r) return Result::CallOrder;
-    // Late update only with fully tracked views; otherwise the filtered views from WaitFrame stay.
+    // Only fully tracked views: otherwise the frame's (filtered) views stay in use.
     bool finite = true;
     for (int e = 0; e < 2; ++e)
         for (float v : {raw[e].pose.orientation.x, raw[e].pose.orientation.y, raw[e].pose.orientation.z, raw[e].pose.orientation.w,
                         raw[e].pose.position.x, raw[e].pose.position.y, raw[e].pose.position.z})
             finite = finite && std::isfinite(v);
-    if (ov && pv && finite && r->orientationValid && r->positionValid) {
-        r->raw[0] = raw[0];
-        r->raw[1] = raw[1];
-        r->orientationValid = ov;
-        r->positionValid = pv;
-    }
-    for (int e = 0; e < 2; ++e) outViews[e] = ApplyRecenter(r->recenter, r->raw[e]);
+    if (!(ov && pv && finite)) return Result::Error;
+    std::lock_guard fl(frameMutex_);
+    FrameRecord* r = FindFrameLocked(frameId);
+    if (!r) return Result::CallOrder;
+    if (!(r->orientationValid && r->positionValid)) return Result::Error;  // the frame itself was not fully tracked
+    for (int e = 0; e < 2; ++e) outViews[e] = ApplyRecenter(r->recenter, raw[e]);
     return Result::Ok;
 }
 
@@ -1205,10 +1240,24 @@ Result OpenXrBackend::EndFrameLocked(int64_t displayTime, const XrCompositionLay
     return Result::Ok;
 }
 
-Result OpenXrBackend::CreateSwapchain(uint32_t w, uint32_t h, DXGI_FORMAT fmt, SwapImages* out) {
+namespace {
+// Whether a projection layer in `layers` carries depth info.
+bool HasDepthChained(const XrCompositionLayerBaseHeader* const* layers, uint32_t n) {
+    for (uint32_t i = 0; i < n; ++i) {
+        if (!layers[i] || layers[i]->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) continue;
+        const auto* p = reinterpret_cast<const XrCompositionLayerProjection*>(layers[i]);
+        for (uint32_t v = 0; v < p->viewCount; ++v)
+            if (p->views[v].next) return true;
+    }
+    return false;
+}
+}  // namespace
+
+Result OpenXrBackend::CreateSwapchain(uint32_t w, uint32_t h, DXGI_FORMAT fmt, SwapImages* out, bool depth) {
     *out = SwapImages{};
     XrSwapchainCreateInfo ci{XR_TYPE_SWAPCHAIN_CREATE_INFO};
-    ci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+    ci.usageFlags = depth ? XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
+                          : XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
     ci.format = static_cast<int64_t>(fmt);
     ci.sampleCount = 1;
     ci.width = w;
@@ -1329,6 +1378,7 @@ Result OpenXrBackend::SubmitFrame(uint64_t frameId, const SubmitDesc& desc) {
     }
 
     XrCompositionLayerProjectionView pv[2]{{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}, {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
+    XrCompositionLayerDepthInfoKHR di[2]{{XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR}, {XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR}};
     XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
     XrCompositionLayerQuad quads[kMaxQuadLayers]{};
     const XrCompositionLayerBaseHeader* layers[1 + kMaxQuadLayers]{};
@@ -1352,6 +1402,14 @@ Result OpenXrBackend::SubmitFrame(uint64_t frameId, const SubmitDesc& desc) {
                     });
                     if (w == ImageWait::Ready) sc.lastView = SubmittedView(rec, desc, e);
                     if (w == ImageWait::Failed) ok = false;
+                    UpdateDepthEye(e, desc, w == ImageWait::Ready, sc.lastW, sc.lastH, [&](SwapImages& ds, auto&& transfer) {
+                        return UpdateImage(ds, [&](const EyeTarget& t, uint32_t* ow, uint32_t* oh) {
+                                   *ow = t.width;
+                                   *oh = t.height;
+                                   return transfer(t);
+                               }) == ImageWait::Ready;
+                    });
+                    if (w == ImageWait::Failed) depthValid_[e] = false;
                 }
                 // Not updated (alternate-eye mode, or the image was not ready yet): show the last image.
                 if (!sc.hasImage) {
@@ -1365,6 +1423,20 @@ Result OpenXrBackend::SubmitFrame(uint64_t frameId, const SubmitDesc& desc) {
                 pv[e].subImage.imageRect.extent = {static_cast<int32_t>(sc.lastW), static_cast<int32_t>(sc.lastH)};
                 pv[e].subImage.imageArrayIndex = 0;
                 captureImages[e] = sc.Last();
+            }
+            // Depth for both views or for neither (a runtime may expect it on every view).
+            if (eyesOk && depthValid_[0] && depthValid_[1] && depthFormat_ != DXGI_FORMAT_UNKNOWN && !depthOff_.load()) {
+                for (int e = 0; e < 2; ++e) {
+                    di[e].next = nullptr;
+                    di[e].subImage.swapchain = Handle(depth_[e]);
+                    di[e].subImage.imageRect = pv[e].subImage.imageRect;  // same size as the colour image
+                    di[e].subImage.imageArrayIndex = 0;
+                    di[e].minDepth = 0.0f;
+                    di[e].maxDepth = 1.0f;
+                    di[e].nearZ = depthNear_[e];
+                    di[e].farZ = depthFar_[e];
+                    pv[e].next = &di[e];
+                }
             }
             // A projection layer needs real poses: tracked, 3DoF or held ones from the pose
             // filter (the image then stays where it was rendered), or poses given by the host
@@ -1408,11 +1480,21 @@ Result OpenXrBackend::SubmitFrame(uint64_t frameId, const SubmitDesc& desc) {
 
         GpuFrameEnd();
         CaptureComposited(rec, desc, captureImages, eyes_[0].width, eyes_[0].height);
+        if (pv[0].next) CaptureDepthImages();
         capture_.EndFrame();
     }
 
+    const bool depthChained = layerCount && HasDepthChained(layers, layerCount);
     const Result er = EndFrameLocked(rec.displayTime, layerCount ? layers : nullptr, layerCount);
-    if (er != Result::Ok) return er;
+    if (er != Result::Ok) {
+        if (depthChained && !depthOff_.exchange(true)) {
+            log_.Error("depth layer switched off for this session: xrEndFrame failed with depth info chained to the projection views");
+            std::lock_guard lk(infoMutex_);
+            info_.depthNote = "switched off after xrEndFrame failed with depth chained";
+        }
+        return er;
+    }
+    if (depthChained) CountStat(&FrameStats::depthLayers);
     CountStat(render ? &FrameStats::framesSubmitted : &FrameStats::framesSkipped);
     return ok ? Result::Ok : Result::Error;
 }

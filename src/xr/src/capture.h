@@ -34,6 +34,12 @@ public:
     // <prefix><suffix>. 8-bit RGBA/BGRA as stored; R10G10B10A2 reduced to 8 bits.
     bool WantsRaw() const { return active_ && current_.raw; }
     void CaptureRaw(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, uint32_t arraySlice, const std::string& suffix);
+    // Depth image of an eye (any capture): region (0,0,w,h) of a depth texture (D32_FLOAT,
+    // D24_UNORM_S8_UINT, D16_UNORM or their typeless forms) as a greyscale PNG at
+    // <prefix><suffix>: grey = 255 * depth^(1/4) (depth 0 black). Logs the values'
+    // range, the share at 0 and the distance at the centre (nearZ/farZ as in
+    // XrCompositionLayerDepthInfoKHR, minDepth 0, maxDepth 1).
+    void CaptureDepth(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, uint32_t w, uint32_t h, float nearZ, float farZ, const std::string& suffix);
     void EndFrame();
 
 private:
