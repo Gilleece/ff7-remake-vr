@@ -499,6 +499,10 @@ function Invoke-Restore([string]$bin, [string]$why) {
             if (-not (Test-Path -LiteralPath $p)) { continue }
             if (-not (Remove-ModFile $bin $f.name $f.sha256 $session.unreadable)) { $ok = $false }
         }
+        # The settings panel keeps the previous ff7vr.ini as ff7vr.ini.bak when it saves; the
+        # settings themselves are kept above, so the backup is not needed in the game folder.
+        $bak = Join-Path $bin 'ff7vr.ini.bak'
+        if (Test-Path -LiteralPath $bak) { try { Remove-WithRetry $bak } catch { Warn "Could not remove $bak`: $_" } }
     }
 
     # dxgi.dll: put Luma back whenever it is set aside and nothing has replaced it.

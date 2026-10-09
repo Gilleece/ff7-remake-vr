@@ -39,8 +39,8 @@ static void test_graphics_profile() {
     c.load_from_string("[graphics]\nprofile = Balanced\n[foveation]\npreset = quality\n[stereo_cvars]\nr.shadow.maxcsmresolution = 4096\n");
     auto log = ff7vr::graphics_profile::apply(c);
     CHECK(log.size() == 2);
-    CHECK(c.get_string("foveation", "preset", "") == "quality");                      // explicit key wins
-    CHECK(c.get_string("stereo_cvars", "r.Shadow.MaxCSMResolution", "") == "4096");    // case-insensitive match
+    CHECK(c.get_string("foveation", "preset", "") == "performance");                  // the profile replaces the ini's value
+    CHECK(c.get_string("stereo_cvars", "r.Shadow.MaxCSMResolution", "") == "2048");    // replaced too, matched case-insensitively
     CHECK(c.get_string("stereo_cvars", "r.Shadow.CSM.MaxCascades", "") == "3");         // filled by the profile
     CHECK(c.get_string("stereo", "render_scale", "") == "1.0");
     ff7vr::Config d;
