@@ -415,6 +415,105 @@ than 90 s before. After a slow session the next start, 89-222 s later, was fast 
 (4 of 4); if it is slow again, quit and wait longer.
 Evidence: `captures\perf\restart\` (local, not in the repository).
 
+Measured again on 09/10 with `tools\bench\restart-cycle.ps1` (below): same scene, Null backend at
+90 Hz, 3072x3264, the player's ini, 60 s of walking after gameplay was reached unless noted, the
+previous game killed. A start counts as quick when it came 7-13 s after the previous exit; the
+first start of each series came 14-60 s after another exit and is left out.
+
+| Series (09/10) | Quick starts | Slow | Frame median from 30 s when slow | Power when slow |
+|---|---|---|---|---|
+| Mod with DLSS (DLSS on, 0.65), 7 s, upload test 3 s after each exit | 6 | 1 | 28.7 ms | 98 W |
+| Mod with DLSS, 9 s, upload test 3 s after each exit | 6 | 0 | - | - |
+| Mod with DLSS, 9 s, no upload test | 6 | 1 | 50.6 ms (p95 0.4-1 s at first) | 75 W |
+| Mod with DLSS, 9 s, 3-minute sessions | 5 | 0 | - | - |
+| Mod without DLSS (a build without NGX), 9 s | 7 | 1 | 22.2 ms | 146 W |
+| The game without the mod (flat 6144x3264), 9 s, two series | 13 | 0 | - | - |
+| Fast runs, for comparison | | | 11.11 ms (90 Hz) | 220-256 W (mod), 276-280 W (no mod) |
+
+So on 09/10 it came in 3 of 30 quick starts with the mod, against 5 of 9 on 07/10 with the same
+scene, ini and gap. The 07/10 series had 3-minute sessions, but 3-minute sessions on 09/10 did
+not bring it back (0 of 5). It does not need NGX (DLSS): the build without it landed in it too.
+Without the mod it has still never been seen (0 of 13 on 09/10, 0 of 3 on 07/10); at the
+09/10 rate (1 in 10) that has a chance of one in four of happening even if the game alone were as
+prone, so it neither clears nor blames the mod. The slow runs of 09/10 were milder than those of
+07/10 (22-51 ms against 71-165 ms).
+
+What the new measurements add:
+
+- **It is the card's transfers to and from system memory.** `upload_probe` (a separate process,
+  no game running) 4 s after each slow game's exit: system memory to the card 0.6-2.3 GB/s, the
+  card to system memory 3.0-4.7 GB/s, card to card 460-480 GB/s. Right after a fast game's exit
+  at the same clocks: 11.5-13 and 14.3 GB/s and the same card-to-card rate. So PCIe transfers in
+  both directions are slow (uploads more so) while the card's own memory is not. Inside the slow
+  games the 64 MB upload ran at 0.09-0.5 GB/s, against 1.5-14 GB/s in every fast game, and
+  creating a D3D11 device took 0.3-4.1 s instead of 0.16 s. Texture streaming is uploads, hence
+  the busy copy engines (the game's 6-12 % and the System process's 9-18 % averaged over the
+  minute of the three slow runs; at most 5 % in fast runs) and frames waiting on them.
+- **It was not there before the slow start.** On the one slow start that had an upload test
+  before it (3 s after the previous exit, 4 s before the start) the test measured 11.8 GB/s,
+  as before the fast starts (8.2-12.1 GB/s at that moment). It arises during the start, not at
+  the previous game's exit (one occasion).
+- **Nothing measured before a start tells a slow start from a fast one.** In every run the card's
+  memory was back at its idle level (1.6-1.8 GB in use) within 2 s of the kill and the killed
+  process had left the per-process counters before the exit was recorded; the P-state, memory
+  clock and PCIe generation at the start and the timing of the clock changes around it were the
+  same in slow and fast starts (7-9 s after an exit the card has just dropped from P3 to P5, or
+  is about to); the PCIe replay counter did not move during any start or run
+  (`tools\bench\nvml-log.ps1`, 200 ms). So the previous game's memory being freed late, a
+  lingering process and link errors are ruled out as preconditions; what decides remains
+  unknown.
+- **What does not end it** (with no game running, tested in this order on all three slow
+  occasions): creating, writing and releasing 12 GB of buffers; a window presenting at 120 fps
+  for 10 s; the test program under the game's executable name (the driver's per-game profile)
+  with 8 GB of buffers. Afterwards the upload rate was 1.1-1.5 GB/s, a tenth of normal. The next
+  game start ended it every time (20-23 s after the exit, fast runs), as on 07/10.
+- Unrelated to the slowdown but seen in the counters: dwm's `Dedicated Usage` counter grows by the
+  size of each closed game window's swapchain (+15 MB per 1280x720 run, +312 MB per 6144x3264 run;
+  7.3 to more than 9.8 GB over the evening) while the card's total stays at its idle level: an
+  accounting figure, not memory in use.
+
+The 90-s wait stays: no measured condition was found that a start could wait for instead (the
+memory and P-state conditions that a launcher could poll are met long before 90 s, in slow and
+fast starts alike, and the upload rate is normal before a start that turns slow). On 09/10 no
+start 20 s or more after an exit was slow (8 of 8), but earlier starts 18 s (07/10) and 30 s
+(06/10) after an exit were, so nothing shorter than 90 s is supported. Not tried: the card at
+stock clocks (MSI Afterburner's profile and its command line need administrator rights), NVIDIA
+Broadcast and Virtual Desktop's Streamer closed (both were running in every run), another driver.
+
+### Restart cycles: `restart-cycle.ps1`
+
+```
+$env:FF7VR_DEV_NAME = 'me'
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\bench\restart-cycle.ps1 -Tag base `
+    -Runs dlss-9,dlss-9,nomod-9,mod-90 -DlssBuildDir build\me-dlss -ProbeInRun -LaunchLead 0.6
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\bench\restart-analyze.ps1 -Dir captures\restart\<stamp>-base
+```
+
+Each run item is `<kind>-<gap>`: `mod` (the build in `-BuildDir`), `dlss` (a DLSS build in
+`-DlssBuildDir`, with `-DlssSet` added to the ini), `nomod` (the flat game without the mod);
+the gap is counted from the previous game's exit to the next game's start (`-LaunchLead` is the
+time `launch.ps1` takes to its `Start-Process`, about 0.6 s; the first run waits `-FirstGap`
+after the last exit any harness run recorded). The series holds the game lock throughout,
+starts each game to gameplay with `-NoIdleWait`, walks for `-Seconds`, records frame times and
+the `vram` line every 10 s, optionally runs `upload_probe` inside the run (`-ProbeInRun`) and
+after each exit (`-ProbeAfterExit 3`), kills the game, undeploys and restores Luma's `dxgi.dll`.
+`-OnSlow <script>` is dot-sourced after a slow run's exit (tests with no game running). A run is
+slow when the median of its 10-s frame medians from 30 s on is above 20 ms or the card's power
+from 20 s on is below 150 W. Everything lands in `captures\restart\<stamp>-<tag>\`: `run.txt`,
+`runs.csv`, `nvml.csv` (`nvml-log.ps1`), `gpu.csv` (`gpu-counters.ps1`), the game's log and the
+launch output per run; `restart-analyze.ps1` adds per run the game's and the System process's
+copy-engine load, the card's power, the P-state and the clock changes around the start, PCIe
+replays and traffic, the card's memory before and after the kill, and who holds card memory
+before the next start (`analysis.csv`).
+
+`upload_probe.exe` (built with the mod, `build\<name>\tools\upload_probe\`) measures from a
+process of its own: `info` (budget and usage), `up` (system memory to the card), `down`,
+`vram`, `alloc:<GB>` and `present:<seconds>`; `--mb` sets the size, every GPU wait has a
+deadline (`--timeout-ms`). Normal on this PC with no game running: up 12-14 GB/s at full
+clocks (5-6 GB/s when the card idles at PCIe gen 1-2), down 5.6 GB/s, vram 450-490 GB/s; next
+to a running game up 2.5-14 GB/s.
+Evidence of 09/10: `captures\restart\` (local, not in the repository).
+
 Older measurements of the same state:
 At 4032x3648 with DLSS at 0.58,
 three runs (two with the committed code, one with a work-in-progress DLSS output mode) stayed
@@ -519,7 +618,8 @@ The third state is not explained by memory and none of these settings removed it
 How to watch it: the timing block's `video memory:` line (`docs/render.md`, "Timing") and its
 warning, the dev command `vram`, and `tools\bench\gpu-counters.ps1 -OutCsv <file>` (every
 second: busy GPU engines per process, each process's memory in the card and in system
-memory, the card's total; no elevation needed) alongside `nvidia-smi --query-gpu=memory.used,utilization.gpu,power.draw,clocks.sm,pcie.link.width.current --format=csv -lms 1000`.
+memory, the card's total; no elevation needed) alongside `tools\bench\nvml-log.ps1 -OutCsv <file>` (P-state, clocks, PCIe link, traffic and
+replays every 200 ms) and, for the transfer rates themselves, `upload_probe` (above).
 
 ## Resting state
 
