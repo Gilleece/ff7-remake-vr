@@ -20,6 +20,7 @@ add_library(ff7vr_engine STATIC
     src/audio_listener.cpp
     src/bloom_fix.cpp
     src/distortion_fix.cpp
+    src/lens_vignette.cpp
     src/uobj.cpp
     src/player.cpp
     src/controls.cpp

@@ -100,6 +100,11 @@ constexpr Sig kDistortionComposite{"Distortion composite",
 constexpr std::uint8_t kDistortionCompositeArgs[] = {0x4d, 0x8b, 0xa0, 0x80, 0x28, 0x00, 0x00, 0x4d, 0x8b, 0xe8, 0x4c, 0x8b, 0xf9};
 constexpr Sig kFindFreeElement{"FRenderTargetPool::FindFreeElement", "40 55 53 41 56 41 57 48 8D AC 24 D8 FE FF FF", Rule::Match, 0, 0, 0,
                                0x253d6b0};
+// Default constructor of FPostProcessSettings. Its store of the default VignetteIntensity
+// (`mov dword ptr [rbx+0x418], 1.0`) is checked at +0x58B.
+constexpr Sig kPostProcessSettingsCtor{"FPostProcessSettings::FPostProcessSettings", "48 89 5C 24 08 57 48 83 EC 30 C7 41 3C 00 00 80 3F",
+                                       Rule::Match, 0, 0, 0, 0x32050f0};
+constexpr std::uint8_t kVignetteDefaultStore[] = {0xc7, 0x83, 0x18, 0x04, 0x00, 0x00, 0x00, 0x00, 0x80, 0x3f};
 
 // Call sites whose vtable displacement must equal the slot our device implements.
 struct SlotCheck {
@@ -344,6 +349,12 @@ Addresses resolve_addresses(bool allow_unknown_build, const void* hmd_detour) {
             a.DistortionComposite = p;
         else
             log::warn("engine: distortion composite found, but its argument layout differs from this build's");
+    }
+    if (std::uintptr_t p = addr(kPostProcessSettingsCtor, false)) {
+        if (std::memcmp(reinterpret_cast<const void*>(p + 0x58b), kVignetteDefaultStore, sizeof(kVignetteDefaultStore)) == 0)
+            a.PostProcessSettingsCtor = p;
+        else
+            log::warn("engine: post-process settings constructor found, but its vignette default differs from this build's");
     }
 
     a.stereo_ok = a.failure.empty();

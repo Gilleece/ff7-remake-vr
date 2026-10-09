@@ -33,6 +33,7 @@
 
 #include "bloom_fix.h"
 #include "distortion_fix.h"
+#include "lens_vignette.h"
 #include "engine_internal.h"
 #include "fixes.h"
 #include "movie_watch.h"
@@ -52,6 +53,7 @@
 #include <windows.h>
 
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <format>
 #include <sstream>
@@ -228,6 +230,10 @@ std::string stereo_command(const std::vector<std::string>& a) {
     if (c == "aofix") {
         if (a.size() == 3) bloom_fix::set_ao_enabled(a[2] == "1");
         return "ok " + bloom_fix::ao_status();
+    }
+    if (c == "vignette") {
+        if (a.size() == 3) lens_vignette::set_scale(static_cast<float>(std::atof(a[2].c_str())));
+        return "ok " + lens_vignette::status();
     }
     if (c == "distortfix") {
         if (a.size() == 3) distortion_fix::set_enabled(a[2] == "1");
