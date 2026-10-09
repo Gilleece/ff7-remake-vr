@@ -206,7 +206,7 @@ void Draw(bool force) {
     c.FillRect(kW - 3, 0, 3, kH, border);
     const int titleBase = (kTitleH + c.Ascent(kTitlePx)) / 2 - 2;
     c.Text(28, titleBase, "FF7 Remake VR settings", kTitlePx, {240, 242, 248, 1.0f});
-    const std::string build = std::format("build {}", std::string(FF7VR_GIT_COMMIT).substr(0, 8));
+    const std::string build = std::string(FF7VR_VERSION);
     c.Text(int(kW) - 28 - c.TextWidth(build, kSmallPx), titleBase, build, kSmallPx, {150, 160, 180, 1.0f});
 
     const int n = int(g_items.size());
