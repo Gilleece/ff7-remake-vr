@@ -181,6 +181,18 @@ void FoveationSetUpscaling(bool upscaled, float inputShare);
 using StickSource = void (*)(float* left, float* right);
 void SetStickSource(StickSource source);
 
+// ============================ SETTINGS PANEL ===============================
+// The in-headset settings panel ([menu] in ff7vr.ini) reads the real gamepad and hands
+// the game a neutral one while it is open. The XInput proxy calls this on every
+// successful poll before its other filters; true = the state was replaced by a neutral
+// one (the other filters then see the neutral state).
+struct PadState {
+    unsigned short buttons = 0;  // XINPUT_GAMEPAD_* bits
+    unsigned char leftTrigger = 0, rightTrigger = 0;
+    short lx = 0, ly = 0, rx = 0, ry = 0;
+};
+bool MenuFilterPad(unsigned long user, PadState* state);
+
 // Any thread: whether a battle is in progress (the engine's battle signal or its test
 // override). The HUD panel blends to [ui] battle_size while it is.
 void SetBattleActive(bool active);

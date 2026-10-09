@@ -34,6 +34,10 @@ add_library(ff7vr_render STATIC
     src/d3d11_hooks.cpp
     src/foveation.h
     src/foveation.cpp
+    src/menu.h
+    src/menu.cpp
+    src/menu_canvas.h
+    src/menu_canvas.cpp
     src/pause_on_remove.h
     src/pause_on_remove.cpp
     src/timing.h
@@ -47,5 +51,8 @@ add_library(ff7vr_render STATIC
     src/render_module.cpp
 )
 target_include_directories(ff7vr_render PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(ff7vr_render PUBLIC ff7vr_core ff7vr_xr PRIVATE d3d11 dxgi pdh ff7vr_nvapi)
+target_link_libraries(ff7vr_render PUBLIC ff7vr_core ff7vr_xr PRIVATE d3d11 dxgi pdh ff7vr_nvapi ff7vr_buildinfo)
+# stb_truetype (the settings panel's text) from the stb checkout src/xr fetches.
+FetchContent_GetProperties(stb)
+target_include_directories(ff7vr_render SYSTEM PRIVATE "${stb_SOURCE_DIR}")
 ff7vr_set_warnings(ff7vr_render)

@@ -15,6 +15,7 @@ What ends up where:
 | OpenXR-SDK: the OpenXR loader and headers | compiled in (static loader) | |
 | JsonCpp (bundled with the OpenXR loader) | compiled in, as part of the loader | |
 | stb: `stb_image_write.h` | compiled in | |
+| stb: `stb_truetype.h` | compiled in | |
 | stb: `stb_image.h` | | `tools/xr_smoke` |
 | NVAPI SDK: headers and `nvapi64.lib` | linked in (static library) | |
 | NVIDIA DLSS SDK: headers and the NGX static library `nvsdk_ngx_s.lib` | linked in, only in the `-dlss` build | |
@@ -77,6 +78,9 @@ own source tree at the pinned commit.
 - Used for:
   - `stb_image_write.h` (v1.16): writing PNG captures of the eye images
     (`ff7vr_xr`, compiled into the mod DLL).
+  - `stb_truetype.h` (v1.26): drawing the text of the settings panel with a font
+    installed with Windows (`ff7vr_render`, compiled into the mod DLL; no font is
+    shipped).
   - `stb_image.h` (v2.30): reading PNGs back for verification, in the
     development tool `tools/xr_smoke` only; not part of the mod DLL.
 - Copyright: Copyright (c) 2017 Sean Barrett

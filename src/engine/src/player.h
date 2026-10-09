@@ -77,6 +77,8 @@ bool adjust_camera(ue::FRotator& rotation, ue::FVector& location, bool decoupled
 // Manual toggle (any thread; applied at the next frame).
 void request_toggle();
 void request_mode(bool first_person);
+// Any thread: the mode outside the automatic switch, as of the last game frame (true = first person).
+bool first_person_selected();
 // The gamepad combination for the toggle was pressed (any thread; controls.cpp).
 void request_pad_toggle();
 // Test: pretend a battle is in progress (-1 = use the real signal).

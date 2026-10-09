@@ -18,6 +18,7 @@ namespace {
 std::mutex g_mutex;
 std::string g_live = "(none applied live)";
 std::vector<std::string> g_held;  // console variables a profile holds (start-up or live), not set in the ini
+std::string g_current = "custom";  // under g_mutex: the profile in effect
 
 std::string run(std::string_view line) {
     std::string reply;
@@ -74,6 +75,7 @@ std::string command(std::string_view args) {
     {
         std::lock_guard lock(g_mutex);
         g_live = name;
+        g_current = name;
         g_held = std::move(now);
     }
     return out;
@@ -81,7 +83,29 @@ std::string command(std::string_view args) {
 
 }  // namespace
 
-void register_command() {
+std::string current_profile() {
+    std::lock_guard lock(g_mutex);
+    return g_current;
+}
+
+void set_current_profile(const std::string& name) {
+    std::lock_guard lock(g_mutex);
+    g_current = name;
+}
+
+std::string apply_profile(const std::string& name) {
+    if (name == "custom") {
+        set_current_profile("custom");  // nothing to apply: every value stays as it is now
+        return "ok graphics profile custom";
+    }
+    return command("profile " + name);
+}
+
+void register_command(const std::string& startup_profile) {
+    {
+        std::lock_guard lock(g_mutex);
+        g_current = graphics_profile::known(startup_profile) ? startup_profile : "custom";
+    }
     dev_commands::add("graphics", "graphics status | graphics profile quality|balanced|performance: apply a [graphics] profile live",
                       [](std::string_view args) { return command(args); });
 }

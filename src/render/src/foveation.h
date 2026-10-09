@@ -51,6 +51,9 @@ bool EyeTrackingRequested();
 // Dev command `fov ...`.
 std::string Command(const std::string& args);
 
+// Any thread: the preset in effect: off (switched off), quality, balanced, performance or custom.
+std::string PresetName();
+
 // One line for the status command.
 std::string Status();
 

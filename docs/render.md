@@ -417,6 +417,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev\send-input.ps1 -Pi
 | `uihook proj` | log the projection matrices of the next two views the UI pass receives (in screen mode: the game camera's FOV) |
 | `fov ...` | foveated rendering: status, settings, one-frame trace, timing ([Foveation dev commands](#foveation-dev-commands)) |
 | `picture status` / `picture reset` / `picture <key> <value>` | the colour adjustment now, back to no change, or one key (`brightness`, `contrast`, `saturation`, `gamma`, `black_level`) set and clamped; applies from the next image copied to the headset ([Picture controls](#picture-controls)) |
+| `menu status` / `open` / `close` / `toggle` | the settings panel: open or closed, the selected line, every value, frames shown and images uploaded, the gamepad counters ([Settings panel](#settings-panel)) |
+| `menu up` / `down` / `left` / `right` / `select` / `back` / `save` | the panel's buttons: choose a line, change its value, select, close, save to `ff7vr.ini` |
+| `menu dump <png>` | write the panel texture as uploaded to the GPU (premultiplied alpha) to a PNG; the panel must be open |
+| `menu pad <hex buttons> [user]` | one XInput state through the panel's pad filter, as the game's poll passes it; replies with what the game receives |
+| `menu focus any\|window` | tests: the panel's keyboard and gamepad input also without the window focus (`any`) or only with it (default) |
 | `xr-sim status` | Null backend: emulated tracker head, LOCAL origin, head in LOCAL, recenter offset, the head the game sees, validity |
 | `xr-sim head <yaw deg> [pitch deg] [x y z m]` | Null backend: sets the emulated head pose (on top of `[xr] null_motion`) |
 | `xr-sim motion static\|yaw\|sway\|yawsway\|ini` | Null backend: replaces the scripted motion of `[xr] null_motion` from the next frame (`ini` goes back to the configured one) |
@@ -426,6 +431,49 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev\send-input.ps1 -Pi
 
 Modules register commands with `ff7vr::dev_commands::add` (`src/core`); the
 pipe passes every line it does not handle itself to `dev_commands::dispatch`.
+
+## Settings panel
+
+`src/render/src/menu.cpp`, `menu_canvas.cpp`; the settings come from
+`ff7vr/core/live_settings.h`, the save from `ff7vr/core/ini_file.h`.
+
+- **Settings.** Each module registers the settings it owns with a getter and a setter
+  that use its existing live path (`src/engine/src/menu_items.cpp`: first/third person,
+  snap turn, render scale, graphics profile, world scale, head bob, decoupled pitch, 3D;
+  `menu.cpp`: vignette, HUD distance and size, foveation preset, picture keys, sharpen,
+  Recenter, Save, Close). The panel lists them sorted by their order number.
+- **Image.** 1024 x 720 RGBA8 with premultiplied alpha, drawn on the CPU by the panel's
+  own thread only when something shown changed (checked every 15 ms while open): a dark
+  background at 90 % opacity, the title with the build, twelve rows (the list scrolls),
+  one help line that shows the result of the last action for four seconds. Text is
+  stb_truetype with Segoe UI (or Arial) from the Windows fonts folder, found at run time
+  with `GetWindowsDirectoryW`. The presenting thread copies a new image into a
+  `D3D11_USAGE_DEFAULT` texture (`UpdateSubresource`) and hands it to the quad.
+- **Layer.** Its own quad layer (created at the first open, 1024 x 720), submitted after
+  the HUD panel or the virtual screen, so it is drawn over both in stereo, in held frames
+  and on the virtual screen. Placed when it opens and 200 ms after Recenter: straight
+  ahead of the head's yaw at eye height, `[menu] distance` away, level, fixed in the room;
+  head-locked when `[ui] follow_head = 1`. 0.8 m wide at 1.2 m (37 x 26 degrees, about 27
+  image pixels per degree, close to a Quest 3's display; 30 px text is about 1.1 degrees
+  high). At the HUD panel's 3 m the same 0.8 m would be 15 degrees wide and the text 0.4
+  degrees high, too small to read, so the settings panel has its own distance.
+- **Closed, it costs nothing:** no layer in the frame, no upload, no drawing; the
+  panel's thread polls one key every 15 ms.
+- **Gamepad.** The XInput proxy calls `MenuFilterPad` (`render.h`) on every successful
+  poll before its other filters. It records the real state for the panel, opens the panel
+  on View/Back + Y (only while the game window has the focus) and, while the panel is open
+  and until every button is released after it closed, replaces the state with a neutral
+  one (no buttons, triggers or stick deflection). The engine's pad filter and snap turn
+  then run on that neutral state, so a View/Back held back for a combination is never
+  replayed to the game. `xinput status` shows the last state the game received and how
+  many polls the panel withheld.
+- **Saving** (`ini_file::update_file`): for each setting with an ini key, the value is
+  written when it differs from the file's (numbers compared as numbers) or, for a key the
+  file does not have, when it differs from the value in effect when the panel first
+  opened. The key's line keeps its inline comment at the same column; a missing key goes
+  after the last key of its section, a missing section at the end. The previous file is
+  copied to `ff7vr.ini.bak`; the new one is written to `ff7vr.ini.tmp` and moved over the
+  old one. Each changed line is logged (`menu: saved comfort.vignette: 0 -> 0.3`).
 
 ## Captures
 

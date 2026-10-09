@@ -95,6 +95,11 @@ void Start(const Config& c) {
 
 float Sharpen() { return g_sharpen.load(std::memory_order_relaxed); }
 
+float VignetteStrength() {
+    std::lock_guard lk(g_mutex);
+    return g_set.vignette;
+}
+
 xr::Vignette Update(const xr::Fov fov[2]) {
     Settings s;
     {

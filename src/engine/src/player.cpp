@@ -99,6 +99,7 @@ std::vector<std::function<void()>> g_work;
 
 std::atomic<int> g_toggle_requests{0};
 std::atomic<int> g_mode_request{-1};
+std::atomic<bool> g_fp_selected{true};  // g.first_person for other threads
 std::atomic<int> g_combat_override{-1};
 std::atomic<std::uint64_t> g_pad_toggles{0};
 
@@ -922,6 +923,7 @@ void init(std::uint8_t* object_array, std::uint8_t* name_pool, void** gengine) {
     uobj::init(object_array, name_pool);
     g_gengine = gengine;
     g.first_person = g_settings.fp_default.load();
+    g_fp_selected = g.first_person;
     if (!uobj::available() || !gengine) {
         log::warn("player: object array, name pool or GEngine not found; camera modes off");
         return;
@@ -1046,6 +1048,7 @@ void tick(bool stereo, float delta_seconds) {
         g.first_person = combat ? false : s.fp_default.load();
         log::info("player: battle {}: {} person", combat ? "started" : "ended", g.first_person ? "first" : "third");
     }
+    g_fp_selected.store(g.first_person, std::memory_order_relaxed);
 
     // The follow camera: the view target is the pawn or the game's own camera actor (named
     // EndCameraActor, class CameraActor); where it looks is checked in adjust_camera.
@@ -1271,7 +1274,11 @@ void request_pad_toggle() {
     g_pad_toggles.fetch_add(1);
     request_toggle();
 }
-void request_mode(bool first_person) { g_mode_request = first_person ? 1 : 0; }
+void request_mode(bool first_person) {
+    g_mode_request = first_person ? 1 : 0;
+    g_fp_selected = first_person;  // shown at once; the game thread applies it at the next frame
+}
+bool first_person_selected() { return g_fp_selected.load(std::memory_order_relaxed); }
 void set_combat_override(int v) { g_combat_override = v; }
 
 std::string status() {

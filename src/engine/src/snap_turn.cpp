@@ -161,6 +161,8 @@ void filter_sticks(unsigned long user, short* lx, short* ly, short* rx, short* r
     }
 }
 
+float degrees() { return g_degrees.load(std::memory_order_relaxed); }
+
 std::string command(const std::string& args) {
     std::istringstream in(args);
     std::vector<std::string> a;

@@ -6,6 +6,7 @@
 #include "gpu_trace.h"
 #include "audio_listener.h"
 #include "graphics.h"
+#include "menu_items.h"
 #include "rhi_command.h"
 #include "bloom_fix.h"
 #include "distortion_fix.h"
@@ -32,6 +33,7 @@
 #include <windows.h>
 
 #include <atomic>
+#include <cctype>
 #include <cstdio>
 #include <cwchar>
 #include <string>
@@ -318,7 +320,12 @@ bool start(const StartupContext& ctx) {
                           [](std::string_view args) { return snap_turn::command(std::string(args)); });
         dev_commands::add("gpu", "gpu status | gpu names on | gpu trace <prefix> [dump <from> <to>] [scale <n>]: one-frame GPU trace",
                           [](std::string_view args) { return gpu_trace::command(std::string(args)); });
-        graphics::register_command();
+        {
+            std::string profile = cfg.get_string("graphics", "profile", "custom");
+            for (char& c : profile) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            graphics::register_command(profile);
+        }
+        menu_items::register_all();  // the settings the in-headset panel can change
         dev_commands::add("re", "re peek <rva> <n> | re poke <rva> <hex bytes>: read or patch the game image",
                           [](std::string_view args) {
                               std::string reply;
