@@ -1,0 +1,84 @@
+# Builds the standard and the DLSS release packages from a clean checkout, publishes
+# their SHA-256 sums, attests their build provenance and, for a tag, prepares a draft
+# GitHub release. See docs/releasing.md.
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write       # draft release
+  id-token: write       # provenance attestation (Sigstore)
+  attestations: write
+
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # tags, for the version from git describe
+
+      - name: Build the standard package
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools\package\package.ps1
+
+      - name: Build the DLSS package
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools\package\package.ps1 -Dlss
+
+      - name: Collect the zips, their SHA-256 sums and the release notes
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = New-Item -ItemType Directory -Force -Path release
+          $zips = @(Get-ChildItem -LiteralPath dist -Filter '*.zip' -File | Sort-Object Name)
+          if ($zips.Count -ne 4) { throw "Expected 4 zips in dist, found $($zips.Count): $($zips.Name -join ', ')" }
+          foreach ($z in $zips) { Copy-Item -LiteralPath $z.FullName -Destination $out.FullName }
+          # The per-package sums written by package.ps1, checked against the copied zips.
+          $sums = @(Get-ChildItem -LiteralPath dist -Filter '*-SHA256SUMS.txt' -File | Sort-Object Name | ForEach-Object { Get-Content -LiteralPath $_.FullName })
+          foreach ($line in $sums) {
+            $hash, $file = $line -split '  ', 2
+            $actual = (Get-FileHash -LiteralPath (Join-Path $out.FullName $file) -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $hash) { throw "SHA-256 mismatch for $file" }
+          }
+          [System.IO.File]::WriteAllLines((Join-Path $out.FullName 'SHA256SUMS.txt'), [string[]]$sums)
+          $first = $zips[0].Name
+          $notes = @('## Verify your download', '', 'SHA-256 of each file of this release:', '', '```') + $sums + @(
+            '```', '',
+            'To check a download on Windows, run this in a command prompt in the folder of the zip and compare',
+            'the result with the line above (upper or lower case does not matter):', '',
+            '```', 'certutil -hashfile <zip> SHA256', '```', '',
+            'Each zip also carries a signed build provenance attestation made by this repository''s release',
+            'workflow; with the GitHub CLI:', '',
+            '```', "gh attestation verify <zip> --repo $env:GITHUB_REPOSITORY", '```')
+          [System.IO.File]::WriteAllLines((Join-Path $env:RUNNER_TEMP 'release-notes.md'), [string[]]$notes)
+          Get-Content -LiteralPath (Join-Path $out.FullName 'SHA256SUMS.txt')
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: 'release/*.zip'
+
+      - name: Upload the packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: ff7vr-packages
+          path: release/
+          if-no-files-found: error
+
+      - name: Create a draft release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = @(Get-ChildItem -LiteralPath release -File | ForEach-Object { $_.FullName })
+          gh release create "$env:GITHUB_REF_NAME" --draft --verify-tag --title "$env:GITHUB_REF_NAME" --notes-file (Join-Path $env:RUNNER_TEMP 'release-notes.md') @files
+          if ($LASTEXITCODE -ne 0) { throw "gh release create failed ($LASTEXITCODE)" }

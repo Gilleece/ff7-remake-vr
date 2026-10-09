@@ -34,6 +34,13 @@ Known problems right now (details in `GUIDE.md`):
   without it.
 - Windows 10 or 11.
 
+## Verifying the download
+
+The release notes list the SHA-256 of each zip; check yours with
+`certutil -hashfile <zip> SHA256` in a command prompt. The mod is an unsigned DLL that
+hooks the game, so antivirus heuristics can flag it, as they do other mods of this kind;
+a matching hash shows you have the published file. More in `docs/releasing.md`.
+
 ## Playing
 
 Steam only: 
@@ -109,7 +116,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\package\package.ps1
 Keep the checkout at a short path (for example `C:\src\ff7-remake-vr`): the
 dependency build can exceed Windows' path length limit otherwise. Developer
 documentation: `docs/dev-harness.md` (build, run, test without a headset),
-`docs/engine-module.md`, `docs/render.md`, `docs/benchmarking.md`.
+`docs/engine-module.md`, `docs/render.md`, `docs/benchmarking.md`. Releases: `docs/releasing.md`.
 
 ## Licence
 
