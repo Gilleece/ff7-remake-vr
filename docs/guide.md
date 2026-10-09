@@ -411,9 +411,10 @@ session it is `ff7vr.log` in the game's `End\Binaries\Win64` folder).
   objects in the way (`[camera] collision = 1`; not yet tried against a wall or a
   person in play). `[camera] boom = game` uses the game camera's own position instead.
 - **The desktop window** shows a crop of the left eye, not the full picture.
-- **Some effects stay as in the flat game:** the vignette (darker image corners),
-  and the game's depth of field in cutscenes. Camera motion blur and chromatic
-  aberration are switched off while 3D runs.
+- **Some effects stay as in the flat game:** the game's depth of field in cutscenes.
+  Camera motion blur, chromatic aberration and the game's vignette (the image fading
+  towards its edges, in 3D to a fifth of the light at the edge of the view) are
+  switched off while 3D runs (`[stereo] game_vignette = 1` keeps the vignette).
 - **Square Enix's lens glare effect** may appear in the wrong eye in scenes that use
   it (not seen in testing). With bloom off (`r.BloomQuality = 0`) the game does not
   draw it at all.
@@ -499,10 +500,7 @@ eye, standing in the slums street, 5-second windows, median frame time:
 | `balanced` | foveation `performance`, the detail-level lines, sun shadows 2048 with 3 cascades, translucency lighting 32 | 7.9 to 8.1 ms |
 | `performance` | `balanced` without volumetric fog and without the far detail levels, `render_scale` 0.9 | 6.4 ms |
 
-With the shipped ini the profile only adds what the ini leaves out: to let it choose the
-foveation preset and the detail levels, put a `;` in front of `[foveation] preset` and the
-four detail lines under `[stereo_cvars]`. Fog and far detail matter more in open or hazy
-places than in this street.
+Fog and far detail matter more in open or hazy places than in this street.
 
 In the first headset session on the development PC (RTX 5080, Ryzen 7 5800X3D;
 Quest 3 through Virtual Desktop, 3072x3264 per eye) frame times were mostly 11.5 to
@@ -526,6 +524,17 @@ game, standing still, without a headset:
 
 Busy scenes (combat, open areas) cost more than a quiet room, and Virtual
 Desktop's video encoding comes on top.
+
+Picture settings checked at 3072x3264 per eye (indoors, details and captures in the
+developer notes, `docs/engine-module.md`, "Picture settings measured"):
+
+| Setting | What it does in the headset | Cost |
+|---|---|---|
+| `[stereo] game_vignette = 0` (default) | removes the game's vignette: without it each eye fades to a fifth of the light at the edge of the view | none measurable |
+| `[picture] sharpen` | the mod's own sharpening of the 3D view | 0.07 ms at 2064x2208 per eye (more at larger sizes) |
+| `r.TemporalAASamples`, `r.Tonemapper.Sharpen`, `r.MaxAnisotropy`, `r.Streaming.MipBias`, `r.SSS.*`, `r.Tonemapper.Quality`, shadow resolution and distance | no visible change: the game's own settings are already at their highest | none |
+| `[foveation] translucency_full_rate = 1` | smoke, fire, particles and glass at full detail in the outer rings (not yet seen with such effects) | about 0.01 ms in a scene without them |
+| `r.DepthOfFieldQuality = 0` under `[stereo_cvars]` | no depth of field in cutscenes that play in 3D (not yet seen in a cutscene) | none |
 
 ## DLSS (optional, NVIDIA RTX cards)
 

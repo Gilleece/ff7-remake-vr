@@ -485,7 +485,7 @@
         "offset": 0
       },
       "expect": "0x32050f0",
-      "desc": "Default constructor of FPostProcessSettings. The vignette mod hooks its epilogue to override VignetteIntensity."
+      "desc": "Default constructor of FPostProcessSettings. The vignette mod hooks its epilogue to override VignetteIntensity. The default VignetteIntensity is stored at +0x58B (mov dword ptr [rbx+0x418], 1.0: the field is at +0x418, Square Enix default 1.0 where stock UE4 has 0.4); the engine module checks those bytes and hooks the constructor to scale it in stereo ([stereo] game_vignette)."
     },
     {
       "name": "FSceneViewport::bForceSeparateRenderTarget",

@@ -56,6 +56,9 @@ struct Settings {
     // Every binding after the G-buffer pass at full rate, so the mask covers the G-buffer pass only
     // (docs/render.md, "Hair at 2x2"): removes the mottled hair under 2x2, keeps a small part of the saving.
     bool lightingFullRate = false;
+    // Translucency (particles, smoke, fire, glass) at full rate: after the subsurface blur, the
+    // full-size colour passes with depth bound (docs/render.md, "Translucency at full rate").
+    bool translucencyFullRate = false;
     // Dev only (`fov exclude`): bindings of the scene window, counted from its start, kept at full rate.
     int excludeFrom = -1, excludeTo = -1;
     // Eye-tracked foveation: the rings follow the gaze (docs/render.md, "Eye-tracked foveation").
@@ -184,6 +187,7 @@ std::string Describe(const Settings& s) {
                        s.skipFormats.empty() ? std::string() : std::format(", skipping {} render target format(s)", s.skipFormats.size())) +
            (s.subsurfaceFullRate ? "; subsurface recombine at full rate" : "; subsurface recombine coarse") +
            (s.lightingFullRate ? "; passes after the G-buffer at full rate" : std::string()) +
+           (s.translucencyFullRate ? "; translucency at full rate" : std::string()) +
            (s.excludeFrom >= 0 ? std::format("; bindings {}-{} excluded", s.excludeFrom, s.excludeTo) : std::string()) +
            (s.eyeTracking == EyeTracking::Off
                 ? std::string()
@@ -467,6 +471,12 @@ void OnTargets(ID3D11DeviceContext* ctx, UINT n, ID3D11RenderTargetView* const* 
             if (want && g.settings.subsurfaceFullRate && g.sawSssBlur && !dsv && colour == 1 && f.fmt == DXGI_FORMAT_R16G16B16A16_FLOAT) {
                 want = false;
                 note = "subsurface recombine at full rate";
+            }
+            // Translucency (see Settings::translucencyFullRate): once the subsurface blur has run,
+            // the scene-size colour passes that bind depth are the translucent draws into scene colour.
+            if (want && g.settings.translucencyFullRate && g.sawSssBlur && dsv && f.fmt == DXGI_FORMAT_R16G16B16A16_FLOAT) {
+                want = false;
+                note = "translucency at full rate";
             }
             if (want && g.settings.lightingFullRate && g.sawGBuffer) {
                 want = false;
@@ -1174,6 +1184,7 @@ void Configure(const Config& c) {
     }
     s.subsurfaceFullRate = c.get_bool("foveation", "subsurface_full_rate", true);
     s.lightingFullRate = c.get_bool("foveation", "lighting_full_rate", false);
+    s.translucencyFullRate = c.get_bool("foveation", "translucency_full_rate", false);
     // Eye-tracked foveation, off by default (docs/render.md, "Eye-tracked foveation").
     const std::string et = Lower(c.get_string("foveation", "eye_tracking", "0"));
     if (et == "1" || et == "on" || et == "true" || et == "yes")
@@ -1430,6 +1441,12 @@ std::string Command(const std::string& argsIn) {
             s.lightingFullRate = a[1] == "1";
             return std::string();
         });
+    if (a[0] == "translucency" && a.size() == 2)
+        return update([&](Settings& s) {
+            if (a[1] != "0" && a[1] != "1") return std::string("translucency 0|1");
+            s.translucencyFullRate = a[1] == "1";
+            return std::string();
+        });
     if (a[0] == "dlss_finer" && a.size() == 2)
         return update([&](Settings& s) {
             if (a[1] != "0" && a[1] != "1") return std::string("dlss_finer 0|1");
@@ -1537,7 +1554,7 @@ std::string Command(const std::string& argsIn) {
         return out;
     }
     return "err usage: fov status | on | off | preset quality|balanced|performance|off | radii <r1> <r2> <r3> | rates <a> <b> <c> | "
-           "hidden off|coarse|cull | passes scene|no-gbuffer|all | skip [dxgi formats] | subsurface 0|1 | lighting 0|1 | dlss_finer 0|1 | exclude <first> [<last>]|off | trace | timing | gaze status|mode|margin|smoothing|dump";
+           "hidden off|coarse|cull | passes scene|no-gbuffer|all | skip [dxgi formats] | subsurface 0|1 | lighting 0|1 | translucency 0|1 | dlss_finer 0|1 | exclude <first> [<last>]|off | trace | timing | gaze status|mode|margin|smoothing|dump";
 }
 
 bool EyeTrackingRequested() { return g_eyeTrackingRequested.load(); }

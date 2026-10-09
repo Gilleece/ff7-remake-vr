@@ -1379,6 +1379,25 @@ the view axis. Players who notice it there can move the 2x2 ring out (`radii
 0.7 0.9 1.15` to, for example, `0.7 1.0 1.25`) or use `2x1` for the middle
 ring, which shows no mottling (neither change was measured for cost), before reaching for `lighting_full_rate`.
 
+### Translucency at full rate
+
+Particles, smoke, fire and glass are drawn into scene colour after the lights, with the scene
+depth bound for testing (`r.SeparateTranslucency` is 0 in this game, so there is no separate
+target). In the coarse rings a sprite's alpha and colour are evaluated once per 2x2 or 4x4
+block, so the edges of sparks and flames can turn blocky there. `[foveation]
+translucency_full_rate = 1` (default `0`; `fov translucency 0|1`) keeps those draws at full
+rate: once the subsurface blur has run in the frame, a scene-size `R16G16B16A16_FLOAT` binding
+with depth gets no mask (`translucency at full rate` in `fov trace`). A frame without a
+subsurface blur (no skin in view) is not recognised and keeps the mask.
+
+Measured (Null backend, 2 x 3072x3264, `performance` preset, the reactor walkway of the latest
+save in third person, run `captures/visuals/20261009-195227-fov-3072x3264`): the rule takes
+three bindings at the end of the scene window (`b169` to `b171`, 0.43 ms of GPU time at full
+rate); scene GPU p50 5.915 -> 5.926 ms and 5.922 -> 5.937 ms (two pairs of 15 s windows),
+so about +0.01 ms here. The view has no particles or glass, and the captures with and
+without it differ no more than two captures of the unchanged view: the visible effect and
+the cost in a scene with fire or smoke are not measured. Off by default for that reason.
+
 ### Settings
 
 | Key | Default | Meaning |
@@ -1391,6 +1410,7 @@ ring, which shows no mottling (neither change was measured for cost), before rea
 | `[foveation] passes` | `scene` | `scene`: matching targets inside the scene window; `no-gbuffer`: the same without the G-buffer pass (3 or more targets); `all`: matching targets from the scene's start until Present, including post-processing (for comparison only) |
 | `[foveation] skip_formats` | `35` | DXGI formats of render target 0 that never get the mask (35 = `R16G16_UNORM`, the velocity buffer) |
 | `[foveation] subsurface_full_rate` | `1` | `1`: the subsurface recombine passes run at full rate ([Skin edges](#skin-edges-the-subsurface-recombine)); `0`: they take the mask (grey-white line on skin edges under 2x2) |
+| `[foveation] translucency_full_rate` | `0` | `1`: the translucent draws into scene colour (particles, smoke, fire, glass) run at full rate ([Translucency at full rate](#translucency-at-full-rate)); dev command `fov translucency 0\|1` |
 | `[foveation] lighting_full_rate` | `0` | `1`: every pass after the G-buffer runs at full rate, which removes the mottled hair in the coarse rings ([Hair at 2x2](#skin-edges-the-subsurface-recombine)) but costs about 1.3 ms of the 1.5 ms the `quality` preset saves; dev command `fov lighting 0\|1` |
 | `[debug] foveation_unsupported` | `0` | `1`: behave as on a GPU without variable rate shading (tests the fallback) |
 | `[foveation] eye_tracking` | `0` | `1` or `auto`: the rings follow the eye gaze when the headset has an eye tracker ([Eye-tracked foveation](#eye-tracked-foveation)); `0`: fixed at the optical centres. Read when the XR session starts |
@@ -1478,6 +1498,7 @@ BENCH_TABLE_PLACEHOLDER
 | `fov on` / `fov off` | switch the mask; after `fov off` the scene's GPU time keeps being measured, so on and off compare in one session |
 | `fov preset <name>`, `fov radii <a> <b> <c>`, `fov rates <a> <b> <c>`, `fov hidden off\|coarse\|cull`, `fov passes scene\|no-gbuffer\|all`, `fov skip [formats]`, `fov dlss_finer 0\|1` | change the settings at run time (the surface is rebuilt at the next stereo frame) |
 | `fov subsurface 0\|1` | the subsurface recombine at full rate (1) or with the mask (0) |
+| `fov translucency 0\|1` | the translucent draws after the subsurface blur at full rate (1) or with the mask (0) |
 | `fov lighting 0\|1` | every pass after the G-buffer at full rate (1) or with the mask (0); see [Hair at 2x2](#skin-edges-the-subsurface-recombine) |
 | `fov exclude <first> [<last>]`, `fov exclude off` | keep the scene window's render target bindings `first` to `last` (counted from the scene's start, `b<n>` in `fov trace`) at full rate; for finding which pass causes an artefact |
 | `fov trace` | log every render target binding of the next stereo frame, from the scene's start to Present, with GPU times and binding numbers |
