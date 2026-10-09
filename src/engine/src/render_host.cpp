@@ -16,6 +16,7 @@
 #include <chrono>
 #include <cstring>
 #include <format>
+#include <limits>
 #include <string>
 
 namespace ff7vr::engine {
@@ -147,6 +148,16 @@ public:
             s.eyeRects[e].width = rects[e].width;
             s.eyeRects[e].height = rects[e].height;
         }
+        if (eyes.depth) {
+            s.depthTexture = eyes.depth;
+            s.depthSrvFormat = eyes.depth_srv_format;
+            for (int e = 0; e < 2; ++e)
+                s.depthRects[e] = xr::Rect{eyes.depth_rects[e].x, eyes.depth_rects[e].y, eyes.depth_rects[e].width, eyes.depth_rects[e].height};
+            // Unreal's reversed infinite depth: 0 at infinity (nearZ, the distance at depth 0),
+            // 1 at the near plane (farZ, the distance at depth 1).
+            s.depthNearZ = std::numeric_limits<float>::infinity();
+            s.depthFarZ = eyes.depth_near_m;
+        }
         if (eyes.views_valid) {
             s.haveRenderedViews = true;
             std::memcpy(&s.renderedViews[0], &eyes.views[0], sizeof(xr::View));
@@ -163,6 +174,16 @@ public:
             s.frameId = id;
             render::SubmitStereoFrame(s);
         }
+    }
+
+    bool depth_wanted() override { return render::DepthLayerWanted(); }
+
+    bool relocate_views(std::uint64_t frame_id, HostView out[2]) override {
+        xr::View v[2];
+        if (!frame_id || !render::RelocateViews(frame_id, v)) return false;
+        out[0] = to_host(v[0]);
+        out[1] = to_host(v[1]);
+        return true;
     }
 
     bool gpu_frame_time(float& gpu_ms, std::uint64_t& samples, float& refresh_hz) override {

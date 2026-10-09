@@ -930,6 +930,20 @@
       },
       "expect": "0xd0",
       "desc": "TArray<FViewInfo> Views in the scene renderer: data pointer at this offset, element count at +8. STATIC."
+    },
+    {
+      "name": "GSceneRenderTargets",
+      "kind": "global",
+      "pattern": "48 8D 0D ?? ?? ?? ?? 4C 69 C0 B0 28 00 00 48 8B D6 4C 03 87 D0 00 00 00 E8 ?? ?? ?? ?? 84 C0",
+      "resolve": {
+        "type": "rip",
+        "insn": 0,
+        "disp": 3,
+        "len": 7
+      },
+      "expect": "0x5923ad0",
+      "desc": "The static FSceneRenderTargets: first argument of FSceneRenderTargets::BeginRenderingInGameUI in the UI loop of FDeferredShadingSceneRenderer::Render (the call at +24 of the pattern goes to 0x2541670). Its pooled targets include the scene depth (SceneDepthZ), found at run time by the depth layer (src/engine/src/scene_depth.cpp). STATIC.",
+      "howto": "The lea rcx right before the call to BeginRenderingInGameUI in the UI loop (same pattern as 'FViewInfo size')."
     }
   ]
 }

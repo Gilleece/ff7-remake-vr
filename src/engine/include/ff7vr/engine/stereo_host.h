@@ -80,6 +80,15 @@ struct EyeTexture {
     bool views_valid = false;                       // views[] are the views the image was rendered with
     HostView views[2]{};
     std::uint64_t latest_frame_id = 0;              // newest frame id begin_game_frame has returned so far
+    // Scene depth of the frame (with depth_wanted()): referenced (AddRef) for the call,
+    // read through depth_srv_format; each eye's region in depth_rects (where the eye's
+    // view was rendered: the colour may have been upscaled since). Unreal's reversed,
+    // infinite depth: 1 at the near plane, 0 at infinity; depth_near_m is the near plane
+    // in metres of tracking space (the engine's near plane / units per metre).
+    ID3D11Texture2D* depth = nullptr;
+    DXGI_FORMAT depth_srv_format = DXGI_FORMAT_UNKNOWN;
+    EyeRect depth_rects[2]{};
+    float depth_near_m = 0.0f;
 };
 
 class StereoHost {
@@ -96,6 +105,15 @@ public:
 
     // Presenting thread, once per rendered stereo frame, before its Present (see above).
     virtual void eye_texture_ready(const EyeTexture& eyes) = 0;
+
+    // Render thread: whether the host submits the scene depth with the eye images (the
+    // engine then looks for it and fills EyeTexture::depth).
+    virtual bool depth_wanted() { return false; }
+
+    // Any thread (the engine calls it on the render thread before the frame's scene):
+    // the views of frame_id located again, as late as possible, for the same display
+    // time. False when the host cannot (no XR frame, not fully tracked); out untouched.
+    virtual bool relocate_views(std::uint64_t /*frame_id*/, HostView /*out*/[2]) { return false; }
 
     // Any thread. GPU time of the most recently measured stereo frame, the number of
     // frames measured so far, and the display's refresh rate; false when not known.

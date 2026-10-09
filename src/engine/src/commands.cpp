@@ -35,7 +35,9 @@
 #include "distortion_fix.h"
 #include "engine_internal.h"
 #include "fixes.h"
+#include "late_update.h"
 #include "movie_watch.h"
+#include "scene_depth.h"
 #include "stereo_device.h"
 
 #if FF7VR_ENGINE_WITH_RENDER
@@ -258,6 +260,8 @@ std::string stereo_command(const std::vector<std::string>& a) {
         return std::format("ok frame time window {} s, restarted", v[0]);
     }
     if (c == "framelog") return device::framelog_command(a);
+    if (c == "lateupdate") return late_update::command(a);
+    if (c == "depth") return "ok " + scene_depth::status();
     if (c == "swap" && a.size() == 3) {
         s.swap_rects = a[2] == "1";
         return std::format("ok swap_rects {}", s.swap_rects.load() ? 1 : 0);

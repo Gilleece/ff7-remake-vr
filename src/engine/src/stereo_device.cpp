@@ -7,8 +7,10 @@
 #endif
 #include "fixes.h"
 #include "gpu_trace.h"
+#include "late_update.h"
 #include "player.h"
 #include "rhi_command.h"
+#include "scene_depth.h"
 #include "ue_math.h"
 
 #include "ff7vr/core/config.h"
@@ -95,6 +97,12 @@ struct GameState {
     std::uint64_t held_frames = 0;
     std::uint64_t unusable_views = 0;  // frames whose views from the host were not usable (kept the last good ones)
     int logged_order = 0;
+    // eye cameras built this Tick (CalculateStereoViewOffset), for the late update
+    math::EyeCameraInput cam_in[2]{};
+    FVector built_loc[2]{};
+    FRotator built_rot[2]{};
+    std::int64_t located_qpc = 0;  // when the host returned this frame's views
+    double units_per_metre = 100.0;
     // last eye cameras, for diagnostics
     FRotator cam_rot{};
     FVector cam_loc{};
@@ -118,6 +126,13 @@ struct FrameEntry {
     bool stereo = false;         // the views were built (the frame was drawn in stereo)
     HostView views[2]{};
     std::uint32_t rect_w = 0, rect_h = 0;  // eye view rect size the frame was rendered with (0 = whole half)
+    // The eye cameras (late update) and how old the views are (pose age at the hand-over).
+    math::EyeCameraInput cam_in[2]{};
+    FVector loc[2]{};
+    FRotator rot[2]{};
+    std::int64_t located_qpc = 0;  // the views were located (game thread)
+    std::int64_t late_qpc = 0;     // the views were located again (render thread), 0 = not
+    double units_per_metre = 100.0;
 };
 std::mutex g_fifo_mutex;
 std::array<FrameEntry, 8> g_fifo{};
@@ -382,6 +397,10 @@ void CalculateStereoViewOffset(void*, EStereoscopicPass pass, FRotator* rotation
     FRotator out_rot{};
     FVector out_loc{};
     math::compose_eye(in, out_rot, out_loc);
+    g.cam_in[e] = in;
+    g.built_loc[e] = out_loc;
+    g.built_rot[e] = out_rot;
+    g.units_per_metre = in.units_per_metre;
 
     if (e == 0) {
         ++g.stereo_draws;
@@ -440,6 +459,7 @@ bool Unknown8(void*) { return false; }
 struct FrameEndCommand {
     rhi::Command base;
     EyeTexture eyes{};
+    std::int64_t located_qpc = 0, late_qpc = 0;  // pose age at the hand-over
     ID3D11Texture2D* back_buffer = nullptr;
     mirror::Mode mirror = mirror::Mode::Off;
     std::atomic<bool> pending{false};
@@ -458,10 +478,22 @@ void frame_end_execute(void*, rhi::Command* self) {
         // runtime of its own texture at the runtime's size): the runtime and the mirror get it
         dlss::output_texture(c->eyes);
 #endif
+        if (c->located_qpc) {
+            LARGE_INTEGER q, f;
+            QueryPerformanceCounter(&q);
+            QueryPerformanceFrequency(&f);
+            const double ms = 1000.0 / static_cast<double>(f.QuadPart);
+            late_update::note_handover(static_cast<double>(q.QuadPart - c->located_qpc) * ms,
+                                       c->late_qpc ? static_cast<double>(q.QuadPart - c->late_qpc) * ms : -1.0);
+        }
         if (StereoHost* h = g_host.load()) h->eye_texture_ready(c->eyes);
         if (c->mirror != mirror::Mode::Off)
             mirror::draw(c->eyes.texture, c->back_buffer, c->eyes.eyes[0], c->eyes.eyes[1], c->mirror);
     } catch (...) {
+    }
+    if (c->eyes.depth) {
+        c->eyes.depth->Release();
+        c->eyes.depth = nullptr;
     }
     ++g_count.frame_end_run;
     framelog::record(framelog::kRhiEndDone);
@@ -521,8 +553,24 @@ void RenderTexture_RenderThread(const void*, FRHICommandListImmediate* cmd_list,
         ++g_count.frame_end_failed;  // the RHI thread is far behind: skip this frame's hand-over
         return;
     }
+    // The scene depth for the headset's depth layer, at the rects the views rendered (the
+    // colour rects may change below with DLSS's output; the depth is scaled to them).
+    StereoHost* host = g_host.load();
+    if (fe.stereo && host && host->depth_wanted()) {
+        DXGI_FORMAT srv = DXGI_FORMAT_UNKNOWN;
+        if (ID3D11Texture2D* d = scene_depth::acquire(tw, th, *reinterpret_cast<void* const*>(src), &srv)) {
+            out.depth = d;  // released by the frame-end command
+            out.depth_srv_format = srv;
+            out.depth_rects[0] = out.eyes[0];
+            out.depth_rects[1] = out.eyes[1];
+            const float near_cm = g_near_plane ? *g_near_plane : 10.0f;
+            out.depth_near_m = static_cast<float>(near_cm / (fe.units_per_metre > 0 ? fe.units_per_metre : 100.0));
+        }
+    }
     c.base.execute = &frame_end_execute;
     c.eyes = out;
+    c.located_qpc = fe.stereo ? fe.located_qpc : 0;
+    c.late_qpc = fe.stereo ? fe.late_qpc : 0;
     const auto mode = static_cast<mirror::Mode>(g_settings.mirror.load());
     c.mirror = plausible_d3d_object(bb) ? mode : mirror::Mode::Off;
     c.back_buffer = bb;
@@ -531,6 +579,10 @@ void RenderTexture_RenderThread(const void*, FRHICommandListImmediate* cmd_list,
         ++g_count.frame_end_queued;
         g_frame_end_next = (g_frame_end_next + 1) % (sizeof(g_frame_end) / sizeof(g_frame_end[0]));
     } else {
+        if (c.eyes.depth) {
+            c.eyes.depth->Release();
+            c.eyes.depth = nullptr;
+        }
         c.pending.store(false, std::memory_order_release);
         ++g_count.frame_end_failed;
     }
@@ -937,6 +989,9 @@ void tick_begin() {
             g.views[0] = f.views[0];
             g.views[1] = f.views[1];
             g.views_frame_id = f.frame_id;
+            LARGE_INTEGER q;
+            QueryPerformanceCounter(&q);
+            g.located_qpc = q.QuadPart;
             g.frame_has_views = true;
             if (f.frame_id) g_latest_frame_id = f.frame_id;
         }
@@ -996,6 +1051,13 @@ void tick_end() {
         e.views[1] = g.views[1];
         e.rect_w = g.rect_w;
         e.rect_h = g.rect_h;
+        for (int i = 0; i < 2; ++i) {
+            e.cam_in[i] = g.cam_in[i];
+            e.loc[i] = g.built_loc[i];
+            e.rot[i] = g.built_rot[i];
+        }
+        e.located_qpc = g.frame_has_views ? g.located_qpc : 0;
+        e.units_per_metre = g.units_per_metre;
         fifo_push(e);
     }
 }
@@ -1020,6 +1082,38 @@ std::string status() {
 }
 
 std::string framelog_command(const std::vector<std::string>& a) { return framelog::command(a); }
+
+std::size_t late_candidates(LateCandidate* out, std::size_t max) {
+    std::lock_guard lock(g_fifo_mutex);
+    std::size_t n = 0;
+    for (std::size_t i = 0; i < g_fifo_count && n < max; ++i) {
+        const FrameEntry& e = g_fifo[(g_fifo_head + i) % g_fifo.size()];
+        if (!e.stereo || !e.frame_id) continue;  // views held from an earlier frame: no XR frame to locate for
+        LateCandidate& c = out[n++];
+        c.frame_id = e.frame_id;
+        for (int k = 0; k < 2; ++k) {
+            c.in[k] = e.cam_in[k];
+            c.loc[k] = e.loc[k];
+            c.rot[k] = e.rot[k];
+            c.views[k] = e.views[k];
+        }
+    }
+    return n;
+}
+
+bool late_commit(std::uint64_t frame_id, const FVector& left_origin, const HostView views[2], std::int64_t qpc) {
+    std::lock_guard lock(g_fifo_mutex);
+    for (std::size_t i = 0; i < g_fifo_count; ++i) {
+        FrameEntry& e = g_fifo[(g_fifo_head + i) % g_fifo.size()];
+        if (!e.stereo || e.frame_id != frame_id || e.loc[0].X != left_origin.X || e.loc[0].Y != left_origin.Y || e.loc[0].Z != left_origin.Z)
+            continue;
+        e.views[0] = views[0];
+        e.views[1] = views[1];
+        e.late_qpc = qpc;
+        return true;
+    }
+    return false;
+}
 
 std::string last_views() {
     std::lock_guard lock(g_diag_mutex);
