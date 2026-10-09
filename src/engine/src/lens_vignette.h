@@ -2,8 +2,8 @@
 // The game's lens vignette in stereo. The engine's tonemapper darkens the image towards its
 // edges ("natural vignetting", cos^4 of the angle from the view axis, scaled by the
 // post-process setting VignetteIntensity, which this game defaults to 1.0 where stock UE4 uses
-// 0.4). In a headset each eye gets its own dark rim: at the edge of a 3072x3264 eye image the
-// tonemapper's output is about half its input, in the corners about 0.4.
+// 0.4). In a headset each eye gets its own dark rim: with the vignette removed, the edge of a
+// 3072x3264 eye image is about 4.7 times as bright and its corners about 16 times (captures).
 //
 // The fix scales the default VignetteIntensity while the engine renders in stereo: a hook on
 // FPostProcessSettings' default constructor, which builds every view's final post-process

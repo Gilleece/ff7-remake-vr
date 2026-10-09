@@ -720,6 +720,7 @@ keys, comfort in a headset.
 | `ssr_per_eye` | `1` | each eye's screen-space reflection run limited to its half of the target, and the per-view colour copy for it halved (see "Reflections per eye"); same image, about 0.45 ms less per frame at 2 x 3072x3264 |
 | `ssr_fix` | `2` | screen-space reflections per eye. `2` (default since 08/10): none in either eye, the eyes match. `1`: the right view's run is moved into place, but what it computes is wrong ("The right eye's reflections are not its own"). `0`: the right eye has none (see "Right-eye reflections fix") |
 | `distortion_fix` | `1` | heat haze and refraction per eye: without it the left view's distortion composite covers both eyes and the right view's draws nothing (see "Right-eye distortion fix") |
+| `game_vignette` | `0` | share of the game's lens vignette kept while stereo renders: `0` none, `1` as in the flat game (see "Lens vignette in stereo") |
 | `hzb_skip` | `0` | `1` leaves out the further mips of the hierarchical depth chain nothing reads, while `r.HZBOcclusion` is 0 (see "Volumes and hierarchical depth per view"); gain within noise |
 | `tonemap_shift` | `auto` | with ReShade's Luma add-on loaded, the right view's bloom-combine input shifted to the origin (Luma's shader reads it there; without it both eyes show the left eye's image). `auto`: only while Luma is loaded; `0` off; `1` always (breaks the right eye without Luma). See "ReShade and Luma: the tonemapping shift and Luma's DLSS" |
 | `luma_dlss` | `0` | `0`: while stereo renders, Luma's own DLSS calls into NGX are refused (Luma's DLSS takes the double-wide target for a 50 % frame and leaves the right eye a squeezed quarter); `1`: allowed, for comparison. No effect without Luma; the mod's own DLSS is not affected |
@@ -817,6 +818,7 @@ Through the dev pipe (`[dev] pipe = 1`, `tools\dev\send-input.ps1 -Pipe "<comman
 | `controls status`, `controls recenter\|stereo\|nearer\|farther` | player controls: keys, counters; trigger an action as its key would (see "Player controls") |
 | `fp boom <level\|game>`, `fp pivot <cm>` | third-person camera settings |
 | `fp find <name> [outer] [class]`, `fp classes <text>`, `fp chain <hex address \| pawn \| view \| pc>` | reverse engineering: objects by name, objects whose class name contains a text, the class chain of an object |
+| `stereo vignette [<share>]` | the game's lens vignette in stereo (`[stereo] game_vignette`): set the share kept (0 to 1) and show the hook's counters |
 | `cvar get <name>` | integer and float value and set-by priority of a console variable |
 | `cvar set <name> <value>` | set it with console priority (applied on the game thread) |
 
@@ -1124,7 +1126,7 @@ renders in stereo (saved when stereo starts, put back when it stops, the same me
 | depth of field | not changed (`r.DepthOfFieldQuality` stays 2) | no depth of field was seen in gameplay in the scenes tested; in cutscenes it is part of the authored look. Candidate: hold it at 0 only while the follow camera applies (the camera-mode signal), once a scene with gameplay depth of field has been seen |
 | camera shake | not a console variable | shakes reach the eyes through the game camera's point of view: decoupled pitch drops their pitch and roll, the level boom their up-and-down motion along the boom, and first person uses only the camera's yaw; the yaw part and the sideways part remain in third person |
 | film grain | not changed | `r.Tonemapper.GrainQuantization 1` is the tonemapper's dithering against banding, not visible grain; grain intensity is a post-process setting without a console variable |
-| vignette | not changed | it is part of the tonemapper (`r.Tonemapper.Quality 5`); lowering the quality also changes other parts of the look. A community mod removes it for flat play, so it is a matter of taste rather than a VR problem |
+| vignette | removed (`[stereo] game_vignette = 0`) | not a console variable: `r.Tonemapper.Quality` 1 to 4 changes nothing in this game (captures, 09/10). In 3D it darkens each eye's periphery to a fifth of its light and the corners to a fifteenth; see "Lens vignette in stereo" |
 
 Verified in the street (`captures/camera/runD`, `cvar get` through the dev pipe): before
 stereo `r.MotionBlurQuality` 4 and `r.SceneColorFringeQuality` 1 (set by the engine's
@@ -1267,6 +1269,48 @@ the right eye is entirely horizontal blurry lines (`b_opaque_off_R.png`, and at
 with the normal parallax (`c_opaque_on_*.png`, `e_opaque65_on_*.png`). Not yet seen with real
 heat haze in a headset; `r.DisableDistortion 1` (under `[stereo_cvars]`) switches the whole
 pipeline off as a fallback.
+
+## Lens vignette in stereo
+
+The engine's tonemapper multiplies the image by a "natural vignetting" mask, cos^4 of the angle
+from the view axis blended in by the post-process setting `VignetteIntensity`. This game's
+default for it is 1.0 (stock UE4: 0.4), and a headset's eye covers far wider angles than a flat
+screen, so in 3D each eye's image fades towards its rim: what reaches the eye at the edge of the
+view is about a fifth of the light, in the corners about a fifteenth (a flat screen with a
+90-degree view keeps a quarter at its edge: cos^4 of 45 degrees). The lenses add their own fall-off on
+top. `r.Tonemapper.Quality` (5) does not reach it: captures at 4, 3, 2 and 1 equal the default
+within the frame-to-frame noise (`captures/visuals/20261009-124006-post-3072x3264`, `tmq*`).
+
+`[stereo] game_vignette` (default `0`; dev command `stereo vignette <share>`) scales the default
+`VignetteIntensity` while stereo renders. `src/engine/src/lens_vignette.cpp` hooks
+`FPostProcessSettings::FPostProcessSettings` (RVA `0x32050f0`, signature in
+`tools/re/signatures.json`); the field is at `+0x418`, whose default store
+(`mov dword ptr [rbx+0x418], 1.0` at `+0x58B`) is checked at start-up. Every view's final
+post-process settings are built from a default-constructed object each frame before cameras
+and volumes blend theirs in, so the scaled default is what the tonemapper uses unless a camera
+or volume overrides the vignette itself (then its own value stays). Outside stereo the
+constructor runs unchanged. About 20 objects are constructed per frame; the detour adds one
+branch and one store to each. A value other than 1.0 after the constructor is left alone and
+counted (`unexpected default`: 0 in every run).
+
+Checked on the Null backend at 2 x 3072x3264, third person on the reactor walkway of the
+latest save, `capture` of both eyes and `tools/re/vignette_check.py` (brightness ratio in linear
+light per ring around the image centre, radius 1 = the middle of an edge; run
+`captures/visuals/20261009-194202-vig-aniso16-3072x3264`, `sheet_vignette_start_vig1_vig0.png`):
+
+| Ring | removed / as in the game (left eye, right eye) | half / as in the game (left) |
+|---|---|---|
+| 0.0-0.1 (centre) | 1.01, 1.01 | |
+| 0.5-0.6 | 1.98, 1.96 | 1.49 |
+| 0.9-1.0 (edges) | 4.78, 4.58 | 2.95 |
+| 1.3-1.4 (corners) | 16.0, 17.1 | 9.3 |
+
+Two captures with it removed, 17 s apart, agree within 0.1 % in every ring; first person
+gives the same (edge 4.5, corners 11.9). Cost: scene GPU p50 6.10 / 5.96 ms with the vignette
+against 6.07 / 5.97 ms without (two pairs of 15 s windows), the passes after the scene
+0.97 ms either way: nothing measurable. The vignette per eye is a flat-screen camera effect
+(each eye's image centre is not where the lens is centred, and the eye looks around inside
+the image), so it is removed by default; `game_vignette = 1` keeps the game's look.
 
 ## Skin lighting fix
 

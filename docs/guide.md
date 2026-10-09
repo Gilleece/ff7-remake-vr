@@ -371,9 +371,10 @@ session it is `ff7vr.log` in the game's `End\Binaries\Win64` folder).
   objects in the way (`[camera] collision = 1`; not yet tried against a wall or a
   person in play). `[camera] boom = game` uses the game camera's own position instead.
 - **The desktop window** shows a crop of the left eye, not the full picture.
-- **Some effects stay as in the flat game:** the vignette (darker image corners),
-  and the game's depth of field in cutscenes. Camera motion blur and chromatic
-  aberration are switched off while 3D runs.
+- **Some effects stay as in the flat game:** the game's depth of field in cutscenes.
+  Camera motion blur, chromatic aberration and the game's vignette (the image fading
+  towards its edges, in 3D to a fifth of the light at the edge of the view) are
+  switched off while 3D runs (`[stereo] game_vignette = 1` keeps the vignette).
 - **Square Enix's lens glare effect** may appear in the wrong eye in scenes that use
   it (not seen in testing). With bloom off (`r.BloomQuality = 0`) the game does not
   draw it at all.
