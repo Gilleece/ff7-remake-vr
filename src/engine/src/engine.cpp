@@ -15,6 +15,7 @@
 #include "snap_turn.h"
 #include "movie_watch.h"
 #include "player.h"
+#include "shaders.h"
 #include "stereo_device.h"
 
 #if FF7VR_ENGINE_WITH_RENDER
@@ -320,7 +321,7 @@ bool start(const StartupContext& ctx) {
                           [](std::string_view args) { return controls::command(std::string(args)); });
         dev_commands::add("snapturn", "snapturn status | snap <deg>|off | deadzone | repeat | log | stick <lx> <ly> <rx> <ry>: snap turn ([comfort] snap_turn)",
                           [](std::string_view args) { return snap_turn::command(std::string(args)); });
-        dev_commands::add("gpu", "gpu status | gpu names on | gpu trace <prefix> [dump <from> <to>] [scale <n>]: one-frame GPU trace",
+        dev_commands::add("gpu", "gpu status | gpu names on | gpu trace <prefix> [dump <from> <to> | dump fullscreen] [scale <n>] [cbs 1]: one-frame GPU trace",
                           [](std::string_view args) { return gpu_trace::command(std::string(args)); });
         {
             std::string profile = cfg.get_string("graphics", "profile", "custom");
@@ -348,6 +349,9 @@ bool start(const StartupContext& ctx) {
             log::info("engine: stereo disabled in ff7vr.ini ([stereo] enabled = 0); the game runs unmodified");
             return false;
         }
+        // Before the game creates its device: the reflections fix needs the bytecode of one
+        // of the game's pixel shaders (shaders.h).
+        shaders::install(cfg.get_bool("dev", "keep_shaders", false));
         g_ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         HookPoint hp;
         if (!find_hmd_hook_point(g_opt.allow_unknown_build, hp)) {

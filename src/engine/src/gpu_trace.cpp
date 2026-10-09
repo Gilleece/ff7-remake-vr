@@ -99,6 +99,7 @@ std::string g_prefix;                      // set while Idle, read on the RHI th
 std::uint32_t g_dump_from = 1, g_dump_to = 0;  // read-back range (seq), empty by default
 bool g_dump_fullscreen = false;  // read back every full-screen pass (at most 6 vertices, target at least 512 wide)
 std::uint32_t g_dump_scale = 2;
+bool g_dump_cbs = false;  // also write every shader constant buffer of a dumped event as a binary file
 std::string g_last_result = "no trace yet";
 std::mutex g_result_mutex;
 
@@ -466,6 +467,33 @@ std::string cb_contents(ID3D11Buffer* cb, UINT max_bytes) {
     return s;
 }
 
+// Writes a constant buffer's contents (first `max_bytes`) to a file; releases cb.
+bool cb_write(ID3D11Buffer* cb, UINT max_bytes, const std::string& path) {
+    if (!cb) return false;
+    D3D11_BUFFER_DESC d{};
+    cb->GetDesc(&d);
+    D3D11_BUFFER_DESC sd{};
+    sd.ByteWidth = std::min<UINT>(d.ByteWidth, max_bytes);
+    sd.Usage = D3D11_USAGE_STAGING;
+    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ID3D11Buffer* st = nullptr;
+    bool ok = false;
+    if (SUCCEEDED(g_dev->CreateBuffer(&sd, nullptr, &st)) && st) {
+        D3D11_BOX box{0, 0, 0, sd.ByteWidth, 1, 1};
+        g_ctx->CopySubresourceRegion(st, 0, 0, 0, 0, cb, 0, &box);
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if (SUCCEEDED(g_ctx->Map(st, 0, D3D11_MAP_READ, 0, &m))) {
+            std::ofstream f(path, std::ios::binary);
+            f.write(static_cast<const char*>(m.pData), sd.ByteWidth);
+            ok = static_cast<bool>(f);
+            g_ctx->Unmap(st, 0);
+        }
+        st->Release();
+    }
+    cb->Release();
+    return ok;
+}
+
 // ------------------------------------------------------------------ event recording
 void stamp() {
     D3D11_QUERY_DESC qd{D3D11_QUERY_TIMESTAMP, 0};
@@ -515,6 +543,19 @@ void end_event(std::uint32_t seq, bool compute, UINT vertices = 0) {
     if (!wanted && g_dump_fullscreen && (compute || vertices <= 6)) wanted = output_width(compute) >= 512;
     if (!wanted) return;
     std::string& line = g_lines.back();
+    if (g_dump_cbs) {
+        // Every pixel (or compute) shader constant buffer, whole up to 8 KB, as binary files.
+        ID3D11Buffer* all[6]{};
+        if (compute) g_ctx->CSGetConstantBuffers(0, 6, all);
+        else g_ctx->PSGetConstantBuffers(0, 6, all);
+        for (int i = 0; i < 6; ++i)
+            if (all[i]) cb_write(all[i], 8192, std::format("{}_{:05}_{}cb{}.bin", g_prefix, seq, compute ? "cs" : "ps", i));
+        if (!compute) {
+            ID3D11Buffer* v = nullptr;
+            g_ctx->VSGetConstantBuffers(0, 1, &v);
+            if (v) cb_write(v, 8192, std::format("{}_{:05}_vscb0.bin", g_prefix, seq));
+        }
+    }
     ID3D11Buffer* cbs[3]{};
     if (compute) {
         g_ctx->CSGetConstantBuffers(0, 1, cbs);
@@ -835,6 +876,7 @@ std::string command(const std::string& args) {
         g_dump_to = 0;
         g_dump_fullscreen = false;
         g_dump_scale = 2;
+        g_dump_cbs = false;
         try {
             for (std::size_t i = 2; i + 1 < a.size(); ++i) {
                 if (a[i] == "dump" && a[i + 1] == "fullscreen") {
@@ -844,13 +886,16 @@ std::string command(const std::string& args) {
                     g_dump_from = static_cast<std::uint32_t>(std::stoul(a[i + 1]));
                     g_dump_to = static_cast<std::uint32_t>(std::stoul(a[i + 2]));
                     i += 2;
+                } else if (a[i] == "cbs") {
+                    g_dump_cbs = std::stoul(a[i + 1]) != 0;
+                    ++i;
                 } else if (a[i] == "scale") {
                     g_dump_scale = std::clamp<std::uint32_t>(static_cast<std::uint32_t>(std::stoul(a[i + 1])), 1, 16);
                     ++i;
                 }
             }
         } catch (...) {
-            return "err usage: gpu trace <prefix> [dump <from> <to> | dump fullscreen] [scale <n>]";
+            return "err usage: gpu trace <prefix> [dump <from> <to> | dump fullscreen] [scale <n>] [cbs 1]";
         }
         {
             std::lock_guard lock(g_result_mutex);
@@ -859,7 +904,7 @@ std::string command(const std::string& args) {
         g_state = State::Armed;
         return "ok armed: the next stereo frame is traced (see gpu status)";
     }
-    return "err usage: gpu status | gpu names on | gpu trace <prefix> [dump <from> <to> | dump fullscreen] [scale <n>]";
+    return "err usage: gpu status | gpu names on | gpu trace <prefix> [dump <from> <to> | dump fullscreen] [scale <n>] [cbs 1]";
 }
 
 }  // namespace ff7vr::engine::gpu_trace

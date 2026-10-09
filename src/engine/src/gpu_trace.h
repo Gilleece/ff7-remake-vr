@@ -18,6 +18,9 @@
 //   <prefix>.txt          one line per call
 //   <prefix>_<seq>.rgba   read-backs: 16-byte header {'GTD1', width, height, dxgi format}
 //                         then RGBA8 rows (float formats tonemapped x/(1+x), then gamma 2.2)
+//   <prefix>_<seq>_pscb<n>.bin, _vscb0.bin (with `cbs 1`): every pixel shader constant buffer
+//                         (or compute, _cscb<n>) and the vertex shader's first, up to 8 KB each,
+//                         for the read-back events
 //   tools/re/gpu_trace_view.py turns read-backs into PNGs and contact sheets.
 
 #include <d3d11.h>
@@ -27,7 +30,7 @@
 
 namespace ff7vr::engine::gpu_trace {
 
-// Dev pipe command `gpu ...`: `gpu names on`, `gpu trace <prefix> [dump <from> <to>] [scale <n>]`,
+// Dev pipe command `gpu ...`: `gpu names on`, `gpu trace <prefix> [dump <from> <to>] [scale <n>] [cbs 1]`,
 // `gpu status`.
 std::string command(const std::string& args);
 

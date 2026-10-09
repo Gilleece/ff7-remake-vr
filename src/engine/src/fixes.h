@@ -79,8 +79,19 @@ void set_ssr_poison(int mode);  // test: 1 fills the half a run skipped with a l
 // Mode 2 (`ssr fix 2`) instead clears both views' reflection runs: no screen-space reflections
 // in either eye, so the eyes match (the fixed right view's reflections are not the right view's
 // own; docs/engine-module.md, "The right eye's reflections are not its own").
-void set_ssr_fix(int mode);  // 0 off, 1 on, 2 both eyes without
+// Mode 3 (`ssr fix 3`) draws the right view's run in place, at its own rectangle, with the
+// pass's pixel shader patched so that it reads its inputs at the pixel's position in the target
+// (shaders.h, patched_for); "The right eye's reflections are not its own" in the same document.
+void set_ssr_fix(int mode);  // 0 off, 1 moved into place, 2 both eyes without, 3 patched shader in place
 bool ssr_fix();
+int ssr_fix_mode();
+// Tests of mode 3: `equal` draws the run at the origin a second time with the patched shader and
+// compares the two bit for bit (`same`: with the game's own shader, the control); `halves` compares the two halves of the reflection target once
+// both runs have written it (for two identical views); `shift` computes, right after the run
+// drawn in place, the same view's reflections with the game's own shader and the view moved to
+// the origin (inputs and view constants), and compares the two pixel for pixel. `result`
+// returns the last result.
+std::string ssr_test(const std::string& what);
 bool ssr_wants_hooks();  // either switch on: the context hooks are needed
 // RHI thread, before every DrawIndexed: places a fixed right-eye result once the draw that
 // reads it (the right view's composite) shows where the right view's rectangle starts.
@@ -106,5 +117,7 @@ std::string hzb_status();
 // RHI thread, once per frame (frame end).
 void ssr_frame();
 std::string ssr_status();
+// Writes the reflection pass's pixel shader (bytecode and disassembly, shaders.h).
+std::string ssr_shader_dump(const std::string& prefix);
 
 }  // namespace ff7vr::engine::fixes
