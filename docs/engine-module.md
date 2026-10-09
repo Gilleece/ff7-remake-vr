@@ -1071,9 +1071,10 @@ of it in motion yet).
 
 `[graphics] profile = quality | balanced | performance | custom` (default `custom`: nothing
 applied). The bundles are tables in `src/core/graphics_profile.cpp`; the loader applies
-them right after reading the ini (`graphics_profile::apply`), filling only the keys the ini
-does not set, so every module reads them as ordinary ini values and an explicit key always
-wins. The log says `graphics: profile <name>: applied ...` and `... left to the ini ...`.
+them right after reading the ini (`graphics_profile::apply`) and their values replace what
+the ini says for those keys (`profile = custom` keeps the ini as written), so every module
+reads them as ordinary ini values. The log says `graphics: profile <name>: applied ...` and
+`... replaced the ini's ...`.
 
 | Key | quality | balanced | performance |
 |---|---|---|---|
@@ -1112,6 +1113,48 @@ cascades 3, `r.StaticMeshLODDistanceScale` 1; switching back to balanced puts th
 to 1, and then to quality the cascades back to 5 (the game's value). The start-up path is
 covered by `ff7vr_core_tests` (explicit key wins, case-insensitive names, custom applies
 nothing); a start with a profile set in the ini was not run in the game.
+
+### Picture settings measured at headset resolution (09/10)
+
+Which of the game's own settings make the picture in the headset better, and what they cost.
+Null backend at 2 x 3072x3264 without pacing, `t.MaxFPS 0`, the player's ini (foveation
+`performance`, the detail-level lines, `r.BloomQuality 0`), RTX 5080; third person on the
+reactor walkway where the latest save starts, standing; the same view captured before and
+after each change (`capture`, both eyes) and, for the anti-aliasing settings, also while the
+emulated head turns (`xr-sim motion yaw`). Crops compared by eye and with
+`tools/re/crop_sheet.py` (mean absolute difference and a Laplacian sharpness figure per
+region; two captures of the unchanged view differ by 0.9 to 2.0 levels on average, from the
+characters' idle animation and the dither). Cost: GPU time of the scene and of the passes
+after it (`fov timing`, p50), two pairs of 15 s windows alternating with the game's value.
+Steps files `tools/bench/vr-perf-steps/picture-*.ps1`; runs under `captures/visuals/`
+(`20261009-124006-post-*` without and `20261009-195227-fov-*` with `[picture] sharpen = 0.5`,
+`20261009-194202-vig-aniso16-*` started with `r.MaxAnisotropy 16`).
+
+The game's own settings are already at their highest in most places: shadows 4096 with
+`r.Shadow.RadiusThreshold 0.01`, `r.DetailMode 2`, `r.MaterialQualityLevel 1` (high),
+`r.RefractionQuality 2`, `r.Upscale.Quality 3`, `r.LightShaftQuality 1`, `r.SceneColorFormat 4`.
+
+| Setting (game value) | Seen in the captures | GPU cost (scene / after) |
+|---|---|---|
+| the game's lens vignette removed, `[stereo] game_vignette = 0` (new, default) | each eye's edge about 4.7 times as bright, the corners about 16 times: the periphery is no longer dimmed (see "Lens vignette in stereo") | none: 6.10 / 5.96 ms with it, 6.07 / 5.97 without; after 0.97 both |
+| `r.TemporalAACurrentFrameWeight`, `r.TemporalAACatmullRom`, `r.TemporalAAFilterSize` | not in this build (UE 4.18 has none of them) | - |
+| `r.TemporalAASamples` 16 or 4 (8) | no difference standing or with the head turning, with `sharpen` 0 and 0.5 (`sheet_taa_still.png`, `sheet_taa_sharpen05*.png`); no ghosting with the head turning in any of them | not measured (only the jitter sequence changes) |
+| `r.Tonemapper.Sharpen` 0.5 or 1 (0) | no change: sharpness of the static floor and gate 19.15 / 6.93 against 18.98 to 19.13 / 6.97 to 6.99 (two unchanged captures 19.18 / 7.03); the game's last pass does not use it | none (5.10 / 0.93 against 5.09 / 0.91) |
+| `r.MaxAnisotropy` 16 (4), set live | no change (the game's sampler states are made when textures load) | - |
+| `r.MaxAnisotropy` 16 under `[cvars]` (set before the menus load) | no visible change on the floor, ceiling or perforated wall at grazing angles (`sheet_aniso_floor.png`; floor sharpness 12.36 to 12.55) | +0.06 ms scene (5.91 against 5.97, between two sessions) |
+| `r.Streaming.MipBias` -0.5 or -1 (0) | no change (mean difference 0.6 and 1.8 levels, the unchanged view 2.0) | none (5.92 / 0.97 both) |
+| `r.SSS.HalfRes 0` with `r.SSS.Quality 1` (1, 0) | no change on skin (Cloud's arms, `sheet_sss.png`) | none (5.10 / 0.91 both) |
+| `r.Tonemapper.Quality` 4, 3, 2 or 1 (5) | no change anywhere, the vignette included | none |
+| shadows: `r.Shadow.DistanceScale 1.5`, `r.Shadow.TexelsPerPixel 2`, `r.Shadow.RadiusThreshold 0.003`; `r.Shadow.CSM.TransitionScale 2`; `r.Shadow.FilterMethod 1` | no change in this indoor scene (lamps, no sun): differences at the level of two unchanged captures | none for the first three together (5.10 / 0.91) |
+| `[foveation] translucency_full_rate = 1` (new, off) | no particles or glass in the view: no change; the rule took three bindings (0.43 ms GPU) | +0.01 to +0.015 ms scene (5.915 -> 5.926, 5.922 -> 5.937) |
+| `r.DepthOfFieldQuality 0` (2) | no depth of field pass in a gameplay frame (`gpu trace`, pool names); cutscenes not reached headless | none in gameplay |
+
+Not adopted as defaults (no visible gain): every console variable above. Kept as options:
+`r.DepthOfFieldQuality = 0` under `[stereo_cvars]` (removes the authored depth of field in
+cutscenes that play in 3D; not seen working) and `translucency_full_rate`. Nothing was folded
+into the `[graphics]` profiles: none of these changes the picture or the cost in the scenes
+measured. Scenes not covered: sunlit exteriors (sun shadows), fire, smoke and water
+(translucency), cutscenes (depth of field).
 
 ## Flat-screen camera effects
 

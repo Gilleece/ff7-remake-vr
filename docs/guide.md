@@ -440,9 +440,9 @@ To narrow a problem down, change one setting at a time and start a new session:
 ## Performance
 
 `[graphics] profile` in `ff7vr.ini` picks a bundle of speed settings in one line
-(`custom`, the default, applies nothing). A key you set yourself in the ini always wins
-over the profile; the log's `graphics:` lines say what the profile applied and what it
-left alone. Measured on the development PC (RTX 5080) without a headset, 3072x3264 per
+(`custom`, the default, applies nothing). A chosen profile replaces the ini's values for
+the keys it sets; the log's `graphics:` lines say what it applied and which ini values it
+replaced. Measured on the development PC (RTX 5080) without a headset, 3072x3264 per
 eye, standing in the slums street, 5-second windows, median frame time:
 
 | Profile | What it sets | Frame time |
@@ -452,10 +452,7 @@ eye, standing in the slums street, 5-second windows, median frame time:
 | `balanced` | foveation `performance`, the detail-level lines, sun shadows 2048 with 3 cascades, translucency lighting 32 | 7.9 to 8.1 ms |
 | `performance` | `balanced` without volumetric fog and without the far detail levels, `render_scale` 0.9 | 6.4 ms |
 
-With the shipped ini the profile only adds what the ini leaves out: to let it choose the
-foveation preset and the detail levels, put a `;` in front of `[foveation] preset` and the
-four detail lines under `[stereo_cvars]`. Fog and far detail matter more in open or hazy
-places than in this street.
+Fog and far detail matter more in open or hazy places than in this street.
 
 In the first headset session on the development PC (RTX 5080, Ryzen 7 5800X3D;
 Quest 3 through Virtual Desktop, 3072x3264 per eye) frame times were mostly 11.5 to
@@ -479,6 +476,17 @@ game, standing still, without a headset:
 
 Busy scenes (combat, open areas) cost more than a quiet room, and Virtual
 Desktop's video encoding comes on top.
+
+Picture settings checked at 3072x3264 per eye (indoors, details and captures in the
+developer notes, `docs/engine-module.md`, "Picture settings measured"):
+
+| Setting | What it does in the headset | Cost |
+|---|---|---|
+| `[stereo] game_vignette = 0` (default) | removes the game's vignette: without it each eye fades to a fifth of the light at the edge of the view | none measurable |
+| `[picture] sharpen` | the mod's own sharpening of the 3D view | 0.07 ms at 2064x2208 per eye (more at larger sizes) |
+| `r.TemporalAASamples`, `r.Tonemapper.Sharpen`, `r.MaxAnisotropy`, `r.Streaming.MipBias`, `r.SSS.*`, `r.Tonemapper.Quality`, shadow resolution and distance | no visible change: the game's own settings are already at their highest | none |
+| `[foveation] translucency_full_rate = 1` | smoke, fire, particles and glass at full detail in the outer rings (not yet seen with such effects) | about 0.01 ms in a scene without them |
+| `r.DepthOfFieldQuality = 0` under `[stereo_cvars]` | no depth of field in cutscenes that play in 3D (not yet seen in a cutscene) | none |
 
 ## DLSS (optional, NVIDIA RTX cards)
 
