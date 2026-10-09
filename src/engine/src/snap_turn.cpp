@@ -1,5 +1,6 @@
 #include "snap_turn.h"
 
+#include "head_move.h"
 #include "stereo_device.h"
 
 #include "ff7vr/core/log.h"
@@ -29,7 +30,7 @@ std::atomic<int> g_repeat_ms{0};                 // [comfort] snap_turn_repeat_m
 std::atomic<int> g_left_key{0}, g_right_key{0};  // [comfort] snap_left_key / snap_right_key
 std::atomic<int> g_log{0};                       // left stick lines still to be logged (-1 = all)
 
-constexpr unsigned long kPads = 4;
+constexpr unsigned long kPads = 8;  // XInput users 0..3, PlayStation pads 0..3 as 4..7 (sce_pad.h)
 struct PadState {
     bool armed = true;
     std::int64_t last_step_us = 0;
@@ -37,7 +38,7 @@ struct PadState {
 std::mutex g_mutex;
 PadState g_pads[kPads];
 
-std::atomic<std::uint64_t> g_steps{0}, g_stick_steps{0}, g_key_steps{0}, g_rx_hidden{0}, g_rotated{0};
+std::atomic<std::uint64_t> g_steps{0}, g_stick_steps{0}, g_key_steps{0}, g_rx_hidden{0}, g_rotated{0}, g_rotated_head{0};
 std::atomic<int> g_last_in_lx{0}, g_last_in_ly{0}, g_last_out_lx{0}, g_last_out_ly{0}, g_last_rx{0};
 bool g_key_down[2] = {};
 
@@ -107,43 +108,50 @@ void tick() {
 
 void filter_sticks(unsigned long user, short* lx, short* ly, short* rx, short* ry) {
     (void)ry;
-    const float deg = g_degrees.load(std::memory_order_relaxed);
     // Only while 3D renders: menus, movies and the virtual screen get the stick as it is.
-    if (user >= kPads || !lx || !ly || !rx || deg == 0.0f || !device::active()) return;
+    if (user >= kPads || !lx || !ly || !rx || !device::active()) return;
+    const float deg = g_degrees.load(std::memory_order_relaxed);
     const std::int64_t now = now_us();
-    // Right stick X: steps, hidden from the game.
-    const float x = static_cast<float>(*rx) / 32767.0f;
-    const float dz = g_deadzone.load(std::memory_order_relaxed);
-    int fire = 0;
-    {
-        std::lock_guard lock(g_mutex);
-        PadState& p = g_pads[user];
-        if (std::fabs(x) >= dz) {
-            const int repeat = g_repeat_ms.load(std::memory_order_relaxed);
-            if (p.armed || (repeat > 0 && now - p.last_step_us >= std::int64_t(repeat) * 1000)) {
-                fire = x > 0 ? 1 : -1;
-                p.armed = false;
-                p.last_step_us = now;
+    if (deg != 0.0f) {
+        // Right stick X: steps, hidden from the game.
+        const float x = static_cast<float>(*rx) / 32767.0f;
+        const float dz = g_deadzone.load(std::memory_order_relaxed);
+        int fire = 0;
+        {
+            std::lock_guard lock(g_mutex);
+            PadState& p = g_pads[user];
+            if (std::fabs(x) >= dz) {
+                const int repeat = g_repeat_ms.load(std::memory_order_relaxed);
+                if (p.armed || (repeat > 0 && now - p.last_step_us >= std::int64_t(repeat) * 1000)) {
+                    fire = x > 0 ? 1 : -1;
+                    p.armed = false;
+                    p.last_step_us = now;
+                }
+            } else if (std::fabs(x) < dz * 0.5f) {
+                p.armed = true;  // released: the next push steps again
             }
-        } else if (std::fabs(x) < dz * 0.5f) {
-            p.armed = true;  // released: the next push steps again
+        }
+        g_last_rx = *rx;
+        if (*rx != 0) ++g_rx_hidden;
+        *rx = 0;
+        if (fire) {
+            ++g_stick_steps;
+            step(fire, "right stick");
         }
     }
-    g_last_rx = *rx;
-    if (*rx != 0) ++g_rx_hidden;
-    *rx = 0;
-    if (fire) {
-        ++g_stick_steps;
-        step(fire, "right stick");
-    }
-    // Left stick: rotated by the turn in effect (positive = view turned right), so forward
-    // moves the character where the player looks.
-    const float yaw = turn_now();
+    // Left stick: rotated so that forward moves the character where the player looks. With
+    // [first_person] / [camera] move = head: by the head's heading relative to the game
+    // camera (snap turn included, head_move.h); otherwise by snap turn's turn in effect
+    // (positive = view turned right).
+    float yaw = 0.0f;
+    const bool head = head_move::stick_rotation(yaw);
+    if (!head) yaw = deg != 0.0f ? turn_now() : 0.0f;
     if (yaw == 0.0f || (*lx == 0 && *ly == 0)) return;
     const double t = yaw * 3.14159265358979 / 180.0, c = std::cos(t), s = std::sin(t);
     const double ix = *lx, iy = *ly;
     const short ox = clamp_axis(ix * c + iy * s), oy = clamp_axis(-ix * s + iy * c);
     ++g_rotated;
+    if (head) ++g_rotated_head;
     g_last_in_lx = *lx;
     g_last_in_ly = *ly;
     g_last_out_lx = ox;
@@ -156,8 +164,8 @@ void filter_sticks(unsigned long user, short* lx, short* ly, short* rx, short* r
     if (left != 0 && now - s_last_log.load(std::memory_order_relaxed) >= 500000) {
         s_last_log = now;
         if (left > 0) g_log.compare_exchange_strong(left, left - 1);
-        log::info("comfort: left stick ({}, {}) -> game ({}, {}) for a view turned {:.1f} deg", static_cast<int>(ix), static_cast<int>(iy), ox, oy,
-                  yaw);
+        log::info("comfort: left stick ({}, {}) -> game ({}, {}) for {} {:.1f} deg", static_cast<int>(ix), static_cast<int>(iy), ox, oy,
+                  head ? "the head turned from the game camera by" : "a view turned", yaw);
     }
 }
 
@@ -167,10 +175,10 @@ std::string command(const std::string& args) {
     for (std::string w; in >> w;) a.push_back(w);
     if (a.empty() || a[0] == "status") {
         return std::format("ok snap turn {} (deadzone {:.2f}, repeat {} ms, keys {} / {}); view turned {:.1f} deg; steps {} (stick {}, keys {}); "
-                           "right stick X hidden in {} polls (last {}); left stick rotated in {} polls (last ({}, {}) -> ({}, {})); log {}",
+                           "right stick X hidden in {} polls (last {}); left stick rotated in {} polls ({} by the head) (last ({}, {}) -> ({}, {})); log {}",
                            degrees_text(), g_deadzone.load(), g_repeat_ms.load(), g_left_key.load(), g_right_key.load(), turn_now(),
                            g_steps.load(), g_stick_steps.load(), g_key_steps.load(), g_rx_hidden.load(), g_last_rx.load(), g_rotated.load(),
-                           g_last_in_lx.load(), g_last_in_ly.load(), g_last_out_lx.load(), g_last_out_ly.load(), g_log.load());
+                           g_rotated_head.load(), g_last_in_lx.load(), g_last_in_ly.load(), g_last_out_lx.load(), g_last_out_ly.load(), g_log.load());
     }
     if (a[0] == "snap" && a.size() == 2) {
         g_degrees = a[1] == "off" ? 0.0f : std::clamp(std::strtof(a[1].c_str(), nullptr), 0.0f, 180.0f);

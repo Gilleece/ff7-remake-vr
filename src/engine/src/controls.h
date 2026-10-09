@@ -4,7 +4,9 @@
 //
 // Keyboard: one virtual-key code per action ([controls] in ff7vr.ini), read with
 // GetAsyncKeyState once per engine frame while the game window has the focus.
-// Gamepad: combinations with View/Back held, through the loader's XInput filter. The
+// Gamepad: combinations with View/Back held, through the loader's XInput filter, and on a
+// PlayStation pad the game reads through libScePad (sce_pad.h) with the touch pad click as
+// View/Back. The
 // buttons of a combination are removed from the state the game receives; with
 // `pad_hold_view` View itself is held back while it is down and handed to the game as a
 // short press when it is released without a combination.
@@ -40,7 +42,11 @@ struct Settings {
     // person (default L3+R3, 0 = off); fp_toggle_chord_ms: how close together they must go down.
     std::atomic<unsigned short> fp_chord{0x0040 | 0x0080};
     std::atomic<int> fp_chord_ms{150};
+    // [controls] pad_source: which pads the combinations and the chord read. auto = both,
+    // xinput = XInput pads only, playstation = PlayStation pads read by the game itself only.
+    std::atomic<int> pad_source{0};
 };
+constexpr int kSourceAuto = 0, kSourceXInput = 1, kSourcePlayStation = 2;
 Settings& settings();
 void read_config(const Config& cfg);
 
@@ -49,6 +55,12 @@ void tick();
 
 // Any thread (the game's XInput poll): View/Back combinations, removed from `buttons`.
 void filter_pad(unsigned long user, unsigned short* buttons);
+// Any thread (the game's libScePad poll, sce_pad.h), PlayStation pad 0..3: the same
+// combinations and chord on a ScePadData button word (mapped to the XInput buttons: touch
+// pad click = View/Back, Options = Start, cross = A, ...); withheld buttons are cleared.
+void filter_sce(unsigned long index, std::uint32_t* buttons);
+// ScePadData button word -> the XInput buttons the filter sees.
+unsigned short sce_to_xinput(std::uint32_t sce);
 std::uint64_t pad_polls();
 
 // `controls status | pad <hex buttons> | padlog 0|1 | chord <buttons|off> [ms] | recenter |

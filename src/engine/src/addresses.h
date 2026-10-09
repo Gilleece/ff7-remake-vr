@@ -45,6 +45,7 @@ struct Addresses {
     std::uintptr_t BloomReduceProcess = 0;         // first pass of Square Enix's bloom (stereo fix)
     std::uintptr_t DistortionComposite = 0;        // Square Enix's distortion composite (stereo fix)
     std::uintptr_t FindFreeElement = 0;            // FRenderTargetPool::FindFreeElement (GPU trace names)
+    std::uintptr_t ScePadReadState = 0;            // libScePad's scePadReadState (PlayStation pad combinations)
 
     bool stereo_ok = false;      // every required entry resolved and every layout check passed
     std::string failure;         // first reason stereo_ok is false
