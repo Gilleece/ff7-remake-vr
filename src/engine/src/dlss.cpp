@@ -2129,6 +2129,12 @@ struct RuntimeOut {
 RuntimeOut g_rt_out;  // RHI thread (counters read by status)
 D3D11_TEXTURE2D_DESC g_up_out_desc{};
 ID3D11PixelShader* g_final_ps = nullptr;  // compared only
+// The last frame a draw with g_final_ps passed the checks of try_final. The game swaps the
+// last pass's shader permutation on an area change (other post-process features in that
+// area); after this many frames without the recognised shader, a draw with another shader
+// that passes the same checks becomes the last pass.
+std::uint64_t g_final_seen_frame = 0;
+constexpr std::uint64_t kFinalRepinFrames = 8;
 std::atomic<std::uint64_t> g_up_count{0}, g_up_fail{0}, g_up_skipped{0};
 
 // ------------------------------------------------------------------ what happened to each eye in each stereo frame (RHI thread)
@@ -2699,9 +2705,13 @@ bool try_final(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_t
     ID3D11PixelShader* ps = nullptr;
     ctx->PSGetShader(&ps, nullptr, nullptr);
     if (ps) ps->Release();
+    bool candidate = false;  // another shader than the recognised one, checked below
     if (g_final_ps && ps != g_final_ps) {
-        note_other_final(ctx, ps);
-        return false;
+        if (R.frame <= g_final_seen_frame + kFinalRepinFrames) {
+            note_other_final(ctx, ps);
+            return false;
+        }
+        candidate = true;
     }
     D3D11_VIEWPORT vp{};
     UINT nvp = 1;
@@ -2714,7 +2724,8 @@ bool try_final(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_t
     // the eye's reason for this frame ("last pass not replaced"); before that, other
     // full-screen draws are expected to fail these checks.
     auto reject = [&](std::string what) {
-        if (g_final_ps) audit_miss(eye, kMissFinal, std::move(what));
+        if (candidate) note_other_final(ctx, ps);  // not the last pass after all
+        else if (g_final_ps) audit_miss(eye, kMissFinal, std::move(what));
         return false;
     };
     ID3D11RenderTargetView* rtv[8]{};
@@ -2747,11 +2758,13 @@ bool try_final(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base, gpu_t
     D3D11_TEXTURE2D_DESC id{};
     if (!tex_desc(input_res.Get(), id) || s.x + s.w > id.Width || s.y + s.h > id.Height)
         return reject(std::format("the input at t1 ({}x{}) does not hold the eye's rectangle {},{} {}x{}", id.Width, id.Height, s.x, s.y, s.w, s.h));
-    if (!g_final_ps) {
-        g_final_ps = ps;
-        log::info("dlss: last pass recognised: pixel shader {} | target {}x{} format {} | vp {} {} {} {} | input {}x{} format {} | eye rect at the reduced size {} {} {} {}",
+    g_final_seen_frame = R.frame;
+    if (!g_final_ps || candidate) {
+        log::info("dlss: last pass recognised{}: pixel shader {} | target {}x{} format {} | vp {} {} {} {} | input {}x{} format {} | eye rect at the reduced size {} {} {} {}",
+                  candidate ? std::format(" again (the shader changed from {})", static_cast<void*>(g_final_ps)) : std::string(),
                   static_cast<void*>(ps), td.Width, td.Height, static_cast<int>(td.Format), vp.TopLeftX, vp.TopLeftY, vp.Width, vp.Height, id.Width,
                   id.Height, static_cast<int>(id.Format), s.x, s.y, s.w, s.h);
+        g_final_ps = ps;
     }
     event(std::format("final eye {} vp {} {} {} {} | target {} | input {} | stash {},{} {}x{} of frame {}", eye, vp.TopLeftX, vp.TopLeftY, vp.Width,
                       vp.Height, res_text(target.Get()), res_text(input_res.Get()), s.x, s.y, s.w, s.h, s.frame));
