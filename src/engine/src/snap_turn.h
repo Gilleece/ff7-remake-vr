@@ -31,4 +31,7 @@ void filter_sticks(unsigned long user, short* lx, short* ly, short* rx, short* r
 // stick <lx> <ly> <rx> <ry> [user]`
 std::string command(const std::string& args);
 
+// Any thread: the step in degrees (0 = off).
+float degrees();
+
 }  // namespace ff7vr::engine::snap_turn

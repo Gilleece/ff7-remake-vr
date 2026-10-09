@@ -4,6 +4,7 @@
 
 #include "comfort.h"
 #include "foveation.h"
+#include "menu.h"
 #include "ui_battle.h"
 #include "video_memory.h"
 
@@ -244,6 +245,8 @@ void XrController::TryInit() {
         uiLayer_ = 0;
         uiW_ = uiH_ = uiSrcW_ = uiSrcH_ = 0;
         uiShownLast_ = false;
+        menuLayer_ = 0;
+        menuPlacement_ = 0;
     }
     {
         std::lock_guard lk(queueMutex_);
@@ -386,6 +389,8 @@ void XrController::Teardown(TeardownReason why, const char* text) {
         uiLayer_ = 0;
         uiW_ = uiH_ = uiSrcW_ = uiSrcH_ = 0;
         uiShownLast_ = false;
+        menuLayer_ = 0;
+        menuPlacement_ = 0;
         lastStereoQpc_ = 0;
     }
     {
@@ -559,6 +564,60 @@ bool XrController::EnsureUiLayer(const UiLayerSource& s) {
     return true;
 }
 
+bool XrController::MenuQuad(const PresentInfo& p, const Waited& w, xr::QuadLayer* q) {
+    if (!menu::IsOpen()) return false;
+    bool fresh = false;
+    if (!menuLayer_) {
+        const xr::QuadLayerCreateDesc qd{1024, 720, DXGI_FORMAT_R8G8B8A8_UNORM};
+        if (backend_->CreateQuadLayer(qd, &menuLayer_) != xr::Result::Ok) {
+            static std::atomic<uint64_t> fails{0};
+            if (PowerOfTwo(++fails)) log::error("xr: settings panel layer could not be created");
+            menuLayer_ = 0;
+            return false;
+        }
+        xr::SwapchainInfo si;
+        backend_->GetQuadLayerInfo(menuLayer_, &si);
+        log::info("xr: settings panel layer {}x{} {}", si.width, si.height, xr::DxgiFormatName(si.format));
+        fresh = true;
+    }
+    menu::PanelFrame f;
+    if (!menu::Frame(p.device, p.context, fresh, &f)) return false;
+    if (f.placement != menuPlacement_) {
+        // Placed when it opens (and after a recenter): head-locked like the HUD panel when that
+        // follows the head, otherwise straight ahead of where the head looks now, level, at eye
+        // height, and fixed in the room from then on.
+        menuPlacement_ = f.placement;
+        bool follow = false;
+        {
+            std::lock_guard lk(uiMutex_);
+            follow = cfg_.uiFollowHead;
+        }
+        menuHeadLocked_ = follow;
+        if (follow) {
+            menuPose_ = xr::Pose{xr::Quat{}, xr::Vec3{0.0f, 0.0f, -f.distance}};
+        } else {
+            const xr::Quat yaw = xr::QuatFromAxisAngle(xr::Vec3{0.0f, 1.0f, 0.0f}, xr::QuatYaw(w.info.head.orientation));
+            const xr::Vec3 ahead = xr::QuatRotate(yaw, xr::Vec3{0.0f, 0.0f, -f.distance});
+            const xr::Vec3& h = w.info.head.position;
+            menuPose_ = xr::Pose{yaw, xr::Vec3{h.x + ahead.x, h.y + ahead.y, h.z + ahead.z}};
+        }
+    }
+    q->layer = menuLayer_;
+    if (f.texture) {
+        q->texture = f.texture;
+        q->viewFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+        q->encoding = xr::ColorEncoding::Srgb;
+        q->rect = xr::Rect{0, 0, f.width, f.height};
+        q->sourceAlpha = xr::SourceAlpha::Premultiplied;
+    }
+    q->space = menuHeadLocked_ ? xr::LayerSpace::Head : xr::LayerSpace::World;
+    q->pose = menuPose_;
+    q->width = f.widthM;
+    q->height = f.heightM;
+    q->alphaBlend = true;
+    return true;
+}
+
 // The UI of a redirected frame is in neither eye image, so the desktop window (which shows
 // a crop of an eye in stereo) gets it drawn on top: the whole 16:9 UI over the whole window
 // (letterboxed if the window has another aspect), blended like the game draws its UI.
@@ -590,6 +649,8 @@ void XrController::SubmitOne(const PresentInfo& p, const Waited& w, const Pendin
     xr::SubmitDesc d;
     xr::QuadLayer q;
     xr::QuadLayer uq;
+    xr::QuadLayer quads[2];  // back to front: the HUD panel or the virtual screen, then the settings panel
+    uint32_t quadCount = 0;
     StereoSubmit s;
     ComPtr<ID3D11Texture2D> stereoTex;
     bool stereo = false;
@@ -655,8 +716,7 @@ void XrController::SubmitOne(const PresentInfo& p, const Waited& w, const Pendin
             uq.height = size;
             uq.width = size * float(uiSrcW_) / float(std::max(1u, uiSrcH_));
             uq.alphaBlend = true;
-            d.quads = &uq;
-            d.quadCount = 1;
+            quads[quadCount++] = uq;
             uiShown = true;
         }
     }
@@ -674,9 +734,11 @@ void XrController::SubmitOne(const PresentInfo& p, const Waited& w, const Pendin
         q.width = cfg_.screenWidth;
         q.height = cfg_.screenWidth * float(p.height) / float(std::max(1u, p.width));
         q.adjustPicture = true;
-        d.quads = &q;
-        d.quadCount = 1;
+        quads[quadCount++] = q;
     }
+    if (xr::QuadLayer mq; MenuQuad(p, w, &mq)) quads[quadCount++] = mq;
+    d.quads = quadCount ? quads : nullptr;
+    d.quadCount = quadCount;
     {
         std::lock_guard lk(pictureMutex_);
         d.picture = picture_;
@@ -1027,6 +1089,18 @@ xr::PictureAdjust ClampPicture(const xr::PictureAdjust& p) {
 std::string PictureText(const xr::PictureAdjust& p) {
     return std::format("brightness {:.3f} contrast {:.3f} saturation {:.3f} gamma {:.3f} black_level {:.4f} ({})", p.brightness, p.contrast,
                        p.saturation, p.gamma, p.blackLevel, p.IsIdentity() ? "no change" : "applied to the eyes and the virtual screen");
+}
+
+xr::PictureAdjust XrController::Picture() {
+    std::lock_guard lk(pictureMutex_);
+    return picture_;
+}
+
+void XrController::UiPlacement(float* distance, float* size, bool* followHead) {
+    std::lock_guard lk(uiMutex_);
+    if (distance) *distance = cfg_.uiDistance;
+    if (size) *size = cfg_.uiSize;
+    if (followHead) *followHead = cfg_.uiFollowHead;
 }
 
 std::string XrController::PictureCommand(const std::string& args) {

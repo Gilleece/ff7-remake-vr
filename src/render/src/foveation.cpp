@@ -1340,6 +1340,11 @@ void SceneEnd() {
     SwitchOff(ctx);
 }
 
+std::string PresetName() {
+    std::lock_guard lk(g_settingsMutex);
+    return g_settings.enabled ? g_settings.preset : std::string("off");
+}
+
 std::string Status() {
     std::string line, inUse;
     {

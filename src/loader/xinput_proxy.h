@@ -37,6 +37,13 @@ void set_pad_filter(PadFilter filter);
 // Stick filter, applied after the pad filter: it may change the thumbstick axes (snap turn).
 using StickFilter = void (*)(unsigned long user, short* lx, short* ly, short* rx, short* ry);
 void set_stick_filter(StickFilter filter);
+// Applied first to every successful result (after the virtual pad is merged): it may take
+// the whole state (the in-headset settings panel). True = the state was replaced by a
+// neutral one; the pad and stick filters then run on that neutral state (their own state
+// stays consistent) and the game receives it.
+using PadOverride = bool (*)(unsigned long user, unsigned short* buttons, unsigned char* lt, unsigned char* rt, short* lx, short* ly, short* rx,
+                             short* ry);
+void set_pad_override(PadOverride filter);
 // Deflection of the left and right sticks (0..1) in the last successful poll of user 0,
 // virtual pad included.
 void stick_magnitudes(float* left, float* right);

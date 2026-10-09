@@ -3,6 +3,7 @@
 #include "comfort.h"
 #include "d3d11_hooks.h"
 #include "foveation.h"
+#include "menu.h"
 #include "ui_battle.h"
 #include "xr_controller.h"
 #include "pause_on_remove.h"
@@ -240,6 +241,7 @@ bool start(const StartupContext& ctx) {
     foveation::Configure(*ctx.config);
     comfort::Start(*ctx.config);
     ui_battle::Start(*ctx.config);
+    menu::Start(*ctx.config, ctx.config->source().empty() ? ctx.dll_dir / L"ff7vr.ini" : ctx.config->source());
     HookCallbacks cb;
     cb.onPresent = &OnPresentCb;
     cb.onResize = &OnResizeCb;

@@ -87,6 +87,7 @@ combinations):
 | **End** | hold View/Back + left stick click | **recenter**: the direction you face now becomes forward, and the HUD panel and the virtual screen move in front of you |
 | **Insert** | hold View/Back + Menu/Start | 3D off (the game on the virtual screen) and on again. If the headset has lost the game (for example after Virtual Desktop or SteamVR was closed and opened again), the same key reconnects it |
 | **Page Down** / **Page Up** | hold View/Back + D-pad down / up | HUD/menu panel 0.25 m nearer / farther |
+| **Delete** | hold View/Back + Y | **settings panel** in the headset: change settings live and save them to `ff7vr.ini` (D-pad: choose and change, A: select, X: save, B: close) |
 
 ## If something is wrong
 

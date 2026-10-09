@@ -67,6 +67,12 @@ void start_modules(const StartupContext& ctx) {
     // D3D11 hooks and the XR session (src/xr is driven by the render module; [xr] keys configure it).
     if (cfg.get_bool("render", "enabled", true)) ff7vr::render::start(ctx);
     ff7vr::render::SetStickSource(&xinput::stick_magnitudes);  // comfort vignette
+    // Settings panel: reads the real pad and hands the game a neutral one while it is open.
+    xinput::set_pad_override([](unsigned long user, unsigned short* b, unsigned char* lt, unsigned char* rt, short* lx, short* ly, short* rx,
+                                short* ry) {
+        ff7vr::render::PadState s{*b, *lt, *rt, *lx, *ly, *rx, *ry};
+        return ff7vr::render::MenuFilterPad(user, &s);
+    });
 #endif
 #if FF7VR_HAVE_DEV
     // Measurement tools (frame timer for tools/bench); each is off unless the ini enables it.

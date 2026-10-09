@@ -148,6 +148,9 @@ public:
     std::string UiCommand(const std::string& args);
     // `picture status | reset | <key> <value>` (any thread).
     std::string PictureCommand(const std::string& args);
+    // Any thread: the picture adjustment and the UI panel's placement as set now.
+    xr::PictureAdjust Picture();
+    void UiPlacement(float* distance, float* size, bool* followHead);
 
 private:
     void PollPictureKeys();  // RT, once per Present
@@ -174,6 +177,8 @@ private:
     // RT helpers (caller holds rtMutex_).
     bool EnsureScreenLayer(const PresentInfo& p);
     bool EnsureUiLayer(const UiLayerSource& s);
+    // The settings panel's quad while it is open (false: closed or no layer).
+    bool MenuQuad(const PresentInfo& p, const Waited& w, xr::QuadLayer* q);
     void SubmitOne(const PresentInfo& p, const Waited& w, const PendingUi* ui);
     void DrawUiOnWindow(const PresentInfo& p, const PendingUi& ui);
     void ParkPoint();
@@ -271,6 +276,12 @@ private:
     bool uiShownLast_ = false;  // RT: the last stereo frame showed the UI quad
     std::atomic<uint64_t> uiSubmitted_{0}, uiHeld_{0}, uiDropped_{0};
     std::string uiLastSource_;  // RT, for status
+
+    // Settings panel layer (RT): created at the first open, placed again when the panel opens.
+    xr::LayerHandle menuLayer_ = 0;
+    uint64_t menuPlacement_ = 0;
+    xr::Pose menuPose_{};
+    bool menuHeadLocked_ = false;
 
     // Picture adjustment, changeable at run time (`picture` command, brightness keys).
     std::mutex pictureMutex_;

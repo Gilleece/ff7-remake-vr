@@ -102,6 +102,10 @@ SHORT add_axis(SHORT a, SHORT b) {
 
 std::atomic<PadFilter> g_pad_filter{nullptr};
 std::atomic<StickFilter> g_stick_filter{nullptr};
+std::atomic<PadOverride> g_pad_override{nullptr};
+std::atomic<std::uint64_t> g_overridden{0};
+// What the game received in the last successful poll of any user index (after every filter).
+std::atomic<std::uint64_t> g_last_given{0};  // buttons | lt << 16 | rt << 24 | (lx, ly hi bytes) << 32
 
 // Stick deflection of the last successful poll (0..1 each), for the comfort vignette.
 std::atomic<float> g_stick_left{0.0f}, g_stick_right{0.0f};
@@ -112,6 +116,14 @@ float stick_magnitude(SHORT x, SHORT y) {
 }
 
 DWORD filtered(DWORD user, XINPUT_STATE* state, DWORD rc) {
+    const PadOverride o = g_pad_override.load(std::memory_order_relaxed);
+    if (o && rc == ERROR_SUCCESS && state) {
+        XINPUT_GAMEPAD& g = state->Gamepad;
+        if (o(user, &g.wButtons, &g.bLeftTrigger, &g.bRightTrigger, &g.sThumbLX, &g.sThumbLY, &g.sThumbRX, &g.sThumbRY)) {
+            g_overridden.fetch_add(1, std::memory_order_relaxed);
+            ZeroMemory(&g, sizeof(g));
+        }
+    }
     if (rc == ERROR_SUCCESS && state && user == 0) {
         g_stick_left.store(stick_magnitude(state->Gamepad.sThumbLX, state->Gamepad.sThumbLY), std::memory_order_relaxed);
         g_stick_right.store(stick_magnitude(state->Gamepad.sThumbRX, state->Gamepad.sThumbRY), std::memory_order_relaxed);
@@ -121,6 +133,12 @@ DWORD filtered(DWORD user, XINPUT_STATE* state, DWORD rc) {
     const StickFilter sf = g_stick_filter.load(std::memory_order_relaxed);
     if (sf && rc == ERROR_SUCCESS && state)
         sf(user, &state->Gamepad.sThumbLX, &state->Gamepad.sThumbLY, &state->Gamepad.sThumbRX, &state->Gamepad.sThumbRY);
+    if (rc == ERROR_SUCCESS && state) {
+        const XINPUT_GAMEPAD& g = state->Gamepad;
+        g_last_given.store(std::uint64_t(g.wButtons) | std::uint64_t(g.bLeftTrigger) << 16 | std::uint64_t(g.bRightTrigger) << 24 |
+                               std::uint64_t(std::uint16_t(g.sThumbLX)) << 32 | std::uint64_t(std::uint16_t(g.sThumbLY)) << 48,
+                           std::memory_order_relaxed);
+    }
     return rc;
 }
 
@@ -444,6 +462,7 @@ VirtualPad virtual_pad() {
 std::uint64_t get_state_calls() { return g_get_state_calls.load(); }
 void set_pad_filter(PadFilter filter) { g_pad_filter = filter; }
 void set_stick_filter(StickFilter filter) { g_stick_filter = filter; }
+void set_pad_override(PadOverride filter) { g_pad_override = filter; }
 
 void stick_magnitudes(float* left, float* right) {
     if (left) *left = g_stick_left.load(std::memory_order_relaxed);
@@ -485,9 +504,14 @@ void register_diagnostics(bool wrap_import) {
                           for (DWORD i = 0; i < kUsers; ++i)
                               users += std::format("{}user {} calls {} with a pad {}", i ? ", " : "", i, g_users[i].calls.load(), g_users[i].ok.load());
                           void* caller = g_caller.load();
-                          return std::format("ok calls {} on thread {}; {}; {}; {}; last caller {}; wrapper calls {}, of them reached the system {}",
+                          const std::uint64_t given = g_last_given.load();
+                          return std::format("ok calls {} on thread {}; {}; {}; {}; last caller {}; wrapper calls {}, of them reached the system {}; "
+                                             "last state the game received: buttons {:#06x} triggers {} {} left stick {} {}; polls withheld by the "
+                                             "settings panel {}",
                                              g_get_state_calls.load(), g_poll_thread.load(), users, import_check(), entry_check(),
-                                             caller ? describe(caller) : std::string("none"), g_outer_calls.load(), g_inner_from_outer.load());
+                                             caller ? describe(caller) : std::string("none"), g_outer_calls.load(), g_inner_from_outer.load(),
+                                             given & 0xFFFF, (given >> 16) & 0xFF, (given >> 24) & 0xFF, std::int16_t((given >> 32) & 0xFFFF),
+                                             std::int16_t((given >> 48) & 0xFFFF), g_overridden.load());
                       });
 }
 

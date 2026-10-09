@@ -25,5 +25,7 @@ std::string Command(const std::string& args);
 
 // [picture] sharpen (0..1, default 0.5, 0 = off), the eye images' unsharp mask; live: `sharpen <v>`.
 float Sharpen();
+// [comfort] vignette as set now (0..1).
+float VignetteStrength();
 
 }  // namespace ff7vr::render::comfort
