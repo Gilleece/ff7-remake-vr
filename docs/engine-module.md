@@ -505,6 +505,8 @@ action (the map) does not open on the way to a combination; it then happens on r
 instead of on press. `pad_hold_view = 0` passes View through until a combination is
 pressed (the game then sees View go down). `[controls] pad = 0` switches the recenter,
 stereo and panel combinations off; `[first_person] pad_toggle = 0` the first-person one.
+On a DualShock 4 or DualSense the game reads itself, the same combinations apply with the
+touch pad click as View/Back and Options as Menu/Start (see "PlayStation pads").
 
 Every trigger is logged with its source (`controls: recenter (keyboard): ok recenter
 requested ...`, `controls: stereo on/off (gamepad): stereo off ...`, `controls: UI nearer
@@ -559,6 +561,7 @@ hidden buttons, is inferred from the filter's output.
 | `fp_toggle_chord` | `L3+R3` | buttons pressed together that toggle first/third person (see below); empty = off. Names: `L3 R3 A B X Y LB RB Back Start Up Down Left Right` (also `LS RS View Menu L1 R1 DPadUp ...`) |
 | `fp_toggle_chord_ms` | `150` | how close together the chord's buttons must go down |
 | `pad_log` | `0` | log the first N changes of the pad state in and out of the filter (see "Diagnostics") |
+| `pad_source` | `auto` | which pads the combinations and the chord read: `auto` both, `xinput` XInput pads only (the libScePad hook is left out), `playstation` only PlayStation pads the game reads itself (see "PlayStation pads"); `dinput` is accepted for `playstation` |
 | `pad_after_hooks` | `1` | point the game's `XInputGetState` import at the loader's wrapper, so the filter sees what the game receives even when the Steam overlay hooks the export; `0` = filter inside the export, as before |
 
 ### The first/third person chord
@@ -600,12 +603,14 @@ export answered (see below), so what the game does with a late stick click is un
 
 ### The real pad path
 
-The game reads pads two ways (`docs/re/engine.md`, "Gamepad input paths"): UE4's
+The game reads pads three ways (`docs/re/engine.md`, "Gamepad input paths"): UE4's
 `FXInputInterface` calls `XInputGetState` (import by ordinal 2 from `xinput1_3.dll`, one
-call site, users 0 to 3 every engine frame while a pad is connected), and Square Enix's own
-DirectInput/HID code (`dinput8.dll`, `HID.DLL`) reads DualShock and other DirectInput pads.
-Only the first path can carry the View combinations and the chord: a pad the game reads
-through DirectInput (a DualSense without Steam Input, for example) never reaches the filter.
+call site, users 0 to 3 every engine frame while a pad is connected); Unreal's WinDualShock
+plugin reads DualShock 4 and DualSense pads through Sony's libScePad (statically linked, HID
+underneath), see "PlayStation pads" below; and Square Enix's own DirectInput code
+(`dinput8.dll`) reads other DirectInput pads. The XInput path and, since 2026-10-09, the
+libScePad path carry the View combinations and the chord; a pad read through DirectInput
+never reaches the filter.
 
 The Steam overlay (`gameoverlayrenderer64.dll`, in the process also when the exe is started
 directly) patches the entry of the mod's exported `XInputGetState` for Steam Input, and its
@@ -654,6 +659,63 @@ Tested 2026-10-07 (Null backend, Sector 7 save, no physical pad; `captures/chord
 **Not tested**: a physical pad (none connected); what the overlay's hook returns for a real
 XInput pad, and whether Steam Input is on for the game on the player's PC.
 
+### PlayStation pads
+
+`src/engine/src/sce_pad.cpp`. The WinDualShock plugin polls libScePad's
+`scePadReadState(handle, ScePadData*)` once per engine frame for each of four handles it
+opened at start (whether or not a pad is connected); the function is found through its
+only call site (signature `scePadReadState call in the WinDualShock poll`, which also pins
+the offsets the game reads) and hooked with MinHook. After the original returns a connected
+state, the button word is mapped to the XInput buttons (`controls::filter_sce`: L3, R3,
+Options = Start, D-pad, L1 = LB, R1 = RB, cross = A, circle = B, square = X, triangle = Y,
+**touch pad click = View/Back**; the game itself sends the touch pad click as
+`SpecialLeft`, the key View/Back produces), run through the same filter as an XInput pad
+(pad slots 4 to 7, separate state), and the buttons the filter withholds are cleared in the
+`ScePadData` the game then reads (a held-back press handed over later is set). L2/R2 pass
+unchanged; Share/Create is never reported by the library (bit 0 maps to no key in the game).
+The sticks go through the same stick filter as an XInput pad's (snap turn, head-directed
+movement), converted from bytes (0x80 centre, Y down) and written back only when changed.
+`[controls] pad_source` (default `auto`): `xinput` leaves the hook out, `playstation`
+leaves XInput pads unfiltered. Log at start: `controls: PlayStation pads: scePadReadState
+(ff7remake_.exe+0x3f7ec50) hooked`; `controls: PlayStation pad N connected|disconnected` on
+every change; `controls ps status` and a part of the controls timing line count the polls.
+
+Checked on the Null backend (2026-10-09, first room of the Sector 7 slums save, no
+physical pad; `captures/input/session.ps1`, log lines quoted from `ff7vr.log`):
+- At start: `controls: PlayStation pads: scePadReadState (ff7remake_.exe+0x3f7ec50) hooked`.
+  The game polls it on its game thread about 360 times a second without any pad (four handles
+  per frame at 90 fps; `controls ps status`: handles `[0 none, 1 none, 2 none, 3 none]`, return
+  code 0 with `connected` 0).
+- A virtual pad on handle 0x101 (`controls ps <hex>`, merged after the original call, so the game
+  itself read every state below through its own poll): `PlayStation pad 0 connected`.
+  L3 tapped 80 ms: `in 0x0040 -> game 0x0000 ... chord idle -> pending`, then `in 0x0000 -> game
+  0x0040` for 122 ms (handed over short). R3 held 500 ms: `game 0x0000` for 156 ms, then
+  `chord pending -> passed` and `game 0x0080`. L3, then R3 66 ms later: `in 0x00c0 -> game
+  0x0000 ... chord pending -> fired, toggles`, `player: toggled to third person`; the ScePadData
+  word the game read was `0x00000006 -> game 0x00000000` (`controls ps status`). Both in one
+  poll: `toggled to first person`, game `0x00000000`. Touch pad, then touch pad + D-pad up:
+  `game 0x0000` and `controls: UI farther (gamepad): UI panel 3.00 m -> 3.25 m`; touch pad +
+  L3: `controls: recenter (gamepad)`, the word `0x00100002 -> game 0x00000000`. Cross + L1 +
+  square: `0x0000c400 -> game 0x0000c400` (untouched). `controls ps off`: `PlayStation pad 0
+  disconnected`.
+- Sticks: the virtual pad's left stick forward (bytes 128, 1) with `move = head` and the head
+  90 degrees right reached the game as `(255, 128)` (full right; `controls ps status`, "sticks
+  changed in 28 polls").
+- `controls psfilter <hex> <pad>` runs the same filter on the dev pipe's thread: it acts like a
+  real press (it toggled first/third person and moved the panel in that run), so use pad
+  indexes 1 to 3 and expect the actions.
+Not checked: a real DualShock 4 or DualSense (none here), what the game does with a touch pad
+press handed over on release, rumble and light bar (untouched by the mod).
+
+Steam Input: with Steam Input enabled for the game (its Properties, Controller), the
+Steam overlay presents a PlayStation pad to the game as an emulated Xbox pad through the
+input APIs it hooks (Valve's "Steam Input Gamepad Emulation - Best Practices": "The
+controller will show up in your game as an Xbox controller"), so the XInput path applies
+and the combinations are the Xbox ones (which PlayStation button acts as View/Back is up to
+the Steam layout; Share/Create in Steam's default, not checked here). That is the recommended route for PlayStation pads. Not checked here:
+whether the game then also still reads the same pad through libScePad (double input), which
+would be a Steam Input matter and happen without the mod as well.
+
 ## Snap turn
 
 `src/engine/src/snap_turn.cpp`, `[comfort]` in `ff7vr.ini`:
@@ -679,7 +741,8 @@ the turn, so the HUD stays in front of the player. The game moves the character
 relative to its own camera, so the left stick is rotated by the turn in effect
 (`render::GetSnapYawDeg`, positive = right): forward on the stick moves the character
 where the player looks. Keyboard movement (W/A/S/D) is not rotated; snap turn is for pad
-players. Any recenter (End, View + left stick click, `recenter`, the runtime's own
+players. With `move = head` (see "Head-directed movement") the left stick follows the head
+instead, which includes the turn. Any recenter (End, View + left stick click, `recenter`, the runtime's own
 recenter) makes the current heading forward and clears the turn (the left stick is no
 longer rotated from the next poll).
 
@@ -702,6 +765,57 @@ Eye captures before and after a 45 degree step: the scene moved left in the imag
 view turned right), the HUD panel stayed at the same place in the image. A first build
 had the turn's sign reversed; the capture showed it. Not tested: a real pad, the snap
 keys, comfort in a headset.
+
+## Head-directed movement
+
+`src/engine/src/head_move.cpp`, `[first_person] move` and `[camera] move` (`camera` by
+default, `head`). The game moves the character relative to its own camera's yaw. With
+`head`, the stick filter (the same one snap turn uses: the XInput wrapper's stick filter
+and, for PlayStation pads, the libScePad hook) rotates the left stick by the heading of the
+head relative to that yaw, so forward on the stick walks where the head points.
+
+The heading is published by the stereo device once per stereo frame (first eye, in
+`CalculateStereoViewOffset`): the camera mode's eye base (its pitch and roll dropped when
+decoupled pitch is on or the mode forces it, as for the eyes) composed with the tracked head
+pose (which already holds the recenter and the snap turn), then the head's forward vector
+projected on the floor; the head's up vector is added with the sign that points forward,
+so looking steeply down or up keeps a stable heading. Offset = that heading minus the game
+camera's yaw as the engine passed it, wrapped to -180..180 (UE yaw: positive = right seen
+from above). The filter uses it when the frame was first person (or blending into it) and
+`[first_person] move = head`, or third person (any other mode, including the game's own
+camera shots) and `[camera] move = head`, and only while the last heading is less than
+250 ms old and 3D renders; otherwise the left stick gets snap turn's rotation as before.
+In `head` mode snap turn's own rotation is not added again (the heading includes it).
+Keyboard movement (W/A/S/D) is not rotated. `controls move status` shows the heading, the
+game camera's yaw, the offset and the mode; `controls move camera|head [first|third|both]`
+switches live; `[comfort] snap_log` / `snapturn log` logs the rotations (`comfort: left
+stick (0, 32767) -> game (32767, 0) for the head turned from the game camera by 90.0 deg`).
+
+Checked on the Null backend (2026-10-09, Sector 7 slums save, eyes 3072x3264,
+`captures/input/session.ps1`; `xr-sim head <yaw> [pitch]`, yaw positive = left):
+- Filter only (`snapturn stick 0 1 0 0`): with `move = camera` the stick stays `(0, 32767)`
+  whatever the head does; with `head`: head 90 degrees right -> offset `+90.0`, `(32767, 0)`;
+  stick right -> `(0, -32767)`; head 90 left -> `(-32767, 0)`; head 90 right and 60 down or 70
+  up -> offset still `+90.0`; 30 left and 89 down -> `-30.0`. Decoupled pitch off with the
+  game camera pitched: head 60 right -> `+52.4` in third person (the camera's pitch tilts
+  the head's yaw axis), `+60.0` in first person (first person always levels the base).
+- Walking, measured from the pawn's location over 0.8 s after 0.8 s of stick (the character
+  turns first), left stick forward through the game's own poll (virtual PlayStation pad;
+  the dev pipe's `stick` command blocks, so the XInput rotation was checked through its log
+  lines in the game's poll instead): first person, head 90 right: `move = camera` walked
+  along the camera (0.0 degrees off), `move = head` along the head (1.0 off); decoupled pitch
+  off, head 60 right: 6.2 off; head 90 right then recenter: along the camera and the head
+  (0.0); snap turn 45 right: 0.4 off the view with `head`, and the same with `camera` (snap
+  turn's own rotation, unchanged); third person with `[camera] move = head`, head 90 right:
+  3.4 off the head; `move = camera`: along the camera. With the game camera turned to yaw
+  -2.3 (right stick) and the head turned to world yaw -90 and then +90: `move = head` walked
+  4.9 m toward -90.5 and +90.3 (0.5 and 0.3 degrees off the head), `move = camera` toward
+  -4.0 and -3.0 (along the camera). At the save's starting spot, with the camera at -81.5,
+  walls to the character's left and right bent or stopped the walks the head sent sideways
+  (45 left: 371 cm along the wall, 9 degrees off the camera, although the log shows the stick
+  reaching the game as `(-23170, 23170)`; 90 right and 50 down: 14 to 67 cm).
+Not checked: a headset (the head's yaw from a real tracker is the same input), keyboard
+movement (not rotated by design), how it feels.
 
 ## ini keys (`[stereo]` in `ff7vr.ini`)
 
@@ -750,6 +864,7 @@ keys, comfort in a headset.
 | `blend_seconds` | `0.35` | seconds a change between the camera modes takes (0 = cut); a change of view target is always a cut |
 | `collision` | `1` | the level boom is shortened in front of what is between the character and the eyes (see "Camera collision") |
 | `collision_margin` | `20` | cm kept between the eyes and what the collision trace hit |
+| `move` | `camera` | third person, gamepad: `camera` = the left stick moves relative to the game camera; `head` = where the head points (see "Head-directed movement") |
 
 `[first_person]`:
 
@@ -766,6 +881,7 @@ keys, comfort in a headset.
 | `toggle_key` | `36` | virtual-key code of the keyboard toggle (36 = Home); `0` = none |
 | `pad_toggle` | `1` | View/Back + right stick click toggles, and is hidden from the game |
 | `blend_seconds` | `0.35` | duration of the move between third and first person |
+| `move` | `camera` | first person, gamepad: `camera` = the left stick moves relative to the game camera; `head` = where the head points (see "Head-directed movement") |
 
 Two more sections hold console variables (names are case-insensitive):
 
@@ -815,6 +931,8 @@ Through the dev pipe (`[dev] pipe = 1`, `tools\dev\send-input.ps1 -Pipe "<comman
 | `fp signal <Class.Function> [world] [result=<offset>:<size>] \| none` | switch the battle signal while the game runs (same form as `battle_signal`); `fp status` shows its raw value |
 | `fp pad <hex buttons>`, `controls pad <hex buttons>` | test: feed an XInput button state through the gamepad filter, prints what the game would get |
 | `controls status`, `controls recenter\|stereo\|nearer\|farther` | player controls: keys, counters; trigger an action as its key would (see "Player controls") |
+| `controls move status\|camera\|head [first\|third\|both]` | head-directed movement: the heading published by the last stereo frame, switch the mode live (see "Head-directed movement") |
+| `controls ps <hex> [<lx> <ly>]\|off\|status`, `controls psfilter <hex> [pad]`, `controls source auto\|xinput\|playstation` | PlayStation pads: a virtual pad through the game's own libScePad poll, one button word through the filter alone, the pad source (see "PlayStation pads") |
 | `fp boom <level\|game>`, `fp pivot <cm>` | third-person camera settings |
 | `fp find <name> [outer] [class]`, `fp classes <text>`, `fp chain <hex address \| pawn \| view \| pc>` | reverse engineering: objects by name, objects whose class name contains a text, the class chain of an object |
 | `cvar get <name>` | integer and float value and set-by priority of a console variable |
