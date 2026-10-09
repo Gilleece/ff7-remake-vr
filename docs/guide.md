@@ -469,9 +469,10 @@ To narrow a problem down, change one setting at a time and start a new session:
 ## Performance
 
 `[graphics] profile` in `ff7vr.ini` picks a bundle of speed settings in one line
-(`custom`, the default, applies nothing). A key you set yourself in the ini always wins
-over the profile; the log's `graphics:` lines say what the profile applied and what it
-left alone. Measured on the development PC (RTX 5080) without a headset, 3072x3264 per
+(`custom`, the default, applies nothing). A profile replaces the ini's values for the
+keys it covers (foveation preset, render scale, and the detail, shadow, fog and translucency
+lines under `[stereo_cvars]`); every other key stays as you wrote it. The log's `graphics:`
+line says what the profile replaced. Measured on the development PC (RTX 5080) without a headset, 3072x3264 per
 eye, standing in the slums street, 5-second windows, median frame time:
 
 | Profile | What it sets | Frame time |
