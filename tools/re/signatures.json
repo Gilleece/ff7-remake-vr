@@ -910,6 +910,20 @@
       "howto": "Called with L\"CustomGlare\" from FSceneRenderTargets::BeginRenderingCustomGlare (0x2544ed0) and with every other pooled target name (about 100 callers)."
     },
     {
+      "name": "scePadReadState call in the WinDualShock poll",
+      "kind": "function",
+      "pattern": "8B 8E 18 02 00 00 48 8D 56 78 F2 0F 58 35 ?? ?? ?? ?? E8 ?? ?? ?? ?? 83 7E 78 00 0F 8C ?? ?? ?? ?? 0F B6 8E 28 02 00 00 4C 89 A4 24 58 01 00 00 85 C0 75 0C 38 86 C4 00 00 00",
+      "resolve": {
+        "type": "rip",
+        "insn": 18,
+        "disp": 1,
+        "len": 5
+      },
+      "expect": "0x3f7ec50",
+      "desc": "libScePad's int scePadReadState(int handle, ScePadData* data) (statically linked; error codes 0x80920001/3/5/ff). Its only caller is the WinDualShock plugin's per-user poll 0x38ca210 (FWinDualShock::SendControllerEvents 0x38cbaf0 loops users 0..3): handle at slot+0x218, data at slot+0x78 (slot = this+0xF0+user*0x270), result skipped when buttons bit 31 (intercepted) is set, connected byte at data+0x4C. Hooked to apply the gamepad combinations to PlayStation pads.",
+      "howto": "String \"WinDualShock\" -> module registration 0x38cbf80 -> module vtable 0x4f47598 slot 8 (CreateInputDevice 0x38cbec0) -> constructor 0x38cb8a0, vtable 0x4f47608 slot 2 = SendControllerEvents -> 0x38ca210 -> first call after the per-user slot setup."
+    },
+    {
       "name": "FViewInfo size",
       "kind": "offset",
       "pattern": "48 8D 0D ?? ?? ?? ?? 4C 69 C0 B0 28 00 00 48 8B D6 4C 03 87 D0 00 00 00 E8 ?? ?? ?? ?? 84 C0",
