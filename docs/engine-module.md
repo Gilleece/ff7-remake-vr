@@ -146,6 +146,103 @@ Choices for a seated player in a third-person game:
   is the XR host's (`recenter` command of the render module), triggered by the player with
   End or View/Back + left stick click (see "Player controls").
 
+## Depth layer
+
+When the render module wants the scene depth for the headset's depth layer
+(`render::DepthLayerWanted()`, `docs/render.md`, "Depth layer"),
+`RenderTexture_RenderThread` adds it to the frame's hand-over (`EyeTexture::depth`,
+`src/engine/src/scene_depth.cpp`):
+
+- The scene renderer's targets live in the static `FSceneRenderTargets`
+  (`GSceneRenderTargets`, `docs/re/engine.md`, "The scene depth"). The first of its pooled
+  render targets, in member order, whose RHI texture is of the eye texture's class (same
+  vtable) and whose D3D11 texture is a single-sampled, shader-readable depth-stencil
+  texture of the scene's size is the scene depth. Its member offset is found once (logged:
+  `scene depth: member +0x.. of the scene render targets ...`, with every candidate of that
+  size) and read again every frame, since the scene buffers are reallocated when stereo
+  starts or the eye size changes; a texture that no longer qualifies starts a new search.
+  No engine function is called.
+- The texture is referenced (`AddRef`) on the render thread and released by the
+  frame-end command after the hand-over; the render module keeps its own reference until
+  the frame's Present, where the depth is copied. At that point the D3D11 context has
+  executed the frame's scene and post-processing and nothing of the next frame, so the
+  depth is the frame's own.
+- Each eye's region is the rectangle its view rendered (`AdjustViewRect`, render scale
+  applied), taken before DLSS changes the colour rectangles; the render module scales it to
+  the colour image's size. The near plane in metres is the engine's near plane over the
+  frame's units per metre (`WorldToMeters` x `world_scale`).
+- `stereo depth` reports the member found, the texture's size and format and how often it
+  was handed over.
+
+## Late update of the head pose
+
+The views of a frame are located at the game thread's frame wait and travel with the
+frame; the game thread can be up to two frames ahead of the Present that shows it ("Frame
+flow"). With `[stereo] late_update = 1` the views are located again on the render thread,
+right before the frame's scene renders, and the two views' matrices are rebuilt from the
+newer pose (`src/engine/src/late_update.cpp`), as Unreal's own head-mounted display path
+does in 4.18 (`FDefaultXRCamera::PreRenderView_RenderThread` -> `FSceneView::UpdateViewMatrix`;
+neither is in this game's executable: no function compares `FSceneView::StereoPass` and
+calls the stereo device's `CalculateStereoViewOffset` slot, checked over the 266 functions
+that use the `+0x970` displacement).
+
+At the start of `FDeferredShadingSceneRenderer::Render` (the hook of the foveation
+markers, `ui_layer.cpp`), for a view family of two views with stereo passes 1 and 2:
+
+1. **Which frame.** The engine's frames queued for the render thread carry the eye
+   cameras built for them (the inputs of the eye camera math and the results). The views'
+   `ViewMatrices.ViewOrigin` equal the eye positions built for exactly one of them.
+2. **Check.** Every view-dependent matrix the views hold is rebuilt from that frame's eye
+   cameras and compared (float precision); a view that does not match is left alone and
+   counted (`matrices not as built`). This proves the layout and the math on every frame.
+   Where the matrices are is found by value at the first stereo frame (this build's
+   `FViewMatrices` does not follow 4.18's member order: `docs/re/engine.md`,
+   "FViewMatrices in FViewInfo").
+3. **Locate again.** The host locates the eyes for the frame's predicted display time
+   (`render::RelocateViews`, OpenXR `xrLocateViews` from the render thread, which the
+   specification allows; it never waits behind the presenting thread). Only fully
+   tracked, finite poses are used; otherwise the frame keeps its views.
+4. **Rebuild.** Each eye camera is composed again from the same game camera and the new
+   eye pose (world scale, decoupled pitch, positional, recenter and snap turn as before),
+   and written into both copies of `FViewMatrices` in each `FViewInfo` (`ViewMatrices`,
+   `ShadowViewMatrices`): view, inverse view, view-projection and inverse, the translated
+   matrices, `PreViewTranslation` and `ViewOrigin`; then the view frustum's planes (and
+   their permuted copy) and the near clipping plane. The projection is not touched.
+5. **Hand-over.** The frame's queued views become the new ones, so the image goes to the
+   runtime with the pose it was rendered with (`StereoSubmit::renderedViews`).
+
+Consistency: `InitViews`, later in the same `Render`, adds the temporal anti-aliasing
+jitter to the projection, takes the previous frame's matrices from the view state and
+stores this frame's for the next one, all from the matrices written here; so motion
+vectors and the history reprojection see one consistent camera per frame. The game
+thread's own uses of the eye cameras (UI placement, audio listener) keep the frame-wait
+pose.
+
+### Late update: proof (Null backend, 2 x 3072x3264, 90 Hz paced)
+
+Run `captures/frame-wt/s6` (log `captures/runs/20261009-203857`), the harness's save, no
+crash report in the log:
+
+| Test | Result |
+|---|---|
+| Layout and pairing | found on the first stereo frame: two copies of the view matrices per view, the view frustum (5 planes) and the near clipping plane. With the head still, 318 of 318 stereo scenes relocated, 0 not paired, 0 with matrices not as built; turning at 45 deg/s, 579 of 585 (4 not as built, 2 without a queued frame: left alone, they keep their frame-wait views) |
+| Deterministic: `xr-sim late-yaw 10` (only late locations see 10 degrees more yaw) | the hand-over reports the image rendered at yaw 10.000 deg for a frame the frame wait located at 0.000 deg. The left eye image matches the image rendered with the head at 10 degrees by the frame wait (`xr-sim head 10`, late update off): mean absolute difference 3.74 of 255, no shift; against the head at 0 it is shifted by 248 px (difference 10.86, the same as head 10 against head 0: 10.73, 244 px). With late update off the same `late-yaw` changes nothing (difference to head 0: 2.90, no shift). The objects entering at the leading edge are drawn (the frustum is updated) |
+| Pose age at the hand-over to the XR layer, head still | frame-wait location 4.2 to 5.2 ms, late location 2.0 to 2.5 ms |
+| Turning at 45 deg/s (`xr-sim yawrate 45`) | pose age 12.6 ms (frame wait) against 7.6 ms (late); each image 0.23 degrees fresher on average (largest 0.88) |
+| Temporal anti-aliasing, head still, on against off | difference 1.39 of 255 (two captures with late update off differ by 1.66: the scene's own animation), sharpness (variance of the Laplacian) 136.1 against 136.8: no added blur or ghosting |
+| Default path | with `late_update = 0` the hook returns at its first test; the frame-wait captures with and without the late build are not comparable byte for byte (animation), but `late-yaw` has no effect while off (above) |
+
+An earlier run (`s5`) had the frustum's array headers 16 bytes off and showed what that
+costs: culling kept the frame-wait view and, in the 10-degree test, a mesh panel entering at
+the left edge was missing. Fixed before `s6`.
+
+Known limit: an in-scene marker the game places from the camera on the game thread (the
+blue map icon in that room) stays where the frame-wait view put it, so it moves by the late
+correction (10 degrees in the test; about 0.2 degrees per frame at 45 deg/s).
+
+Not verified: a real headset (whether it looks steadier, and with Virtual Desktop's own late
+warp); the SteamVR run below is the only real runtime it ran on.
+
 ## Camera modes
 
 `src/engine/src/player.cpp`. Every frame, at the start of `UGameEngine::Tick`, the module
@@ -727,6 +824,7 @@ keys, comfort in a headset.
 | `dynamic_resolution` | `0` | adjust the render scale every few frames to hold the GPU frame time below `dynamic_resolution_target` of the display's frame period |
 | `dynamic_resolution_min` | `0.75` | lowest scale the dynamic resolution may use (per axis; 0.75 is 56 % of the pixels) |
 | `dynamic_resolution_target` | `0.85` | GPU frame time to hold, as a share of the display's frame period (0.85 at 72 Hz: 11.8 ms) |
+| `late_update` | `0` | locate the views again on the render thread before each stereo frame's scene and rebuild the views' matrices from that newer pose (see "Late update of the head pose") |
 | `vr_window` | `1280x720` | window size the game is switched to while VR renders in a fullscreen mode; `0` keeps the mode (see "Window modes") |
 | `movie_screen` | `1` | movie detection: stereo is held off while a pre-rendered movie plays, so the virtual screen shows it (below) |
 | `allow_unknown_build` | `0` | try a game build other than 1.0.0.7 if every signature and layout check passes |
@@ -796,6 +894,10 @@ Through the dev pipe (`[dev] pipe = 1`, `tools\dev\send-input.ps1 -Pipe "<comman
 | `ssr fix <0\|1\|2>` | right-eye reflections fix off/on, `2` both eyes without screen-space reflections (`runs cleared` counts them); `ssr` shows `applied` (one per stereo frame), `failed`, the x where the right view's result was placed, how often that x changed (`moved`) and results no draw read (`not read`) |
 | `hzb [0-4]` | the unread hierarchical depth chain: `0` built (default), `1` further mips left out, `2` / `3` the whole chain filled with near / far depth, `4` the read chain's further mips filled (control); shows the view chains seen and the mips left out |
 | `stereo framelog start` / `stop <csv>` | frame log: per frame the start, host return and end of `UGameEngine::Tick`, the render thread's end of the scene and the frame-end command on the RHI thread, each with the thread's CPU time (cycle count) and, at the start of Tick, the latest GPU frame time (see "Turning: where the slow frames come from") |
+| `stereo lateupdate [status]` / `on` / `off` | late update of the head pose: on or off, whether the view layout was found, counters (stereo scenes, frames relocated, frames not paired with a queued frame, views whose matrices were not as built, locations refused), the eye's yaw change and shift the late location made (last, average, largest), and the average pose age at the hand-over to the XR layer, of the frame wait's location and of the late one |
+| `stereo lateupdate dump` | search the view layout again at the next stereo scene and log what was found (`lateupdate:` lines) |
+| `stereo lateupdate reset` | zero the counters and the pose-age averages |
+| `stereo depth` | the scene depth for the depth layer: the scene render targets' member found, the texture's size and format, hand-overs, searches (see "Depth layer") |
 | `dynres [on\|off]`, `dynres scale\|min\|target <value>` | render scale and dynamic resolution: state, current scale and rect, last GPU frame time and budget, number of changes |
 | `stereo movie [on\|off]`, `stereo movie menu <0\|1>`, `stereo movie simulate <on\|off>` | movie detection on/off and its state; `menu 1` counts the menu background players too (test); `simulate on` behaves as if a movie played (stereo off, the virtual screen) until `simulate off`, to measure the switch without a movie |
 | `stereo window [<w>x<h>\|0]` | window size while VR renders in a fullscreen mode, and the state |

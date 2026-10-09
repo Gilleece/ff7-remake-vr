@@ -877,6 +877,81 @@ screen percentage), `+0xA0` view rect, `+0x970` stereo pass, `+0xE70` bloom/glar
 (float), `+0x1768` custom glare primitives, `+0x1780` distortion primitive count, `+0x118C` / `+0x1190`
 distortion enable and screen-wide distortion (floats).
 
+### The scene depth (STATIC + LIVE)
+
+`GSceneRenderTargets`, the static `FSceneRenderTargets`, is at RVA `0x5923ad0` (signature
+`GSceneRenderTargets`: the `lea rcx, [rip+x]` right before the call to
+`BeginRenderingInGameUI` in the UI loop of `FDeferredShadingSceneRenderer::Render`, at
+`0x21e8253`; STATIC, checked with `tools/re/signatures.py`). Its members are pooled render
+targets (`TRefCountPtr<IPooledRenderTarget>`: `{vtable, TargetableTexture +0x08,
+ShaderResourceTexture +0x10}`; the native D3D11 resource is `GetNativeResource()`, vtable
+slot 7 of the `FRHITexture`). The depth layer (`src/engine/src/scene_depth.cpp`) takes the
+first member, in member order, whose texture is a single-sampled depth-stencil texture
+that can be read as a shader resource and has the scene's size (both eyes side by side),
+reading only pooled targets whose RHI texture has the eye texture's vtable
+(`FD3D11Texture2D`), whose native texture is at `+0xA0`.
+
+LIVE (2026-10-09, Null backend 2 x 3072x3264 and SteamVR 2 x 1512x1680, first stereo
+frame): the scene depth is the member at **`GSceneRenderTargets + 0x68`**, a
+`R32G8X24_TYPELESS` texture (DXGI 19, `PF_DepthStencil`) of the scene buffers' size
+(6144x3264, 3024x1680), the only depth-stencil target of that size in the first 0x800
+bytes of members. Its depth images (`captures/frame-wt/s1/*_depthL.png`) show the same
+geometry as the eye images of the same frame. Read at the Present that ends the frame it
+holds that frame's depth (the scene and post-processing have executed, nothing of the next
+frame). Some members hold pointers that fault when followed (seen: first-chance access
+violations reading 0x1, 0x4 and -1 during the first search, caught but reported by the
+crash handler): every pointer is checked with `VirtualQuery` before it is read.
+
+### FViewMatrices in FViewInfo (LIVE)
+
+What the late update of the head pose (`src/engine/src/late_update.cpp`) needs, and how it
+is found at run time on the first stereo frame (nothing is hard-coded):
+
+1. The eye position the stereo device built for the frame (`CalculateStereoViewOffset`'s
+   result, exact floats) appears in each `FViewInfo` as `PreViewTranslation` (its
+   negation) immediately followed by `ViewOrigin`: two such pairs per view, at **`+0x4A0`**
+   (`ViewMatrices`) and **`+0x8D0`** (`ShadowViewMatrices`), 0x430 apart.
+2. Every 16-byte aligned 4x4 block in the 0x480 bytes before each pair is compared with the
+   matrices rebuilt from the eye camera (UE 4.18's `FViewMatrices` formulas:
+   `FInverseRotationMatrix(rotation) * view planes`, translation by the eye position, the
+   stored projection).
+
+LIVE (2026-10-09, Null backend, 2 x 3072x3264, both views, `captures/runs/20261009-202536`),
+offsets in `FViewInfo` for the first copy (the second copy: + 0x430):
+
+| Offset | Matrix |
+|---|---|
+| `+0x0E0` | projection (`[xs 0 0 0; 0 ys 0 0; ox oy 0 1; 0 0 near 0]`, no jitter yet at the start of `Render`; also what foveation reads) |
+| `+0x120` | its inverse (first row `1.09 0 0 0`, last row `-0.19 -0.078 1 0`) |
+| `+0x160` | all zero (not identified) |
+| `+0x1A0` | view (`T(-origin) * R`) |
+| `+0x1E0` | inverse view |
+| `+0x220` | view-projection |
+| `+0x260` | inverse view-projection |
+| `+0x2A0`, `+0x2E0`, `+0x360` | the view rotation `R` (HMD view without roll, translated view, overridden translated view; equal while the roll is 0) |
+| `+0x320`, `+0x3A0` | its transpose (inverse translated view, overridden inverse translated view) |
+| `+0x3E0` | translated view-projection (`R * P`) |
+| `+0x420` | inverse translated view-projection |
+| `+0x460` | all zero (not identified) |
+| `+0x4A0`, `+0x4AC` | `PreViewTranslation`, `ViewOrigin` |
+
+So this build's `FViewMatrices` starts at `+0x0E0` and holds 15 matrix slots before
+`PreViewTranslation` (UE 4.18 has 14 with `ProjectionNoAAMatrix`): the order matches 4.18
+from the view matrix on, with an all-zero block before it and one after the inverse
+translated view-projection. Assuming 13 or 14 slots in 4.18 order (the first attempt)
+matched only one block, the view rotation at `+0x2A0`.
+
+`ViewFrustum` (`FConvexVolume`) is at **`+0xA80`**: `Planes`
+(`TArray<FPlane, TInlineAllocator<6>>`) holds 5 planes inline at `+0xA80`..`+0xAC0` (left,
+right, top, bottom and the reversed-Z "far" plane, which is the near plane; `FMatrix::GetFrustum*Plane`
+of the view-projection), the secondary allocator's pointer at `+0xAE0` (null), `ArrayNum`
+5 at `+0xAF0`, `ArrayMax` 6 at `+0xAF4` (the inline storage and the pointer are padded to
+0x70 by `FPlane`'s 16-byte alignment, the array to 0x80); `PermutedPlanes`
+(`TInlineAllocator<8>`) follows at `+0xB00`, its count (8) at `+0xB90`. The same "far" plane
+alone is at **`+0xBB0`** (`NearClippingPlane`). LIVE: found by value on the first stereo frame,
+written every relocated frame; with it the 10-degree late-update test draws the objects that
+enter at the leading edge (without it one was culled, run `s5`).
+
 ## 11. The player's character and the camera (reflection, LIVE)
 
 Found and used by `src/engine/src/player.cpp` (camera modes, `docs/engine-module.md`).
