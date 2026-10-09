@@ -1584,6 +1584,7 @@ differs in 7 % of the pixels: `s8`), so they were run with foveation off (`fov o
 | `ssr test equal` (the patched copy against the game's shader, left view at the origin) | 0 of 10 027 008 pixels differ in 9 of 10 runs (`s2` 2, `s7` 3 of 4 including 67 % and render scale 0.8, `s8` 4); once, in the first half-minute after start, 6 839 (max 0.9995) |
 | `ssr test shift` (the right view's run in place against the same view computed by the game's shader at the origin) | after the first half-minute: 103, 125, 177, 293 pixels differ (0.001 to 0.003 %), of them 3 to 30 by more than 0.01 (`s8`); with `stereo swap 1` (the left eye in the right half) 132, 3; at render scale 0.8 (right view 2456 wide at x 3072) 148, 14. In the first half-minute after start up to 12 337 (0.12 %), at most 144 by more than 0.01 (`s2`, `s7`). Non-zero pixels and mean alpha equal in every run |
 | `ssr test shift` at `r.ScreenPercentage 67` (right view 2059 wide at x 2060) | 9.3 % differ: 2060 is not a multiple of 64, so the run in place reads another phase of the pass's 64x64 noise (`SV_Position & 63`) than the reference; non-zero 7.03 / 7.05 %, mean alpha equal (`s7`); `equal` 0 differ |
+| the same at eyes 2232x2256 (the engine's eye size of the DLSS package, right view at x 2232; `s6`) | `equal` 0 of 5 035 392 differ; `shift` 9.35 % differ for the same reason, non-zero 7.04 / 7.08 %, mean alpha 0.0084 / 0.0085 |
 
 The few differing pixels are hits found or missed at the threshold of the ray march (the
 largest differences are single bright pixels of the previous frame's colour); they are of the
@@ -1603,6 +1604,7 @@ the reflection images, `captures/ssrfix/compare_eyes.py`):
 | the same eye in two frames, both `ssr_fix = 3` (what frame-to-frame variation alone gives: noise slice, jitter, animation) | 0.82 | 0.71 | 5.1 / 5.0 % |
 | left eye in two frames, the game's own run | 0.80 | 0.65 | 5.6 / 5.4 % |
 | right eye, `ssr_fix = 1`, against the right eye at the origin | 0.01 | 0.06 | 19.3 / 5.0 % |
+| at eyes 2232x2256 (`s6`, foveation off): `ssr_fix = 3` against the right eye at the origin / two frames of `ssr_fix = 3` / `ssr_fix = 1` against the right eye at the origin | 0.85, 0.77 / 0.79 / 0.005 | 0.79, 0.64 / 0.68 / 0.10 | 5.3 / 5.6 %, 19.0 / 5.6 % |
 
 Two identical cameras (`stereo host fixed`, `stereo ipd 0`, symmetric field of view; one
 frame, left half against right half; `s5`): `ssr_fix = 3` 0.91 (alpha 0.91), non-zero 5.3 /
@@ -1614,7 +1616,7 @@ the lamp, the spot under the tank) against `s1/tr1_overlay.png` (mode 1: specks 
 ceiling, a dense band at the right view's left edge).
 
 `ssr poison 1` (everything left of the right run's part filled with magenta after it): 0 magenta
-pixels in either eye (`s2`, `s5`, `s7`); `ssr poison 2` (control): 41.7 / 32.5 % of the eye images
+pixels in either eye (`s2`, `s5`, `s6`, `s7`); `ssr poison 2` (control): 41.7 / 32.5 % of the eye images
 magenta (`s7`, foveation off; `s5` with foveation 41.7 / 32.8 %; `s2` 50.8 / 54.4 %). Counters in every run:
 `drawn in place` = stereo frames, `frames without it` 0. In the final eye images of this scene
 the reflections are weak and the modes are hard to tell apart (`s2/sheet_R_fix2_fix3_fix1.png`,
