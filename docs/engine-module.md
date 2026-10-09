@@ -1349,7 +1349,10 @@ light per ring around the image centre, radius 1 = the middle of an edge; run
 | 1.3-1.4 (corners) | 16.0, 17.1 | 9.3 |
 
 Two captures with it removed, 17 s apart, agree within 0.1 % in every ring; first person
-gives the same (edge 4.5, corners 11.9). Cost: scene GPU p50 6.10 / 5.96 ms with the vignette
+gives the same (edge 4.5, corners 11.9). With 3D switched off (`stereo off`) the hook scales
+nothing (its counter of scaled objects stays put while `stereo vignette 0` is set), so the flat
+game keeps its vignette, and after `stereo on` the eyes equal those before the switch within
+0.1 % per ring (`captures/visuals/20261009-202937-vigflat-3072x3264`). Cost: scene GPU p50 6.10 / 5.96 ms with the vignette
 against 6.07 / 5.97 ms without (two pairs of 15 s windows), the passes after the scene
 0.97 ms either way: nothing measurable. The vignette per eye is a flat-screen camera effect
 (each eye's image centre is not where the lens is centred, and the eye looks around inside
