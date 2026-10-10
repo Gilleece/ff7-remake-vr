@@ -5,12 +5,15 @@
 //   ff7vr_core_tests.exe crash           install the crash handler and crash on purpose;
 //                                        check ff7vr_core_tests.log and the .dmp next to the exe
 //   ff7vr_core_tests.exe hook            inline + vtable hook round trip
+//   ff7vr_core_tests.exe defaults <ini>  every key of <ini> (tools/package/ff7vr.ini) has its
+//                                        value as the built-in default in live_settings.cpp
 
 #include "ff7vr/core/config.h"
 #include "ff7vr/core/crash.h"
 #include "ff7vr/core/graphics_profile.h"
 #include "ff7vr/core/hook.h"
 #include "ff7vr/core/ini_file.h"
+#include "ff7vr/core/live_settings.h"
 #include "ff7vr/core/log.h"
 #include "ff7vr/core/module.h"
 #include "ff7vr/core/pattern.h"
@@ -285,7 +288,36 @@ static int crash_test() {
     return 0;
 }
 
+// Every key of an ini (the shipped template) has a built-in default in live_settings, equal
+// to the value written there. Returns the number of mismatches.
+static int check_defaults(const char* path) {
+    Config c;
+    if (!c.load(path)) {
+        std::printf("defaults: cannot read %s\n", path);
+        return 1;
+    }
+    int bad = 0, n = 0;
+    for (const std::string& line : c.dump()) {
+        const size_t eq = line.find(" = ");
+        const size_t dot = line.find('.');
+        if (eq == std::string::npos || dot == std::string::npos || dot > eq) continue;
+        const std::string section = line.substr(0, dot), key = line.substr(dot + 1, eq - dot - 1), value = line.substr(eq + 3);
+        ++n;
+        const auto def = live_settings::default_value(section, key);
+        if (!def) {
+            std::printf("defaults: [%s] %s has no built-in default in live_settings.cpp\n", section.c_str(), key.c_str());
+            ++bad;
+        } else if (!live_settings::same_value(*def, value)) {
+            std::printf("defaults: [%s] %s = %s in the ini, %s in live_settings.cpp\n", section.c_str(), key.c_str(), value.c_str(), def->c_str());
+            ++bad;
+        }
+    }
+    std::printf("defaults: %d keys of %s checked, %d mismatches\n", n, path, bad);
+    return bad;
+}
+
 int main(int argc, char** argv) {
+    if (argc >= 3 && std::strcmp(argv[1], "defaults") == 0) return check_defaults(argv[2]) ? 1 : 0;
     if (argc >= 3 && std::strcmp(argv[1], "bench") == 0) {
         std::wstring w(argv[2], argv[2] + std::strlen(argv[2]));
         return bench(w.c_str());
