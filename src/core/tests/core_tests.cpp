@@ -162,6 +162,38 @@ static void test_ini_file() {
     // No trailing newline, no sections.
     CHECK(ff7vr::ini_file::apply("[a]\nk = 1", {{"a", "k", "2"}, {"a", "j", "3"}}) == "[a]\nk = 2\nj = 3\n");
     CHECK(ff7vr::ini_file::apply("", {{"a", "k", "2"}}) == "[a]\r\nk = 2\r\n");
+    // A key that exists only as a commented line is uncommented in place (comment column kept);
+    // comment_out puts the marker back. Indented comment lines are never taken for keys.
+    const std::string cv =
+        "[stereo_cvars]\n"
+        "; Remove the ; to use a line; name = value\n"
+        "; r.Streaming.PoolSize = 2500   ; pool in MB\n"
+        "                                ; more text = 1\n"
+        "r.BloomQuality = 0              ; bloom\n";
+    Update setPool{"stereo_cvars", "r.Streaming.PoolSize", "3000"};
+    Update unsetBloom{"stereo_cvars", "r.BloomQuality", "0"};
+    unsetBloom.comment_out = true;
+    ff7vr::ini_file::Report r2;
+    const std::string cvOut = ff7vr::ini_file::apply(cv, {setPool, unsetBloom}, &r2);
+    const std::string cvWant =
+        "[stereo_cvars]\n"
+        "; Remove the ; to use a line; name = value\n"
+        "r.Streaming.PoolSize = 3000     ; pool in MB\n"
+        "                                ; more text = 1\n"
+        "; r.BloomQuality = 0            ; bloom\n";
+    CHECK(cvOut == cvWant);
+    if (cvOut != cvWant) std::printf("--- got:\n%s--- want:\n%s", cvOut.c_str(), cvWant.c_str());
+    CHECK(r2.changed.size() == 2 && r2.added.empty());
+    Config cvc;
+    cvc.load_from_string(cvOut);
+    CHECK(cvc.get_int("stereo_cvars", "r.Streaming.PoolSize", 0) == 3000);
+    CHECK(!cvc.has("stereo_cvars", "r.BloomQuality"));
+    // And back: the original text again.
+    Update unsetPool{"stereo_cvars", "r.Streaming.PoolSize", "2500"};
+    unsetPool.comment_out = true;
+    const std::string back = ff7vr::ini_file::apply(cvOut, {unsetPool, {"stereo_cvars", "r.BloomQuality", "0"}});
+    CHECK(back == cv);
+    if (back != cv) std::printf("--- got:\n%s--- want:\n%s", back.c_str(), cv.c_str());
     std::printf("ini_file: ok\n");
 }
 

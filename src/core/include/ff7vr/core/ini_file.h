@@ -6,7 +6,11 @@
 // one; an inline comment (" ; ..." or " # ...", the rule Config uses) stays, at the same
 // column when the new value fits. A key that is not in its section is added after the
 // section's last key line; a section that does not exist is added at the end of the file.
-// Section and key names are matched without regard to case, like Config does.
+// A key that is in its section only as a line commented out at the start ("; key = value")
+// is uncommented in place (with the new value) instead of being added. `comment_out` does the
+// opposite: the key's line gets the value and is commented out ("not set"); nothing happens
+// when the key has no line. Section and key names are matched without regard to case, like
+// Config does.
 
 #include <filesystem>
 #include <string>
@@ -17,6 +21,7 @@ namespace ff7vr::ini_file {
 
 struct Update {
     std::string section, key, value;
+    bool comment_out = false;
 };
 
 struct Report {
