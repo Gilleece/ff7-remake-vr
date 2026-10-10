@@ -182,7 +182,9 @@ void session_impl(std::string_view system_name, std::string_view runtime_name, b
         g_state.session_runtime = runtime_name;
         const auto& sections = cfg->headset_sections();
         if (sections.empty()) return;
-        // Remembered for the next start (only for players who use the sections).
+        // Remembered for the next start (only for players who use the sections; not for the
+        // Null backend, whose names are known at start anyway).
+        remember = remember && runtime_name != kNullRuntimeName;
         const std::string text = std::string(system_name) + "\r\n" + std::string(runtime_name) + "\r\n";
         if (remember && read_small_file(g_state.dir / kStateFile) != text && !write_small_file(g_state.dir / kStateFile, text))
             log::warn("headset: could not write {}", log::narrow((g_state.dir / kStateFile).wstring()));

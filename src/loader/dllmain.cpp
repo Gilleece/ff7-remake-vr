@@ -10,6 +10,7 @@
 
 #include "ff7vr/core/config.h"
 #include "ff7vr/core/graphics_profile.h"
+#include "ff7vr/core/headset_profile.h"
 #include "ff7vr/core/crash.h"
 #include "ff7vr/core/hook.h"
 #include "ff7vr/core/log.h"
@@ -61,7 +62,9 @@ void load_config_early(const std::filesystem::path& ini) {
     }
     CloseHandle(f);
     g_config.load_from_string(text);
-    g_profile_log = graphics_profile::apply(g_config);
+    // The [headset:...] layer first: a headset section may choose the [graphics] profile.
+    g_profile_log = headset_profile::apply_at_start(g_config, ini.parent_path());
+    for (auto& line : graphics_profile::apply(g_config)) g_profile_log.push_back(std::move(line));
 }
 
 // The mod's D3D11 hooks need the engine to choose Direct3D 11; without a

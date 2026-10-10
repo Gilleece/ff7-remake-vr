@@ -99,6 +99,7 @@ $Here           = $PSScriptRoot
 $ModFiles       = @('xinput1_3.dll', 'ff7vr.ini')        # copied into End\Binaries\Win64
 $RuntimeFiles   = @('ff7vr.log', 'ff7vr-crash-*.dmp')   # written there by the mod
 $SessionFile    = 'ff7vr.session.json'
+$HeadsetFile    = 'ff7vr-headset.txt'                  # the last headset, kept next to this script between sessions
 $LumaOn         = 'dxgi.dll'
 $LumaOff        = 'dxgi.dll.vr-disabled'
 $LogsDir        = Join-Path $Here 'logs'
@@ -503,6 +504,13 @@ function Invoke-Restore([string]$bin, [string]$why) {
         # settings themselves are kept above, so the backup is not needed in the game folder.
         $bak = Join-Path $bin 'ff7vr.ini.bak'
         if (Test-Path -LiteralPath $bak) { try { Remove-WithRetry $bak } catch { Warn "Could not remove $bak`: $_" } }
+        # The last headset's name (written only when ff7vr.ini has [headset:...] sections) goes
+        # back to the package folder, so the next session starts with that headset's settings.
+        $hs = Join-Path $bin $HeadsetFile
+        if (Test-Path -LiteralPath $hs) {
+            try { Copy-Item -LiteralPath $hs -Destination (Join-Path $Here $HeadsetFile) -Force -ErrorAction Stop; Remove-WithRetry $hs }
+            catch { Warn "Could not move $hs to the package folder: $_" }
+        }
     }
 
     # dxgi.dll: put Luma back whenever it is set aside and nothing has replaced it.
@@ -821,6 +829,8 @@ try {
         Copy-Item -LiteralPath (Join-Path $Here $f.name) -Destination $dst -Force
         if ((Get-Sha256 $dst) -ne $f.sha256) { throw "Copying $($f.name) into the game folder failed (contents differ)" }
     }
+    $hsKept = Join-Path $Here $HeadsetFile
+    if (Test-Path -LiteralPath $hsKept) { Copy-Item -LiteralPath $hsKept -Destination (Join-Path $bin $HeadsetFile) -Force }
     Info 'Installed the mod for this session (xinput1_3.dll, ff7vr.ini)'
 
     # Start the game executable directly. SteamAppId/SteamGameId tell the Steam API

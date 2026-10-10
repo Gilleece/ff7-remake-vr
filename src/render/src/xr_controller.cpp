@@ -10,6 +10,7 @@
 #include "video_memory.h"
 
 #include "ff7vr/core/dev_commands.h"
+#include "ff7vr/core/headset_profile.h"
 #include "ff7vr/core/log.h"
 
 #include <algorithm>
@@ -243,6 +244,7 @@ void XrController::TryInit() {
               ri.runtimeVersion, ri.systemName, ri.eyeSwapchain[0].width, ri.eyeSwapchain[0].height,
               xr::DxgiFormatName(ri.eyeSwapchain[0].format), ri.eyeSwapchain[0].imageCount, ri.refreshHz, ri.adapterLuid);
     for (const auto& l : ri.implicitLayers) log::info("xr:   implicit API layer {}", l);
+    headset_profile::on_session(ri.systemName, ri.runtimeName);  // [headset:...] sections of the ini
     depthAvailable_ = ri.depthSwapchainFormat != DXGI_FORMAT_UNKNOWN;
     log::info("xr: depth layer {}{}", depthAvailable_.load() ? std::string("available, swapchains ") + xr::DxgiFormatName(ri.depthSwapchainFormat)
                                                              : std::string("not available: ") + ri.depthNote,

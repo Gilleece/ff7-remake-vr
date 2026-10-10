@@ -560,11 +560,11 @@ function Backup-Saves([string]$saveRoot = (Get-SaveRoot), [string]$backupRoot = 
 # Deploying copies our files into the game's End\Binaries\Win64 and records
 # them (name, size, SHA-256) in ff7vr.deploy-manifest.json in that folder.
 # Undeploying removes exactly the recorded files, plus the files the mod
-# itself creates at runtime (ff7vr.log, ff7vr-crash-*.dmp), which are first
+# itself creates at runtime (ff7vr.log, ff7vr-crash-*.dmp, ff7vr-headset.txt), which are first
 # archived to captures\runs\<time>\ in the repo.
 
 $script:DeployFiles     = @('xinput1_3.dll', 'ff7vr.ini')
-$script:RuntimePatterns = @('ff7vr.log', 'ff7vr-crash-*.dmp')
+$script:RuntimePatterns = @('ff7vr.log', 'ff7vr-crash-*.dmp', 'ff7vr-headset.txt')
 
 function Get-ManifestPath { return (Join-Path (Get-GameBinDir) $script:ManifestName) }
 

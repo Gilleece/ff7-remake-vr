@@ -29,6 +29,7 @@
 #include "xinput_proxy.h"
 
 #include "ff7vr/core/dev_commands.h"
+#include "ff7vr/core/headset_profile.h"
 #include "ff7vr/core/log.h"
 
 #if FF7VR_HAVE_DEV
@@ -53,6 +54,7 @@ void start_modules(const StartupContext& ctx) {
     if (dev_commands::unsafe_allowed())
         log::warn("dev: unsafe_commands = 1: the pipe's `re poke` and `fp call` can patch memory and call game functions");
     if (cfg.get_bool("dev", "pipe", false)) dev_input::start();
+    headset_profile::register_dev_command();  // `headset status`
 
 #if FF7VR_HAVE_ENGINE
     // Stereo device in the engine ([stereo] keys, gated by [stereo] enabled inside the module).
