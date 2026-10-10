@@ -123,6 +123,7 @@ void OnResizeCb(IDXGISwapChain* sc) { XrController::Get().OnResize(sc); }
 // The game leaves through ExitProcess (or TerminateProcess on itself). Ending the
 // XR session there, while every thread still exists, lets the runtime see a clean exit.
 void ShutdownForExit(const char* how) {
+    menu::Stop();  // the keyboard hook of the settings panel
     static std::atomic<bool> once{false};
     if (once.exchange(true)) return;
     log::info("render: {}: ending the XR session", how);

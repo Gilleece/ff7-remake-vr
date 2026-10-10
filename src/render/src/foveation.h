@@ -59,5 +59,8 @@ std::string Status();
 
 // Summaries of the foveation timing series for the periodic timing block (resets them).
 std::vector<std::string> TakeTimingLines();
+// Any thread: the most recent GPU times of the stereo scene and of what follows it until
+// Present (the two series of TakeTimingLines); false while none was measured.
+bool LastGpuTimes(double* sceneMs, double* afterMs);
 
 }  // namespace ff7vr::render::foveation

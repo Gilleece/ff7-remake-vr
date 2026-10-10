@@ -5,6 +5,9 @@
 
 #include "ff7vr/core/hook.h"
 #include "ff7vr/core/log.h"
+#if FF7VR_ENGINE_WITH_RENDER
+#include "ff7vr/render/render.h"
+#endif
 
 #include <windows.h>
 
@@ -40,6 +43,7 @@ int g_connected[kHandles] = {-1, -1, -1, -1};  // -1 unknown, 0 no pad, 1 pad
 // The virtual pad (dev): button word presented on pad index 0.
 std::atomic<bool> g_virtual{false};
 std::atomic<std::uint32_t> g_virtual_buttons{0};
+std::atomic<std::uint64_t> g_menu_withheld{0};  // polls the settings panel withheld from the game
 std::atomic<std::uint8_t> g_virtual_lx{0x80}, g_virtual_ly{0x80};
 
 std::atomic<std::uint64_t> g_calls{0}, g_with_pad{0}, g_changed{0};
@@ -113,6 +117,35 @@ int read_state_detour(int handle, void* data) {
     std::uint32_t b;
     std::memcpy(&b, d + kButtons, 4);
     if (b & kIntercepted) return rc;  // the game ignores this state anyway
+#if FF7VR_ENGINE_WITH_RENDER
+    {
+        // The settings panel reads the pad as an XInput state (pad slots 4..7) and, while it
+        // is open, the game gets a neutral pad, as on the XInput path.
+        render::PadState ps{};
+        ps.buttons = controls::sce_to_xinput(b);
+        ps.lx = to_axis(d[kSticks], false);
+        ps.ly = to_axis(d[kSticks + 1], true);
+        ps.rx = to_axis(d[kSticks + 2], false);
+        ps.ry = to_axis(d[kSticks + 3], true);
+        if (render::MenuFilterPad(4 + static_cast<unsigned long>(index), &ps)) {
+            // As on the XInput path: the combination filter and the stick filter run on the
+            // neutral state (so they see every button and the stick released, and the filter
+            // does not hand a held-back View/Back to the game later), and the game gets the
+            // neutral state whatever the filter answers.
+            g_last_in.store(b, std::memory_order_relaxed);
+            b &= kIntercepted;
+            std::uint32_t filtered = b;
+            controls::filter_sce(static_cast<unsigned long>(index), &filtered);
+            short zero[4] = {0, 0, 0, 0};
+            snap_turn::filter_sticks(4 + static_cast<unsigned long>(index), &zero[0], &zero[1], &zero[2], &zero[3]);
+            std::memcpy(d + kButtons, &b, 4);
+            std::memset(d + kSticks, 0x80, 4);
+            g_menu_withheld.fetch_add(1, std::memory_order_relaxed);
+            g_last_out.store(b, std::memory_order_relaxed);
+            return rc;
+        }
+    }
+#endif
     const std::uint32_t in = b;
     controls::filter_sce(static_cast<unsigned long>(index), &b);
     if (b != in) {
@@ -171,11 +204,11 @@ std::string status() {
             pads += std::format("{}{} {}", pads.empty() ? "" : ", ", i, g_connected[i] == 1 ? "pad" : g_connected[i] == 0 ? "none" : "?");
     }
     return std::format("PlayStation pads: hook {}, scePadReadState calls {} ({} with a pad, {} changed), handles [{}], last rc {:#x}, last "
-                       "buttons {:#010x} -> game {:#010x}, left stick ({}, {}) -> game ({}, {}) (sticks changed in {} polls), virtual pad {}",
+                       "buttons {:#010x} -> game {:#010x}, left stick ({}, {}) -> game ({}, {}) (sticks changed in {} polls), virtual pad {}, withheld by the settings panel {}",
                        g_installed.load() ? "on" : "off", g_calls.load(), g_with_pad.load(), g_changed.load(), pads,
                        static_cast<unsigned>(g_last_rc.load()), g_last_in.load(), g_last_out.load(), g_last_stick[0].load(),
                        g_last_stick[1].load(), g_last_stick[2].load(), g_last_stick[3].load(), g_sticks_changed.load(),
-                       g_virtual.load() ? std::format("{:#010x}", g_virtual_buttons.load()) : std::string("off"));
+                       g_virtual.load() ? std::format("{:#010x}", g_virtual_buttons.load()) : std::string("off"), g_menu_withheld.load());
 }
 
 std::string timing() {

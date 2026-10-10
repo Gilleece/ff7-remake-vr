@@ -1,11 +1,13 @@
 // The in-headset settings panel ([menu] in ff7vr.ini; docs/render.md, "Settings panel").
 //
-// A list of the settings the modules registered (ff7vr/core/live_settings.h), drawn by the
+// Every setting of ff7vr.ini (ff7vr/core/live_settings.h) in seven categories, drawn by the
 // mod into its own texture and shown on a quad layer of its own in front of the HUD panel.
 // Opened with [menu] key (Delete) or View/Back + Y on the gamepad. While it is open the
 // game receives a neutral gamepad (MenuFilterPad in render.h) and the panel reads the real
-// one: D-pad (or left stick) up/down choose, left/right change, A selects, X saves to
-// ff7vr.ini, B closes. Keyboard: arrows, Enter, S, Escape (the game sees those keys too).
+// one: D-pad (or left stick) up/down choose, left/right change, LB/RB switch category, A
+// selects, Y resets to the default, X saves to ff7vr.ini, B closes. Keyboard: arrows,
+// Enter, Backspace, S, Delete; a message hook on the game window's thread keeps those keys
+// from the game while the panel is open.
 //
 // Threads: a thread of its own polls the keyboard and the gamepad state recorded by the
 // pad filter, applies changes through the settings' setters and draws the panel image on
@@ -28,6 +30,9 @@ namespace ff7vr::render::menu {
 // [menu] keys; registers the render module's settings and the `menu` dev command, starts
 // the panel's thread. `iniPath`: the ff7vr.ini that Save writes (next to the DLL).
 void Start(const Config& cfg, const std::filesystem::path& iniPath);
+
+// Removes the keyboard hook (process exit).
+void Stop();
 
 // Any thread.
 bool IsOpen();

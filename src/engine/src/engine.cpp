@@ -342,7 +342,7 @@ bool start(const StartupContext& ctx) {
             for (char& c : profile) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
             graphics::register_command(profile);
         }
-        menu_items::register_all();  // the settings the in-headset panel can change
+        menu_items::register_all(cfg);  // the settings the in-headset panel can change
         dev_commands::add("re", "re peek <rva> <n> | re poke <rva> <hex bytes>: read or patch the game image",
                           [](std::string_view args) {
                               std::string reply;
