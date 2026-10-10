@@ -1059,6 +1059,8 @@ void RegisterSettings(const Config& cfg) {
          [](const std::string& v) { return OkOrError(Dispatch("ui battle_size " + v)); });
     Held(OnOff("ui.follow_head", "HUD follows your head", kHud + 13, "ui", "follow_head"),
          [&xc](const std::string& v) { return OkOrError(xc.UiCommand("follow " + v)); });
+    Held(OnOff("ui.align", "Markers aligned with the world", kHud + 15, "ui", "align"),
+         [&xc](const std::string& v) { return OkOrError(xc.UiCommand("align " + v)); });
     Held(OnOff("ui.layer", "HUD on its own panel", kHud + 14, "ui", "layer"));
     Held(Number("screen.distance", "Virtual screen distance (m)", kHud + 20, "screen", "distance", 0.5f, 10.0f, 0.25f, 2));
     Held(Number("screen.width", "Virtual screen width (m)", kHud + 21, "screen", "width", 0.5f, 10.0f, 0.1f, 2));
