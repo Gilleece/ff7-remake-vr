@@ -15,6 +15,7 @@ add_library(ff7vr_engine STATIC
     src/fixes.cpp
     src/commands.cpp
     src/ui_layer.cpp
+    src/ui_align.cpp
     src/gpu_trace.cpp
     src/shaders.cpp
     src/movie_watch.cpp

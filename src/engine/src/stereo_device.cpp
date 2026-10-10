@@ -13,6 +13,7 @@
 #include "rhi_command.h"
 #include "scene_depth.h"
 #include "ue_math.h"
+#include "ui_align.h"
 
 #include "ff7vr/core/config.h"
 #include "ff7vr/core/dev_commands.h"
@@ -411,6 +412,10 @@ void CalculateStereoViewOffset(void*, EStereoscopicPass pass, FRotator* rotation
         const ue::FRotator head_world =
             math::rotator_from_quat(math::normalize(math::mul(math::quat_from_rotator(base_level), math::xr_to_ue_quat(in.head.orientation))));
         head_move::publish(game_rot, head_world, force_decouple);
+        // The rotation is FMinimalViewInfo::Rotation (+0xC) and its FOV follows at +0x18
+        // (docs/re/engine.md section 5): the game camera's field of view, for the UI panel.
+        ui_align::publish(game_rot, game_loc, reinterpret_cast<const float*>(rotation)[3], base_level, base_loc, in.head, in.units_per_metre,
+                          in.positional);
         ++g.stereo_draws;
         g.views_built = true;
         if (g.logged_order < 3) {

@@ -167,6 +167,21 @@ bool UiDumpRequested();
 // Presenting thread, before the frame's Present (after the frame's UI was drawn).
 void SubmitUiLayer(const UiLayerSource& source);
 
+// Where the UI quad was last shown, in the headset's space: centred at (offsetX,
+// offsetY, -distance) metres from the recentered head (from the head when headLocked),
+// facing it, width x height metres. `align` is [ui] align (0 off, 1 the game places
+// world-anchored elements for this panel, 2 the panel takes the game camera's field of
+// view). Any thread; false while the quad has not been shown for half a second.
+struct UiPanelPlacement {
+    float distance = 0, width = 0, height = 0, offsetX = 0, offsetY = 0;
+    bool headLocked = false;
+    int align = 0;
+};
+bool UiPanel(UiPanelPlacement* out);
+// Game thread, every stereo frame: the game camera's horizontal field of view in degrees
+// (the one it places world-anchored UI elements with), for [ui] align = 2.
+void SetGameFov(float degrees);
+
 // ======================== FIXED FOVEATED RENDERING =========================
 // In stereo the periphery of each eye is shaded at a lower rate than its centre
 // (NVIDIA variable rate shading through NVAPI; docs/render.md, "Foveated

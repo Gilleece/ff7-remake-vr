@@ -98,6 +98,7 @@ RenderConfig LoadConfig(const StartupContext& ctx) {
     r.uiFollowHead = c.get_bool("ui", "follow_head", r.uiFollowHead);
     r.uiLayerWidth = static_cast<uint32_t>(std::clamp<long long>(c.get_int("ui", "layer_width", r.uiLayerWidth), 0, 8192));
     r.uiMirror = c.get_bool("ui", "mirror", r.uiMirror);
+    r.uiAlign = static_cast<int>(std::clamp<long long>(c.get_int("ui", "align", r.uiAlign), 0, 2));
 
     xr::PictureAdjust pic;
     pic.brightness = static_cast<float>(c.get_float("picture", "brightness", pic.brightness));
@@ -236,8 +237,9 @@ bool start(const StartupContext& ctx) {
     log::info("render: xr {} (backend {}, runtime '{}', frame wait on the {} thread), screen {:.2f} m wide at {:.2f} m, captures in {}",
               cfg.xrEnabled ? "enabled" : "disabled", cfg.backend == xr::BackendType::Null ? "null" : "openxr", cfg.runtime,
               cfg.waitOnPresentThread ? "present" : "xr", cfg.screenWidth, cfg.screenDistance, log::narrow(cfg.captureDir.wstring()));
-    log::info("render: UI layer in stereo {}: {:.2f} m high at {:.2f} m, offset {:.2f} {:.2f}, {}, image width {}", cfg.uiLayer ? "on" : "off",
-              cfg.uiSize, cfg.uiDistance, cfg.uiOffsetX, cfg.uiOffsetY, cfg.uiFollowHead ? "head-locked" : "world-locked", cfg.uiLayerWidth);
+    log::info("render: UI layer in stereo {}: {:.2f} m high at {:.2f} m, offset {:.2f} {:.2f}, {}, image width {}, align {}", cfg.uiLayer ? "on" : "off",
+              cfg.uiSize, cfg.uiDistance, cfg.uiOffsetX, cfg.uiOffsetY, cfg.uiFollowHead ? "head-locked" : "world-locked", cfg.uiLayerWidth,
+              cfg.uiAlign);
     log::info("render: picture {}; brightness keys up {} down {} (step {:.3f})", PictureText(cfg.picture), cfg.brightnessUpKey,
               cfg.brightnessDownKey, cfg.brightnessStep);
     foveation::Configure(*ctx.config);
@@ -281,6 +283,10 @@ bool RelocateViews(uint64_t frameId, xr::View views[2]) {
 }
 bool UiDumpRequested() { return g_started.load(std::memory_order_relaxed) && XrController::Get().UiDumpRequested(); }
 void SubmitUiLayer(const UiLayerSource& source) { XrController::Get().SubmitUiLayer(source); }
+bool UiPanel(UiPanelPlacement* out) { return g_started.load(std::memory_order_relaxed) && XrController::Get().UiPanel(out); }
+void SetGameFov(float degrees) {
+    if (g_started.load(std::memory_order_relaxed)) XrController::Get().SetGameFov(degrees);
+}
 bool FoveationWanted() { return g_started.load(std::memory_order_relaxed) && foveation::Wanted(); }
 void FoveationSceneBegin(const FoveationEye eyes[2]) { foveation::SceneBegin(eyes); }
 void FoveationSceneEnd() { foveation::SceneEnd(); }
