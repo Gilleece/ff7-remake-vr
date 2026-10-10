@@ -38,6 +38,7 @@
 
 #include "late_update.h"
 #include "rhi_command.h"
+#include "ui_align.h"
 
 #include "ff7vr/core/dev_commands.h"
 #include "ff7vr/core/hook.h"
@@ -544,6 +545,7 @@ bool start_ui_layer(const StartupContext& ctx) {
     // pass straight through while it is off ([foveation] enabled, `fov on|off`).
     g_layoutForceFail = static_cast<int>(ctx.config->get_int("dev", "foveation_layout_fail", 0));
     start_scene_marks(base, known);
+    ui_align::start(base, known);  // markers on the panel ([ui] align), independent of the hooks below
     std::string why;
     std::int64_t begin = 0, end = 0, uiTarget = 0, uiSize = 0, flag = 0, stereoPass = 0, endTarget = 0;
     bool ok = resolve(base, known, kBegin, &begin, &why) && resolve(base, known, kUiTarget, &uiTarget, &why) &&
@@ -583,11 +585,12 @@ bool start_ui_layer(const StartupContext& ctx) {
         log::warn("ui: hooks could not be installed; the UI layer is not available");
         return false;
     }
-    dev_commands::add("uihook", "uihook status | once <0|1> | proj: engine side of the UI layer (counters; one UI pass per frame in stereo; log the views' projections)",
+    dev_commands::add("uihook", "uihook status | once <0|1> | proj | align: engine side of the UI layer (counters; one UI pass per frame in stereo; log the views' projections; marker alignment)",
                       [](std::string_view args) -> std::string {
                           std::string a(args);
                           while (!a.empty() && a.back() == ' ') a.pop_back();
                           if (a.empty() || a == "status") return status();
+                          if (a == "align") return ui_align::status();
                           if (a == "proj") {
                               g_projScans = 2;
                               return "ok the projections of the next two views the UI pass receives go to ff7vr.log";
@@ -596,7 +599,7 @@ bool start_ui_layer(const StartupContext& ctx) {
                               g_oncePerFrame = a.back() == '1';
                               return status();
                           }
-                          return "err usage: uihook status | once <0|1> | proj";
+                          return "err usage: uihook status | once <0|1> | proj | align";
                       });
     g_ready = true;
     log::info("ui: UI layer hooks installed in {} ms (BeginRenderingInGameUI +0x{:x}, EndRenderingInGameUI +0x{:x}, UI target member +0x{:x}, "

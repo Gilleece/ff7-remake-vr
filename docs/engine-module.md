@@ -2481,6 +2481,64 @@ Signatures are resolved at start-up with the same rules as the rest of the modul
 match, checked against the RVA of build 1.0.0.7). `[ui] once_per_frame = 0` (or `uihook once 0`)
 lets the game draw the UI for both eyes again; `uihook status` shows the counters.
 
+## UI marker alignment
+
+`src/engine/src/ui_align.cpp` (started from `start_ui_layer`) keeps world-anchored UI
+elements (target markers, enemy names, prompts) over their objects on the UI panel
+(`[ui] align`, `docs/render.md` "World-anchored elements").
+
+| What | Where | Why |
+|---|---|---|
+| `ULocalPlayer::GetProjectionData` (`0x3019240`, signature in `tools/re/signatures.json`) | inline hook, game thread | for the full pass (pass 0) in a stereo frame with the UI panel shown, replaces `ViewOrigin` (+0), `ViewRotationMatrix` (+0x10) and `ProjectionMatrix` (+0x50) of `FSceneViewProjectionData` with the panel's view |
+| `CalculateStereoViewOffset`, first eye | `stereo_device.cpp` | publishes the game camera, its FOV (`FMinimalViewInfo::FOV`, the float after the rotation it is passed), the eye base (rotation with the pitch dropped as the eyes use it, location), the head pose and units per metre |
+
+Facts (LIVE, start room of the latest save, Null backend):
+
+- The full pass is called about nine times per frame in gameplay (`uihook align`: 21942 calls in about 40 s), so
+  the game projects through it continuously, not only when a marker is on screen.
+- `PlayerController.ProjectWorldLocationToScreen` (called with `fp call`) returns exactly the game camera's
+  projection: camera FOV 60 degrees (`PlayerCameraManager.GetFOVAngle` = 60.0), pitch -10, on the 1280x720
+  viewport with the horizontal FOV kept (a point 10 m ahead, 3 m right, 1 m up: 972.554 / 249.149 px measured,
+  972.554 / 249.149 computed). The 50 x 29.4 degrees measured earlier with `uihook proj` came from another scene,
+  so the camera's FOV varies and a fixed panel size cannot match it.
+- In first person the eye base is the head, 4.35 m in front of the game camera and 0.5 m lower; in third person
+  (level boom) 0.74 m from it.
+
+The panel's view: origin = the head (the eye base composed with the head position as the eyes are),
+axes = the eye base's (world-locked panel) or the eye base composed with the head orientation (head-locked),
+projection = an off-centre reversed-Z frustum whose tangents are the panel's edges seen from the head,
+`(offset - size/2 - head) / (distance + head z)`. The panel's pose relative to the game camera is taken from the
+last stereo frame and applied to the game camera of the current call (its axes are read from the call's view
+rotation matrix). Built with the same `math::stereo_projection` as the eye views.
+
+Measured (`captures/hud/meas-*.json`): 30 world points around the head at 3 m and 8 m, 20 and 10 degrees left,
+right, up and down, projected with `ProjectWorldLocationToScreen` through the hook; the error is the angle
+between the head-to-object direction and the head-to-marker direction on the panel as shown. Degrees, mean / max:
+
+| camera mode | panel height, distance | `align 0` (before) | `align 1` |
+|---|---|---|---|
+| first person | 1.57 m, 3 m | 10.1 / 17.8 | 0.26 / 0.86 |
+| first person | 2.0 m, 3 m | 9.7 / 16.8 | 0.36 / 1.51 |
+| first person | 2.5 m, 3 m | 9.7 / 15.4 | 0.33 / 0.79 |
+| first person | 2.0 m, 2 m | 10.9 / 15.1 | 0.41 / 2.59 |
+| first person | 2.5 m, 2 m | | 0.52 / 1.12 |
+| third person (level boom) | 1.57 m, 3 m | 4.5 / 7.0 | |
+| third person (level boom) | 2.0 m, 3 m | 4.6 / 5.2 | 0.00 / 0.00 |
+| third person (level boom) | 2.5 m, 2 m | | 0.00 / 0.00 |
+| third person, battle flag forced (`fp combat 1`) | 2.0 m, 3 m | 4.6 / 5.2 | 0.00 / 0.00 |
+
+`align 2` (panel sized to the camera's 60 degrees): 9.7 / 16.8 (first person), 4.6 / 5.2 (third person), the
+same as `align 0` at 2.0 m, because the pitch and the camera's position dominate. In first person the
+residual of `align 1` grows within each series of 30 calls (Cloud's idle motion moves the head between the
+snapshot of the eye base and the calls; in third person, where the eye base does not follow the animation, it is
+zero), so it is measurement noise of up to a few centimetres at 3 m, not a fixed offset.
+The per-eye parallax of one panel for both eyes is computed in `docs/render.md` (below 1 degree beyond 1.5 m).
+
+Not checked: a real marker in a capture (the start room shows none and no battle was reached headless), the
+game's other users of the full pass in battles (screen-space target checks see the panel's view), cutscenes.
+Check: `ui align 0|1|2` live, `uihook align` (counters, camera FOV and pitch, panel extents, eye base),
+`fp call PlayerController PlayerController.ProjectWorldLocationToScreen <hex>` with `[dev] unsafe_commands = 1`.
+
 ## Trying the camera in the headset
 
 What to try first, in this order. Throughout: End (View/Back + left stick click) recenters

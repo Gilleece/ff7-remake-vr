@@ -74,6 +74,10 @@ struct RenderConfig {
     bool uiFollowHead = false;
     uint32_t uiLayerWidth = 1920;  // width of the layer image; 0 = the game's UI texture width
     bool uiMirror = true;          // draw the UI over the desktop window too (it is not in the eye images)
+    // [ui] align: 1 = the game places world-anchored elements (markers, names) for the
+    // panel as it is (any size); 2 = the panel takes the game camera's field of view
+    // (size ignored); 0 = neither (markers off by the difference). render.h, "UI LAYER".
+    int uiAlign = 1;
     // [picture] Colour adjustment of the eye images and the virtual screen (not the UI
     // layer); defaults change nothing. See xr::PictureAdjust and docs/render.md.
     xr::PictureAdjust picture{};
@@ -158,6 +162,9 @@ public:
     // Any thread: the picture adjustment and the UI panel's placement as set now.
     xr::PictureAdjust Picture();
     void UiPlacement(float* distance, float* size, bool* followHead);
+    // Any thread: the UI quad as last shown (render.h, UiPanel).
+    bool UiPanel(UiPanelPlacement* out);
+    void SetGameFov(float degrees) { gameFov_.store(degrees, std::memory_order_relaxed); }
 
 private:
     void PollPictureKeys();  // RT, once per Present
@@ -289,6 +296,10 @@ private:
     bool uiShownLast_ = false;  // RT: the last stereo frame showed the UI quad
     std::atomic<uint64_t> uiSubmitted_{0}, uiHeld_{0}, uiDropped_{0};
     std::string uiLastSource_;  // RT, for status
+    // The UI quad as last shown (under uiMutex_) and when (QPC), for [ui] align.
+    UiPanelPlacement uiPanel_{};
+    int64_t uiPanelQpc_ = 0;
+    std::atomic<float> gameFov_{0.0f};  // the game camera's horizontal FOV in degrees, 0 = unknown
 
     // Settings panel layer (RT): created at the first open, placed again when the panel opens.
     xr::LayerHandle menuLayer_ = 0;

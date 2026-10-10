@@ -349,6 +349,14 @@ All in `ULocalPlayer::GetProjectionData` (`0x3019240`), game thread, once per vi
    Device->GetStereoProjectionMatrix(pass)` and the view rect is taken from step 3. View
    extensions are not called in the stereo branch.
 
+Full pass (pass 0) in stereo (LIVE, 2026-10-10): `bNeedStereo` is false, so the view is the game camera's
+POV with `CalculateProjectionMatrixGivenView` on the window rect. `ProjectWorldLocationToScreen` (UMG markers,
+prompts) goes through it: a point projected by the game matched the camera projection (FOV from
+`PlayerCameraManager.GetFOVAngle`, horizontal FOV kept on 1280x720) to 0.001 px. It is called about nine times
+per gameplay frame. `CalculateStereoViewOffset`'s rotation argument is `&ViewInfo.Rotation`, so the float after
+it (`+0xC`) is `ViewInfo.FOV` (read as 60.0 = `GetFOVAngle`). The mod rewrites pass 0 for the UI panel
+(`[ui] align`, `src/engine/src/ui_align.cpp`).
+
 Units: centimetres; `WorldToMeters` defaults to 100 (INFERRED, value not read live).
 `FRotator` = `{float Pitch, Yaw, Roll}` in degrees; `FVector` = 3 floats; `FMatrix` = 4x4
 floats, row-vector convention. Projection is reversed-Z with an infinite far plane: the

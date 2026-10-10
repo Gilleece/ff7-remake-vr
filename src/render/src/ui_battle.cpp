@@ -17,7 +17,7 @@ namespace {
 
 constexpr float kBlendSeconds = 0.5f;
 
-std::atomic<float> g_battleSize{1.57f};
+std::atomic<float> g_battleSize{0.0f};
 std::atomic<bool> g_battle{false};
 std::atomic<float> g_blend{0.0f};       // 0 = [ui] size, 1 = battle_size (before easing)
 std::atomic<float> g_lastHeight{0.0f};  // the height last handed out
@@ -45,7 +45,7 @@ void SetBattleActive(bool active) {
 namespace ui_battle {
 
 void Start(const Config& c) {
-    g_battleSize = static_cast<float>(std::clamp(c.get_float("ui", "battle_size", 1.57), 0.0, 50.0));
+    g_battleSize = static_cast<float>(std::clamp(c.get_float("ui", "battle_size", 0.0), 0.0, 50.0));
     log::info("render: UI layer in battles {}", g_battleSize.load() > 0.0f ? std::format("{:.2f} m high", g_battleSize.load()) : "unchanged");
 }
 

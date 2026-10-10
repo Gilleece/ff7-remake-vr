@@ -771,6 +771,7 @@ void XrController::SubmitOne(const PresentInfo& p, const Waited& w, const Pendin
         if ((fresh && EnsureUiLayer(ui->src)) || (!fresh && hold && uiShownLast_ && uiLayer_)) {
             float dist, size, ox, oy;
             bool follow;
+            int align;
             {
                 std::lock_guard lk(uiMutex_);
                 dist = cfg_.uiDistance;
@@ -778,8 +779,17 @@ void XrController::SubmitOne(const PresentInfo& p, const Waited& w, const Pendin
                 ox = cfg_.uiOffsetX;
                 oy = cfg_.uiOffsetY;
                 follow = cfg_.uiFollowHead;
+                align = cfg_.uiAlign;
             }
             size = ui_battle::Height(size);  // [ui] battle_size while a battle is in progress
+            const float aspect = float(uiSrcW_) / float(std::max(1u, uiSrcH_));
+            if (const float fov = gameFov_.load(std::memory_order_relaxed); align == 2 && fov > 5.0f && fov < 170.0f)
+                size = 2.0f * dist * std::tan(fov * 0.5f * 3.14159265f / 180.0f) / aspect;  // the game camera's angle
+            {
+                std::lock_guard lk(uiMutex_);
+                uiPanel_ = UiPanelPlacement{dist, size * aspect, size, ox, oy, follow, align};
+                uiPanelQpc_ = QpcNow();
+            }
             uq.layer = uiLayer_;
             if (fresh) {
                 uq.texture = ui->texture.Get();
@@ -791,7 +801,7 @@ void XrController::SubmitOne(const PresentInfo& p, const Waited& w, const Pendin
             uq.space = follow ? xr::LayerSpace::Head : xr::LayerSpace::World;
             uq.pose.position = xr::Vec3{ox, oy, -dist};
             uq.height = size;
-            uq.width = size * float(uiSrcW_) / float(std::max(1u, uiSrcH_));
+            uq.width = size * aspect;
             uq.alphaBlend = true;
             quads[quadCount++] = uq;
             uiShown = true;
@@ -1165,7 +1175,7 @@ std::string XrController::UiCommand(const std::string& args) {
         return ec == std::errc();
     };
     const char* usage =
-        "err usage: ui status | on | off | dump <png path> | distance <m> | size <m> | battle_size <m> | offset <x m> <y m> | follow <0|1> | mirror <0|1>";
+        "err usage: ui status | on | off | dump <png path> | distance <m> | size <m> | battle_size <m> | offset <x m> <y m> | follow <0|1> | mirror <0|1> | align <0|1|2>";
     if (verb.empty() || verb == "status") {
         std::lock_guard lk(uiMutex_);
         return std::format("ok ui layer {} ({}), {:.2f} m high at {:.2f} m, offset {:.2f} {:.2f}, {}, on the window {}; image {}x{} from {}x{}; "
@@ -1173,7 +1183,9 @@ std::string XrController::UiCommand(const std::string& args) {
                            uiOn_.load() ? "on" : "off", UiLayerWanted() ? "active" : "inactive", cfg_.uiSize, cfg_.uiDistance, cfg_.uiOffsetX,
                            cfg_.uiOffsetY, cfg_.uiFollowHead ? "head-locked" : "world-locked", uiMirror_.load() ? "too" : "no", uiW_, uiH_,
                            uiSrcW_, uiSrcH_, uiSubmitted_.load(), uiHeld_.load(), uiDropped_.load()) +
-               "; " + ui_battle::Text();
+               "; " + ui_battle::Text() +
+               std::format("; align {} (game camera FOV {:.1f} deg), shown {:.2f} x {:.2f} m at {:.2f} m", cfg_.uiAlign, gameFov_.load(),
+                           uiPanel_.width, uiPanel_.height, uiPanel_.distance);
     }
     if (verb == "battle_size") return ui_battle::SetSize(rest) ? "ok ui " + ui_battle::Text() : std::string(usage);
     if (verb == "on" || verb == "off") {
@@ -1209,13 +1221,15 @@ std::string XrController::UiCommand(const std::string& args) {
         cfg_.uiOffsetY = std::clamp(v2, -20.0f, 20.0f);
     } else if (verb == "follow" && number(rest, &v)) {
         cfg_.uiFollowHead = v != 0.0f;
+    } else if (verb == "align" && number(rest, &v)) {
+        cfg_.uiAlign = std::clamp(static_cast<int>(v), 0, 2);
     } else if (verb == "mirror" && number(rest, &v)) {
         uiMirror_ = v != 0.0f;
     } else {
         return usage;
     }
-    log::info("render: UI layer {:.2f} m high at {:.2f} m, offset {:.2f} {:.2f}, {}", cfg_.uiSize, cfg_.uiDistance, cfg_.uiOffsetX,
-              cfg_.uiOffsetY, cfg_.uiFollowHead ? "head-locked" : "world-locked");
+    log::info("render: UI layer {:.2f} m high at {:.2f} m, offset {:.2f} {:.2f}, {}, align {}", cfg_.uiSize, cfg_.uiDistance, cfg_.uiOffsetX,
+              cfg_.uiOffsetY, cfg_.uiFollowHead ? "head-locked" : "world-locked", cfg_.uiAlign);
     return "ok";
 }
 
@@ -1248,6 +1262,14 @@ void XrController::UiPlacement(float* distance, float* size, bool* followHead) {
     if (distance) *distance = cfg_.uiDistance;
     if (size) *size = cfg_.uiSize;
     if (followHead) *followHead = cfg_.uiFollowHead;
+}
+
+bool XrController::UiPanel(UiPanelPlacement* out) {
+    std::lock_guard lk(uiMutex_);
+    if (!uiPanelQpc_ || QpcToMs(QpcNow() - uiPanelQpc_) > 500.0 || !UiLayerWanted()) return false;
+    *out = uiPanel_;
+    out->align = cfg_.uiAlign;  // a live change applies at once
+    return true;
 }
 
 std::string XrController::PictureCommand(const std::string& args) {

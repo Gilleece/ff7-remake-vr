@@ -392,10 +392,10 @@ session it is `ff7vr.log` in the game's `End\Binaries\Win64` folder).
   some players find uncomfortable: `[comfort] snap_turn = 45` turns in steps instead
   (pad only), and `[comfort] vignette = 0.6` darkens the edges of the view while you
   move or turn with the sticks.
-- **Markers over enemies and objects are slightly off** on the default HUD panel
-  (3 to 6 degrees towards the edges). `[ui] size = 1.57` lines them up; the larger
-  default is easier to read. In battles the panel takes `[ui] battle_size` (1.57 by
-  default) by itself, so the markers over enemies line up there; `0` keeps `size`.
+- **Markers over enemies and objects** sit over their objects at any HUD size
+  (`[ui] align = 1`). Objects nearer than about 1.5 m can show them up to a degree
+  apart, as the HUD panel is one flat image at `[ui] distance`. `[ui] align = 0`
+  shows the old behaviour (markers off by several degrees) if something looks wrong.
 - **The game window becomes 1280x720 while 3D runs** if the game was in a fullscreen
   mode, and stays that way until the game exits (switching 3D off with Insert does not
   change it back). The game does not remember it: your display setting is not changed,

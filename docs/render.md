@@ -168,6 +168,8 @@ All keys are optional. `ff7vr.ini` sits next to the DLL.
 | `[ui] follow_head` | `0` | `1`: the UI follows the head (UEVR's `UI_FollowView`); `0`: it stays where recenter put it |
 | `[ui] layer_width` | `1920` | width of the quad's image in pixels; a larger game UI texture is scaled down when copied in. `0` = the game's UI texture width |
 | `[ui] mirror` | `1` | also draw the UI over the desktop window in stereo (the window shows an eye image, which no longer has the UI) |
+| `[ui] align` | `1` | world-anchored elements (markers, names, prompts) over their objects at any panel size; `2` = the panel takes the game camera's angle; `0` = neither (see [World-anchored elements](#world-anchored-elements)) |
+| `[ui] battle_size` | `0` | panel height in metres during a battle, `0` = unchanged |
 | `[ui] once_per_frame` | `1` | engine side: draw the UI for the first eye only (`0`: the game draws it for both eyes, as without the mod) |
 | `[foveation] ...` | on, `quality` | foveated rendering in stereo; keys in [Foveated rendering](#foveated-rendering) |
 | `[picture] brightness`, `contrast`, `saturation`, `gamma`, `black_level` | `-0.25`, `1.5`, `1.2`, `1`, `0` | colour adjustment of the eye images and the virtual screen, not the UI layer; the defaults make the picture a little darker, with more contrast and colour, and `picture reset` (`0`, `1`, `1`, `1`, `0`) changes nothing (see [Picture controls](#picture-controls)) |
@@ -1244,51 +1246,48 @@ implemented.
 
 ### World-anchored elements
 
-Target markers, names, damage numbers and the objective marker are placed by
-the game from the game camera, not from the eye views. In the gameplay scene
-tested its projection is 50.0 x 29.4 degrees (`uihook proj` in screen mode),
-while the default quad covers 61.3 x 36.9. On the quad an element therefore
-appears further from the centre than its object, for the eye midpoint and a
-level game camera:
+Target markers, enemy names, damage numbers, prompts and the objective marker are
+placed by the game on the game thread with `ULocalPlayer::GetProjectionData` for the
+full (non-stereo) pass: the game camera's location, rotation (with its pitch) and
+field of view on the window's rectangle (`docs/re/engine.md` section 5; verified
+with `PlayerController.ProjectWorldLocationToScreen`, which returned the camera
+projection to 0.001 px). The eyes see from elsewhere: they drop the camera's pitch,
+sit at the camera mode's eye base (the head in first person, 4.4 m in front of the
+game camera in the start room) and look through the panel. Without a correction the
+elements are therefore off their objects by about 10 degrees in first person and 4
+to 5 degrees in third person, whatever the panel size (table in
+`docs/engine-module.md`, "UI marker alignment").
 
-| Position on the UI (centre to edge) | 25 % | 50 % | 75 % | edge |
-|---|---|---|---|---|
-| object direction, horizontal | 6.6 deg | 13.1 deg | 19.3 deg | 25.0 deg |
-| element on the default quad | 8.4 deg | 16.5 deg | 24.0 deg | 30.7 deg |
-| offset, horizontal / vertical | 1.8 / 1.0 deg | 3.4 / 2.0 deg | 4.7 / 2.9 deg | 5.7 / 3.7 deg |
+`[ui] align = 1` (default) corrects this in the engine: the full pass's view becomes
+the panel's (origin at the head, the panel's axes, an off-centre frustum on the
+panel's edges), so the game places every element where the line from the head to its
+object crosses the panel, at any `size`, `distance`, offset and with `follow_head`.
+Measured with the game's own projection function: 0.00 degrees in third person,
+0.2 to 0.8 degrees on average in first person (the residual is the head's idle
+motion between the measurement's samples). `[ui] align = 2` instead sizes the panel
+to the game camera's field of view (60 degrees wide in the start room; `size` is
+ignored), which corrects the angle only and leaves the pitch and the camera's
+position: it did not help in either camera mode. `0` = neither. Live: `ui align
+<0|1|2>`; `ui status` shows it, `uihook align` the engine side.
 
-The cheap correction is to give the quad the camera's angle: `[ui] size =
-1.57` at `distance = 3` (2.80 x 1.57 m, 50 x 29.4 degrees). Then an element
-lines up with its object's direction exactly, with three remaining effects:
+What remains with `align = 1`:
 
-- the game camera's pitch: the eye cameras drop it (`[stereo]
-  decoupled_pitch`), the markers do not, so markers shift vertically by about
-  that pitch (not measured; a fixed correction would be to tilt the quad by
-  the camera pitch every frame, which needs the camera rotation from the
-  engine module);
-- parallax: the quad is at 3 m, so each eye sees an element shifted against
-  its object by half the IPD times `1/Z - 1/3 m`: 0.6 deg for an object at
-  1.5 m, 0.2 deg at 5 m, 0.4 deg at 10 m;
-- head position: leaning moves the eyes, not the game camera.
+- parallax: one image for both eyes on a quad at `distance`, so each eye sees an
+  element shifted against its object by half the IPD times `1/Z - 1/distance`.
+  Computed for a 64 mm IPD (degrees, per eye):
 
-The camera's FOV is a game setting and changes with camera modes (INFERRED,
-only one scene measured), so the matching size is not automatic yet; the
-default stays the larger, easier to read UEVR size.
+  | object at | 1 m | 1.5 m | 3 m | 5 m | 10 m | far |
+  |---|---|---|---|---|---|---|
+  | panel at 3 m | 1.20 | 0.60 | 0.00 | 0.24 | 0.42 | 0.60 |
+  | panel at 2 m | 0.90 | 0.30 | 0.30 | 0.54 | 0.72 | 0.90 |
 
-### Size in battles
-
-`[ui] battle_size` (metres, default `1.57`, `0` = unchanged): while a battle is in
-progress the panel's height blends from `[ui] size` to `battle_size` over 0.5 s
-(eased) and back over 0.5 s after the battle, with the same centre, so the
-markers over enemies line up with them where it matters and the larger panel
-stays for exploring. The signal is the one the automatic third person uses (the
-engine's battle flag, `render::SetBattleActive`, set every game frame from
-`player.cpp`; `fp combat 1|0|auto` overrides it for tests), so it needs first
-person available and `[first_person] auto_combat` on. Live: `ui battle_size <m>`;
-`ui status` ends with the battle size, the flag, the blend and the height in use.
-The log records each battle start and end. Checked on the Null backend with
-`fp combat 1` / `fp combat 0`: `ui status` read `battle 1, blend 1.00, height now
-1.57 m` and, after the battle, `battle 0, blend 0.00, height now 2.00 m`.
+  Below a degree beyond 1.5 m, so one panel serves both eyes;
+- the eye base and head pose are those of the last stereo frame (the UI is laid out
+  before the frame's views are built), applied to the current game camera, so the
+  game camera's own motion is not late; head motion is one frame late;
+- other game code that projects through the full pass (screen-space checks such as
+  whether a target is on screen) sees the panel's view as well. Nothing changed in the
+  start room; not checked in battles.
 
 ### Measured cost
 
@@ -1936,8 +1935,8 @@ start the game normally. Check, in this order:
     complete to its corners, and is not doubled into the 3D image; Space opens
     the command menu on it. Check that it is sharp and comfortable to read; if
     it is too large or too small adjust `[ui] size` / `distance` (or `ui size
-    <m>` live), and compare markers over enemies with `[ui] size = 1.57`
-    ([World-anchored elements](#world-anchored-elements)).
+    <m>` live). Markers over enemies and objects should sit on them at any size
+    (`ui align 0` shows the old offset; [World-anchored elements](#world-anchored-elements)).
 12. **Foveated rendering** (on by default, `quality`): look straight ahead and
     let the eyes wander to the edges of the view. The image should look as
     sharp as before up to well beyond comfortable eye movement; bright edges
