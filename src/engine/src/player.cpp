@@ -1,6 +1,7 @@
 #include "player.h"
 
 #include "audio_listener.h"
+#include "diag.h"
 #include "controls.h"
 
 #include "ue_math.h"
@@ -1079,6 +1080,8 @@ void tick(bool stereo, float delta_seconds) {
     if (hide) hide_meshes(g.pawn, hide_mode);
     else if (!g.hidden.empty() || !g.hidden_bones.empty() || !g.hidden_pass.empty() || g.hidden_pawn) restore_meshes();
     audio_listener::player_frame({g.pc, g.pawn, g.view_target, g.in_battle, stereo, stereo && g.follow_camera && g.blend > 0.5f});
+    diag::player_frame({g.pc, g.pawn, g.view_target, g.battle_raw, g.in_battle, g.first_person, stereo && g.follow_camera && g.blend > 0.5f,
+                        g.follow_camera, stereo});
 
     std::lock_guard lock(g_status_mutex);
     g_status_line = std::format(

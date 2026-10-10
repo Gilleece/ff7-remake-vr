@@ -1149,6 +1149,41 @@ component on each party member, and the conversation menu widgets
 a battle or conversation signal; a state inside one of them (or the camera manager's mode)
 has to be compared in and out of a battle, which has not been reached yet.
 
+### Battle HUD, interaction prompt and battle state candidates (LIVE out of battle, 2026-10-10)
+
+Read with `[first_person] battle_log` / `prompt_log` (`src/engine/src/diag.cpp`) in the
+start area of the test save, out of battle (Null backend). Not yet compared with a battle.
+
+- About 182,000 objects and 3,400 classes. Widget blueprint classes live out of battle
+  include the battle HUD: `ATBGauge_C` (x6), `Command_C`, `Command_Base_C`,
+  `Command_Default_C`, `Command_BattleInEffect_C`, `EnemyStatus_C`, `BattleTarget_New_C`,
+  `LockOnMarker_C`, and field widgets `FieldAction_Command_C`, `Field_BtnGuide_C`,
+  `FieldTarget_01_C`, `FieldTargetSearch_02_C`, `FieldQuestIcon_C`, `BasicGuide_C`,
+  `TalkMenu_Center_C`. Each widget blueprint class also holds a template object named
+  `WidgetArchetype` (not shown on screen; skipped).
+- Out of battle, `UWidget::Visibility` (ESlateVisibility: 0 Visible, 1 Collapsed, 2 Hidden,
+  3 HitTestInvisible, 4 SelfHitTestInvisible): `ATBGauge` 2, `Command_Default` 2,
+  `Command_Base` 2, `BattleInEffect` 1, `EnemyStatus_C` 1; `Command_C` is 4 with
+  `IsVisible()` 1. `IsInViewport()` is 0 for all of them (they are children of a larger
+  HUD widget). Candidates for the battle signal: these enums in a battle.
+- `FieldAction_Command_C` (two instances) and `Icon_Btn_00_C`: Visibility 4, `IsVisible()` 0,
+  render translation (0, 0) in the start area (no prompt shown there).
+- Reflection offsets used (UE 4.18, read from the class's own properties at run time):
+  `Widget.Visibility` +183 (0xB7), `Widget.RenderTransform` +144 (0x90), `Widget.Slot` +40
+  (0x28); `UBoolProperty` ByteOffset +0x71 and FieldMask +0x73 (inferred from the 4.18 layout;
+  the values read as 0/1 as expected).
+- Non-widget objects with Battle in the class name present out of battle:
+  `EndBattleAreaActor` (x20; `BattleSceneID` NameProperty, `btsc_plat4` for the first),
+  `EndBattleSummonTargetPoint`, `EndBattleAIBindActionNotify`, `EndBattleNotifyState`,
+  `EndBTDecorator_SetBattleParam`, plus dozens of `EndAnimNotify*Battle*` classes and the
+  `EndDataObjectBattle*` tables. No battle manager object was seen out of battle.
+- The pawn (`PC0000_00_Cloud_Standard_C`) has `BattleAIController` (ObjectProperty,
+  `PC0000_00_Cloud_Standard_AI_C`), `BattleTalk_Cloud`, `BattleTalkCharacterComponent`.
+  The controller has `BattleTalkOnEndBattle`, `PlayerTrigger`, `EndCapsuleOverlapComponent`.
+  No property naming a lock-on target was found on either class chain.
+- Camera manager `EndPlayerCameraManager`: `MainCameraActor` = `EndCameraActor`; the view
+  target is `EndCameraActor` (class `CameraActor`) in normal play.
+
 ## 12. Temporal anti-aliasing in stereo (LIVE, GPU trace)
 
 Recorded with `gpu trace` (pool names on) in the first room, eyes 3072x3264 (target

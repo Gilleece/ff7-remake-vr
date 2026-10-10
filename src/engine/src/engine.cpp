@@ -5,6 +5,7 @@
 #include "fixes.h"
 #include "gpu_trace.h"
 #include "audio_listener.h"
+#include "diag.h"
 #include "graphics.h"
 #include "menu_items.h"
 #include "late_update.h"
@@ -303,6 +304,8 @@ bool start(const StartupContext& ctx) {
         movie::set_cutscene_times(static_cast<int>(cfg.get_int("stereo", "cutscene_screen_delay_ms", 500)),
                                   static_cast<int>(cfg.get_int("stereo", "cutscene_screen_hold_ms", 300)));
         audio_listener::set_enabled(cfg.get_bool("first_person", "audio_listener", true));
+        diag::set_battle_log(cfg.get_bool("first_person", "battle_log", false));
+        diag::set_prompt_log(cfg.get_bool("first_person", "prompt_log", false));
         g_opt.bloom_fix = cfg.get_bool("stereo", "bloom_fix", true);
         g_opt.ao_fix = cfg.get_bool("stereo", "ao_fix", true);
         g_opt.distortion_fix = cfg.get_bool("stereo", "distortion_fix", true);
@@ -366,11 +369,13 @@ bool start(const StartupContext& ctx) {
             handle_command("cvar " + std::string(args), reply);
             return reply;
         });
-        dev_commands::add("fp", "fp status|toggle|first|third|combat <0|1|auto>|offset|eye|hide|boom|pivot|bones|funcs|call (fp help): camera modes",
+        dev_commands::add("fp", "fp status|toggle|first|third|combat <0|1|auto>|offset|eye|hide|boom|pivot|bones|funcs|call|battlelog|promptlog|prompt status (fp help): camera modes",
                           [](std::string_view args) {
                               std::string reply = player::command(std::string(args));
                               if (args.empty() || args.starts_with("status")) reply += " | " + audio_listener::status();
                               if (args.starts_with("audio")) reply = audio_listener::command(std::string(args.substr(5)));
+                              if (args.starts_with("battlelog") || args.starts_with("promptlog") || args.starts_with("prompt"))
+                                  reply = diag::command(std::string(args));
                               return reply;
                           });
         dev_commands::add("controls", "controls status | pad <hex> | psfilter <hex> | ps <hex>|off | source | move status|camera|head | recenter | stereo | nearer | farther: the player's keys, gamepad combinations, movement direction",

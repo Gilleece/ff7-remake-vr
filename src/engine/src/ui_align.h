@@ -38,4 +38,20 @@ void publish(const ue::FRotator& game_rot, const ue::FVector& game_loc, float ga
 // `uihook align`: state, counters and the last placement.
 std::string status();
 
+// The last published camera, eye base and head pose, with the alignment counters (for
+// diagnostics; any thread).
+struct Snapshot {
+    bool valid = false;
+    ue::FRotator game_rot{};
+    ue::FVector game_loc{};
+    ue::FRotator base_level{};
+    ue::FVector base_loc{};
+    HostPose head{};
+    double upm = 100.0;
+    bool positional = true;
+    int align_mode = -1;  // [ui] align of the last aligned projection (-1: none yet)
+    std::uint64_t full = 0, aligned = 0, skipped = 0;
+};
+Snapshot snapshot();
+
 }  // namespace ff7vr::engine::ui_align

@@ -216,6 +216,24 @@ void publish(const FRotator& game_rot, const FVector& game_loc, float game_fov_d
 #endif
 }
 
+Snapshot snapshot() {
+    std::lock_guard lk(g_mutex);
+    Snapshot r;
+    r.valid = g_base.valid;
+    r.game_rot = g_base.game_rot;
+    r.game_loc = g_base.game_loc;
+    r.base_level = g_base.base_level;
+    r.base_loc = g_base.base_loc;
+    r.head = g_base.head;
+    r.upm = g_base.upm;
+    r.positional = g_base.positional;
+    r.align_mode = g_last.mode;
+    r.full = g_full.load();
+    r.aligned = g_aligned.load();
+    r.skipped = g_skipped.load();
+    return r;
+}
+
 std::string status() {
     std::lock_guard lk(g_mutex);
     const double k = 180.0 / 3.14159265358979323846;
