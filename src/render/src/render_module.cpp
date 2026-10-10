@@ -4,6 +4,8 @@
 #include "d3d11_hooks.h"
 #include "foveation.h"
 #include "frame_budget.h"
+
+#include "ff7vr/core/live_settings.h"
 #include "menu.h"
 #include "ui_battle.h"
 #include "xr_controller.h"
@@ -249,6 +251,7 @@ bool start(const StartupContext& ctx) {
     foveation::Configure(*ctx.config);
     comfort::Start(*ctx.config);
     frame_budget::Configure(*ctx.config);
+    live_settings::set_status("frame_budget", [] { return ff7vr::render::frame_budget_summary(); });
     ui_battle::Start(*ctx.config);
     menu::Start(*ctx.config, ctx.config->source().empty() ? ctx.dll_dir / L"ff7vr.ini" : ctx.config->source());
     HookCallbacks cb;
