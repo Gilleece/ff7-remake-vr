@@ -9,6 +9,7 @@
 
 #include "ff7vr/core/config.h"
 #include "ff7vr/core/dev_commands.h"
+#include "ff7vr/core/headset_profile.h"
 #include "ff7vr/core/ini_file.h"
 #include "ff7vr/core/live_settings.h"
 #include "ff7vr/core/log.h"
@@ -559,27 +560,48 @@ std::string Save() {
     Config ini;
     ini.load(g_iniPath);
     std::vector<ini_file::Update> updates;
+    std::vector<std::pair<std::string, std::string>> updatedKeys;  // section, key of each update (before redirection)
+    // A key the active [headset:...] section sets is saved there, so that the base value (the
+    // other headsets') stays as it is.
+    const std::string headset = headset_profile::active_section();
+    std::string headsetHeader = "headset:" + headset;
+    for (const auto& h : ini.headset_sections())
+        if (!headset.empty() && Lower(h.match) == Lower(headset)) headsetHeader = h.header;
+    auto target = [&](const std::string& section, const std::string& key, std::optional<std::string>* cur) {
+        if (!headset.empty())
+            if (auto hv = ini.headset_value(headset, section, key)) {
+                *cur = hv;
+                return std::pair<std::string, std::string>(headsetHeader, section + "." + key);
+            }
+        *cur = ini.get(section, key);
+        return std::pair<std::string, std::string>(section, key);
+    };
+    auto push = [&](const std::string& section, const std::string& key, const std::string& value, bool commentOut,
+                    const std::pair<std::string, std::string>& where) {
+        ini_file::Update u{where.first, where.second, value};
+        u.comment_out = commentOut;
+        updates.push_back(u);
+        updatedKeys.emplace_back(section, key);
+    };
     auto consider = [&](const std::string& snapId, const std::string& section, const std::string& key, const std::string& value, bool text) {
         if (value.empty() && !text) return;
-        const auto cur = ini.get(section, key);
+        std::optional<std::string> cur;
+        const auto where = target(section, key, &cur);
         // A key in the file: written when the value differs. A key the file does not have: only
         // when the value is not the one in effect when the panel first opened (the default).
         const bool differs = cur ? !SameValue(*cur, value) : !SameValue(g_startValues[snapId], value);
-        if (differs) updates.push_back({section, key, value});
+        if (differs) push(section, key, value, false, where);
     };
     for (const Setting& s : g_items) {
         if (s.section.empty() || s.kind == Kind::Action || s.read_only) continue;
         if (s.optional && s.get_is_set) {
-            const auto cur = ini.get(s.section, s.key);
+            std::optional<std::string> cur;
+            const auto where = target(s.section, s.key, &cur);
             const std::string v = live_settings::ini_value(s);
             if (!s.get_is_set()) {
-                if (cur) {
-                    ini_file::Update u{s.section, s.key, *cur};  // the line keeps its text, behind a ';'
-                    u.comment_out = true;
-                    updates.push_back(u);
-                }
+                if (cur) push(s.section, s.key, *cur, true, where);  // the line keeps its text, behind a ';'
             } else if (!cur || !SameValue(*cur, v)) {
-                updates.push_back({s.section, s.key, v});
+                push(s.section, s.key, v, false, where);
             }
             continue;
         }
@@ -606,9 +628,9 @@ std::string Save() {
         g_startValues[s.id] = live_settings::ini_value(s);
     }
     bool restartNeeded = false;
-    for (const ini_file::Update& u : updates)
+    for (const auto& [section, key] : updatedKeys)
         for (const Setting& s : g_items)
-            if (s.restart && Lower(s.section) == Lower(u.section) && Lower(s.key) == Lower(u.key)) restartNeeded = true;
+            if (s.restart && Lower(s.section) == Lower(section) && Lower(s.key) == Lower(key)) restartNeeded = true;
     return std::format("Saved {} setting{} to ff7vr.ini{}", updates.size(), updates.size() == 1 ? "" : "s",
                        restartNeeded ? " (some take effect at the next start)" : "");
 }
@@ -1011,6 +1033,13 @@ void RegisterSettings(const Config& cfg) {
          [](const std::string& v) { return OkOrError(comfort::Command("radius " + v)); });
     Held(Number("comfort.vignette_softness", "Vignette fade width", kComfort + 22, "comfort", "vignette_softness", 0.05f, 1.0f, 0.05f, 2),
          [](const std::string& v) { return OkOrError(comfort::Command("softness " + v)); });
+    live_settings::add(Number("comfort.cut_fade_ms", "Fade on camera cuts (ms)", kComfort + 30, "comfort", "cut_fade_ms", 0.0f, 1000.0f, 50.0f, 0,
+                              [] { return float(comfort::CutFadeMs()); },
+                              [](float v) { return OkOrError(comfort::Command(std::format("cutfade {:.0f}", v))); }));
+    Held(Number("comfort.cut_fade_deg", "Camera cut: turn above (deg)", kComfort + 31, "comfort", "cut_fade_deg", 5.0f, 90.0f, 5.0f, 0),
+         [](const std::string& v) { return OkOrError(comfort::Command("cutdeg " + v)); });
+    Held(Number("comfort.cut_fade_m", "Camera cut: move above (m)", kComfort + 32, "comfort", "cut_fade_m", 0.25f, 5.0f, 0.25f, 2),
+         [](const std::string& v) { return OkOrError(comfort::Command("cutm " + v)); });
     if (!Registered("comfort", "snap_left_key")) {
         Setting l = Number("comfort.snap_left_key", "Snap left key", kComfort + 13, "comfort", "snap_left_key", 0, 254, 1, 0);
         l.key_code = true;

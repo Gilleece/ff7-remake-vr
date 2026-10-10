@@ -20,6 +20,9 @@
 #include "ff7vr/core/log.h"
 #include "ff7vr/core/module.h"
 #include "ff7vr/engine/cvars.h"
+#if FF7VR_ENGINE_WITH_RENDER
+#include "ff7vr/render/render.h"
+#endif
 
 #include <d3d11.h>
 #include <intrin.h>
@@ -406,6 +409,16 @@ void CalculateStereoViewOffset(void*, EStereoscopicPass pass, FRotator* rotation
     g.units_per_metre = in.units_per_metre;
 
     if (e == 0) {
+#if FF7VR_ENGINE_WITH_RENDER
+        // The fade on the game's camera cuts: the game camera before the camera modes, in metres.
+        {
+            const double upm = world_to_meters > 0 ? static_cast<double>(world_to_meters) : 100.0;
+            const float rot[2] = {game_rot.Pitch, game_rot.Yaw};
+            const float loc[3] = {static_cast<float>(game_loc.X / upm), static_cast<float>(game_loc.Y / upm),
+                                  static_cast<float>(game_loc.Z / upm)};
+            render::NoteGameCamera(g.ticks, rot, loc, player::scripted_camera());
+        }
+#endif
         // The head's direction in the world, for head-directed movement: the eye base
         // composed with the head pose the same way as the eyes.
         ue::FRotator base_level = base_rot;

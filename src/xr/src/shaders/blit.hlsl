@@ -22,7 +22,8 @@ cbuffer BlitConstants : register(b0)
     uint3  pad2;
     // Comfort vignette (Vignette in xr.h), eye images only: vig0 = strength (0: none),
     // radius and softness in half-heights of the destination, destination aspect (w / h);
-    // vig1.xy = the eye's view axis in destination UV.
+    // vig1.xy = the eye's view axis in destination UV, vig1.z = uniform darkening of the whole
+    // image (0..1; the fade to black on camera cuts).
     float4 vig0;
     float4 vig1;
     // Unsharp mask on luminance, eye images only: sharp.x = amount (0: none), sharp.yz =
@@ -115,6 +116,8 @@ float4 PSMain(VSOut i) : SV_Target
         float2 d = (i.uv - vig1.xy) * float2(vig0.w, 1.0) * 2.0;
         c.rgb *= 1.0 - vig0.x * smoothstep(vig0.y, vig0.y + vig0.z, length(d));
     }
+    if (alphaMode == 0)
+        c.rgb *= 1.0 - vig1.z;
     if (alphaMode == 0)
         c.a = 1.0;
     else if (alphaMode == 2)

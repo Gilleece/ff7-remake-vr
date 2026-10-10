@@ -81,6 +81,8 @@ struct BlitSource {
     // softness (Vignette in xr.h) and the centre in UV of the destination.
     float vignette[3] = {0.0f, 0.0f, 0.0f};
     float vignetteCentre[2] = {0.5f, 0.5f};
+    // The whole image darkened uniformly, 0..1 (Vignette::black; 0: none).
+    float black = 0.0f;
     // Unsharp mask on luminance for an opaque transfer (0: none).
     float sharpen = 0.0f;
 };

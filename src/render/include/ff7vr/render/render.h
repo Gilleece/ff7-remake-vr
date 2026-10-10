@@ -225,6 +225,14 @@ void SetStickSource(StickSource source);
 // a second counts as sticks at rest (the pad was unplugged or is no longer polled).
 void NotePlayStationSticks(float left, float right);
 
+// Fade to black on the game's camera cuts ([comfort] cut_fade_ms; docs/render.md "Fade on camera
+// cuts"). Game thread, once per stereo frame: the game camera of this frame before the camera
+// modes change it (rotation: pitch, yaw in degrees; location in metres), `frame` counting
+// stereo frames (a gap breaks the comparison), and whether a scripted camera shows (not a
+// follow mode and not a blend between modes). A jump above [comfort] cut_fade_deg or
+// cut_fade_m between two consecutive scripted frames fades the eye images to black and back.
+void NoteGameCamera(uint64_t frame, const float rotation[2], const float location_m[3], bool scripted);
+
 // ============================ FRAME BUDGET =================================
 // Every timing window in stereo gameplay the render module compares the game's frame
 // interval with the headset's refresh period and, when frames take longer for two windows

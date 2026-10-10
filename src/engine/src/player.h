@@ -73,6 +73,10 @@ void tick(bool stereo, float delta_seconds);
 // something; `force_decouple` is set when the mode needs a level view. The level boom
 // applies only with `decoupled` (decoupled pitch); first person always levels the view.
 bool adjust_camera(ue::FRotator& rotation, ue::FVector& location, bool decoupled, bool& force_decouple);
+// Game thread, after adjust_camera for this frame: the game's camera is shown as it is (no
+// follow mode applies: a cutscene, a conversation's authored shot, a scripted move) and no
+// move between camera modes is running. Used by the fade on camera cuts ([comfort] cut_fade_ms).
+bool scripted_camera();
 
 // Manual toggle (any thread; applied at the next frame).
 void request_toggle();

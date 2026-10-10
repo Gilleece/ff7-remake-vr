@@ -27,5 +27,7 @@ std::string Command(const std::string& args);
 float Sharpen();
 // [comfort] vignette as set now (0..1).
 float VignetteStrength();
+// [comfort] cut_fade_ms as set now (0 = off).
+int CutFadeMs();
 
 }  // namespace ff7vr::render::comfort

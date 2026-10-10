@@ -184,12 +184,14 @@ struct BlitConstants {
     uint32_t picture;  // 1: apply the picture adjustment (opaque output only)
     uint32_t pad2[3];
     float vig0[4];  // comfort vignette: strength, radius, softness (half-heights), destination aspect (w / h)
-    float vig1[4];  // centre in destination UV
+    float vig1[4];  // centre in destination UV, then the uniform darkening (0..1)
     float sharp[4];  // unsharp mask: amount (0 = none), source texel size u, v
 };
 static_assert(sizeof(BlitConstants) == 128, "must match BlitConstants in blit.hlsl");
 
-static bool WantsVignette(const BlitSource& src) { return src.alpha == BlitAlpha::Opaque && src.vignette[0] > 0.0f; }
+static bool WantsVignette(const BlitSource& src) {
+    return src.alpha == BlitAlpha::Opaque && (src.vignette[0] > 0.0f || src.black > 0.0f);
+}
 
 static bool WantsPicture(const BlitSource& src) {
     return src.picture && src.alpha == BlitAlpha::Opaque && !src.picture->IsIdentity();
@@ -535,6 +537,7 @@ bool Blitter::Transfer(ID3D11DeviceContext* ctx, const BlitSource& src, const Re
         c.vig0[3] = float(w) / float(std::max(1u, h));
         c.vig1[0] = src.vignetteCentre[0];
         c.vig1[1] = src.vignetteCentre[1];
+        c.vig1[2] = std::clamp(src.black, 0.0f, 1.0f);
     }
     if (sharpen) {
         c.sharp[0] = std::min(src.sharpen, 1.0f);

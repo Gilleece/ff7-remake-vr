@@ -360,12 +360,15 @@ struct PictureAdjust {
 // motion. Applied in the eye blit after the picture adjustment, in linear light:
 // rgb *= 1 - strength * smoothstep(radius, radius + softness, d), with d the distance
 // from the eye's centre in half-heights of the image. strength 0 = none (no change).
+// `black` darkens the whole image uniformly on top (rgb *= 1 - black): the fade to black
+// on the game's camera cuts ([comfort] cut_fade_ms).
 struct Vignette {
     float strength = 0.0f;  // 0..1
     float radius = 0.55f;   // half-heights of the image
     float softness = 0.25f; // half-heights
     float centre[2][2] = {{0.5f, 0.5f}, {0.5f, 0.5f}};  // per eye, UV of the view axis in the image
-    bool IsNone() const { return strength <= 0.0f; }
+    float black = 0.0f;     // 0..1, the whole image (0 = none)
+    bool IsNone() const { return strength <= 0.0f && black <= 0.0f; }
 };
 
 // Scene depth for the projection layer (XR_KHR_composition_layer_depth). Values

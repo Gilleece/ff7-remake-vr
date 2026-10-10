@@ -1272,6 +1272,8 @@ bool adjust_camera(FRotator& rotation, FVector& location, bool decoupled, bool& 
     return changed || g.cam_t < 1.0f;
 }
 
+bool scripted_camera() { return g.cam_kind == 0 && g.cam_t >= 1.0f; }
+
 void request_toggle() { ++g_toggle_requests; }
 
 void request_pad_toggle() {

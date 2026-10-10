@@ -468,6 +468,7 @@ bool BackendBase::TransferEye(Eye eye, const SubmitDesc& desc, const EyeTarget& 
         src.vignette[2] = desc.vignette.softness;
         src.vignetteCentre[0] = desc.vignette.centre[e][0];
         src.vignetteCentre[1] = desc.vignette.centre[e][1];
+        src.black = desc.vignette.black;
     }
     src.sharpen = desc.sharpen;
     BlitDest dst{t.texture, t.viewFormat, t.width, t.height, t.arraySlice};
