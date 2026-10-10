@@ -861,6 +861,15 @@ instead, which includes the turn. Any recenter (End, View + left stick click, `r
 recenter) makes the current heading forward and clears the turn (the left stick is no
 longer rotated from the next poll).
 
+The settings panel is a world-locked quad too, so it is placed from the head in the quad
+layers' space (`FrameInfo::layerHead`: after the recenter, without the turn), not from
+the views' head, which includes the turn. Up to v1.3 it used the views' head: after a
+turn of N degrees the panel opened N degrees to the side of where the player looked
+(out of view after two 45 degree steps, behind after four), which looked like View/Back +
+Y no longer opening it. Checked on the Null backend (10/10, `captures/panelfix`): before,
+`menu: opened` was logged at 90 and 135 degrees but the eye captures showed no panel;
+after, it is centred at 0, 90 and 135 degrees, first and third person.
+
 Dev commands: `snapturn status` (setting, turn in effect, steps, polls with the right
 stick hidden, last left stick in/out), `snapturn snap <deg>|off`, `deadzone`, `repeat`,
 `log <n>|on`, `snapturn stick <lx> <ly> <rx> <ry>` (one stick state, -1..1, through the
@@ -2130,6 +2139,43 @@ reader of the first chain (not seen in the traces) would get stale data. Image t
 usable as proof here: two captures of the same view without any change differ by a mean of 10
 levels (camera sway and animation), more than any of the test modes (`start_h*` in that run);
 the evidence is the binding audit.
+
+## Texture streaming status
+
+Tells whether the texture streaming pool limits the picture (for example with a large
+high-resolution texture pack, or after lowering `r.Streaming.PoolSize`). The figures come
+from the engine's own streaming manager, read without calling into the engine
+(`src/engine/src/texture_streaming.cpp`; addresses and layout in `docs/re/engine.md`,
+section 15; known build only). The engine's own over-budget counters stay at zero in this
+build, so the mod adds up the per-texture state the streamer keeps, on the game thread every
+0.5 s:
+
+- **required**: memory with the mips the views ask for (the larger of each texture's visible
+  and hidden wanted mips). `r.Streaming.Boost` raises it.
+- **budgeted**: memory after the streamer fitted the request into the pool.
+- **resident**: memory with the mips loaded now.
+- **over budget**: required minus budgeted, over the textures the budget gives fewer mips
+  than wanted (their count follows). Above zero, those textures show lower detail than the
+  views ask for.
+- **streaming in**: mips wanted but not loaded yet (normal for a few seconds after a load).
+
+Dev command (pipe): `texstream` prints the figures, the over-budget time and the current
+`r.Streaming.PoolSize`, `r.Streaming.Boost` and `r.Streaming.MipBias`; `texstream raw` dumps
+the manager's members around the engine's counters; `texstream entry <i>` dumps one
+streaming texture. The `timing:` block logs the same line every 10 s as
+`timing:   texture streaming: ...`.
+
+Warning: when over budget stays above 1 MB for 5 s, the log gets once
+`texture streaming: N MB over the pool (K textures); textures show lower detail; raise
+r.Streaming.PoolSize or lower r.Streaming.Boost (...)`, and `texture streaming: back within
+the pool` once it has been back at zero for 3 s.
+
+Tuning: raise `r.Streaming.PoolSize` (under `[stereo_cvars]`, or live with `cvar set`) until
+over budget stays at 0 in the places that matter, keeping it below what the card's memory
+allows (the `video memory:` line); or lower `r.Streaming.Boost`. Measured headless
+(2 x 3072x3264, first room of the latest save): required about
+2.2 GB at Boost 1, 2.36 GB at Boost 2; at 1000 MB the pool was 1656 MB short (473 textures)
+and the warning came after 5 s; 4000 and 6000 MB were enough there. Busier places need more.
 
 ## Render scale and dynamic resolution
 

@@ -48,6 +48,15 @@ struct Addresses {
     std::uintptr_t ScePadReadState = 0;            // libScePad's scePadReadState (PlayStation pad combinations)
     std::uintptr_t PostProcessSettingsCtor = 0;    // FPostProcessSettings::FPostProcessSettings (lens vignette in stereo)
 
+    // ---- texture streaming status (known build only; docs/re/engine.md, "Texture streaming")
+    void** StreamingManagerCollection = nullptr;       // FStreamingManagerCollection* static of IStreamingManager::Get
+    std::uintptr_t TextureStreamingManagerVtable = 0;  // FStreamingManagerTexture::vftable
+    std::size_t off_TextureStreamingManager = 0;       // FStreamingManagerCollection member (0x30)
+    std::size_t off_MemoryOverBudget = 0;              // FStreamingManagerTexture member (0x308), from GetMemoryOverBudget
+    std::size_t off_MaxEverRequired = 0;               // FStreamingManagerTexture member (0x310), from GetMaxEverRequired
+    std::size_t off_NumWantingResources = 0;           // IStreamingManager member (0x8), from GetNumWantingResources
+    const std::int64_t* GTexturePoolSize = nullptr;    // bytes, from FStreamingManagerTexture::GetPoolSize
+
     bool stereo_ok = false;      // every required entry resolved and every layout check passed
     std::string failure;         // first reason stereo_ok is false
 };

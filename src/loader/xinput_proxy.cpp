@@ -117,11 +117,13 @@ float stick_magnitude(SHORT x, SHORT y) {
 
 DWORD filtered(DWORD user, XINPUT_STATE* state, DWORD rc) {
     const PadOverride o = g_pad_override.load(std::memory_order_relaxed);
+    bool withheld = false;
     if (o && rc == ERROR_SUCCESS && state) {
         XINPUT_GAMEPAD& g = state->Gamepad;
         if (o(user, &g.wButtons, &g.bLeftTrigger, &g.bRightTrigger, &g.sThumbLX, &g.sThumbLY, &g.sThumbRX, &g.sThumbRY)) {
             g_overridden.fetch_add(1, std::memory_order_relaxed);
             ZeroMemory(&g, sizeof(g));
+            withheld = true;
         }
     }
     if (rc == ERROR_SUCCESS && state && user == 0) {
@@ -129,7 +131,14 @@ DWORD filtered(DWORD user, XINPUT_STATE* state, DWORD rc) {
         g_stick_right.store(stick_magnitude(state->Gamepad.sThumbRX, state->Gamepad.sThumbRY), std::memory_order_relaxed);
     }
     const PadFilter f = g_pad_filter.load(std::memory_order_relaxed);
-    if (f && rc == ERROR_SUCCESS && state) f(user, &state->Gamepad.wButtons);
+    if (f && rc == ERROR_SUCCESS && state) {
+        f(user, &state->Gamepad.wButtons);
+        // The pad filter still sees the withheld (neutral) state, so it notices the release of a
+        // View/Back it held back; it would then hand that View to the game as a short press,
+        // which opens the game's map when View was held before Y opened the panel. While the
+        // panel withholds the pad the game gets no button at all.
+        if (withheld) state->Gamepad.wButtons = 0;
+    }
     const StickFilter sf = g_stick_filter.load(std::memory_order_relaxed);
     if (sf && rc == ERROR_SUCCESS && state)
         sf(user, &state->Gamepad.sThumbLX, &state->Gamepad.sThumbLY, &state->Gamepad.sThumbRX, &state->Gamepad.sThumbRY);

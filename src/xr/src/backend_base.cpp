@@ -418,6 +418,7 @@ void BackendBase::FillFrameInfo(const FrameRecord& r, FrameInfo& info) const {
     info.positionValid = r.positionValid;
     for (int e = 0; e < 2; ++e) info.views[e] = ApplyRecenter(r.recenter, r.raw[e]);
     info.head = ApplyRecenter(r.recenter, r.rawHead);
+    info.layerHead = ApplyRecenter(r.layerRecenter, r.rawHead);
     info.state = state_.load();
 }
 

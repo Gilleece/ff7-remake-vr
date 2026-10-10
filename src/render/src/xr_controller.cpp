@@ -468,6 +468,12 @@ void XrController::LogStats() {
         std::string reply;
         if (dev_commands::dispatch(cmd, reply) && reply.starts_with("ok ")) log::info("timing:   controls: {}", reply.substr(3));
     }
+    // The engine's texture streamer: pool, memory over budget, r.Streaming.* (engine module).
+    {
+        std::string reply;
+        if (dev_commands::dispatch("texstream timing", reply) && reply.starts_with("ok "))
+            log::info("timing:   texture streaming: {}", reply.substr(3));
+    }
     if (!runtimeCalls.empty()) log::info("timing:   {}", runtimeCalls);
     ComPtr<ID3D11Device> dev;
     {
@@ -609,9 +615,13 @@ bool XrController::MenuQuad(const PresentInfo& p, const Waited& w, xr::QuadLayer
         if (follow) {
             menuPose_ = xr::Pose{xr::Quat{}, xr::Vec3{0.0f, 0.0f, -f.distance}};
         } else {
-            const xr::Quat yaw = xr::QuatFromAxisAngle(xr::Vec3{0.0f, 1.0f, 0.0f}, xr::QuatYaw(w.info.head.orientation));
+            // The head in the quad layers' space (without the snap turn): the views' head
+            // includes the turn, and a pose taken from it would put the panel that many
+            // degrees to the side of where the player looks (behind after 180).
+            const xr::Pose& head = w.info.layerHead;
+            const xr::Quat yaw = xr::QuatFromAxisAngle(xr::Vec3{0.0f, 1.0f, 0.0f}, xr::QuatYaw(head.orientation));
             const xr::Vec3 ahead = xr::QuatRotate(yaw, xr::Vec3{0.0f, 0.0f, -f.distance});
-            const xr::Vec3& h = w.info.head.position;
+            const xr::Vec3& h = head.position;
             menuPose_ = xr::Pose{yaw, xr::Vec3{h.x + ahead.x, h.y + ahead.y, h.z + ahead.z}};
         }
     }

@@ -316,6 +316,8 @@ struct FrameInfo {
     bool positionValid = false;
     View views[2]{};                // [0] left, [1] right; tracking space after recenter
     Pose head{};                    // head (VIEW space origin) in tracking space after recenter
+    Pose layerHead{};               // the same in the space of world-locked quad layers (QuadLayer::pose):
+                                    // after recenter, without the snap turn
     SessionState state = SessionState::Uninitialized;
     GazeSample gaze{};              // with InitDesc::eyeGaze
 };

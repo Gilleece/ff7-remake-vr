@@ -541,9 +541,17 @@ warns at start when it is on). Capture and trace output paths are not restricted
   on View/Back + Y (only while the game window has the focus) and, while the panel is open
   and until every button is released after it closed, replaces the state with a neutral
   one (no buttons, triggers or stick deflection). The engine's pad filter and snap turn
-  then run on that neutral state, so a View/Back held back for a combination is never
-  replayed to the game. `xinput status` shows the last state the game received and how
-  many polls the panel withheld.
+  then run on that neutral state, so they see the buttons' release. The pad filter would
+  answer the release of a View/Back it held back (View held before Y, as a player does)
+  with its short View press for the game, which opened the game's map under the panel;
+  the XInput proxy therefore clears the buttons again after the pad filter while the
+  panel withholds the pad (the `controls: pad` log line still shows the filter's own
+  output). `xinput status` shows the last state the game received and how many polls the
+  panel withheld. PlayStation pads (`scePadReadState`) do not go through `MenuFilterPad`:
+  with one the panel opens only with the keyboard key.
+- **Placement and snap turn.** The open pose comes from `FrameInfo::layerHead`, the head
+  in the quad layers' space without the snap turn (see "Snap turn" in
+  `engine-module.md`).
 - **Saving** (`ini_file::update_file`): for each setting with an ini key, the value is
   written when it differs from the file's (numbers compared as numbers) or, for a key the
   file does not have, when it differs from the value in effect when the panel first

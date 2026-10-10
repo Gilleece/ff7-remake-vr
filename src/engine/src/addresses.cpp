@@ -9,6 +9,7 @@
 
 #include <chrono>
 #include <cstring>
+#include <initializer_list>
 #include <optional>
 
 namespace ff7vr::engine {
@@ -116,6 +117,29 @@ constexpr Sig kFindFreeElement{"FRenderTargetPool::FindFreeElement", "40 55 53 4
 constexpr Sig kPostProcessSettingsCtor{"FPostProcessSettings::FPostProcessSettings", "48 89 5C 24 08 57 48 83 EC 30 C7 41 3C 00 00 80 3F",
                                        Rule::Match, 0, 0, 0, 0x32050f0};
 constexpr std::uint8_t kVignetteDefaultStore[] = {0xc7, 0x83, 0x18, 0x04, 0x00, 0x00, 0x00, 0x00, 0x80, 0x3f};
+
+// Texture streaming (docs/re/engine.md, "Texture streaming"). IStreamingManager::Get: the
+// static FStreamingManagerCollection* and its once-only creation (operator new of 0x40 bytes).
+constexpr Sig kStreamingManagerCollection{
+    "IStreamingManager::StreamingManagerCollection",
+    "48 83 EC 28 48 8B 05 ?? ?? ?? ?? 48 85 C0 75 45 48 8B 0D ?? ?? ?? ?? 48 85 C9 75 0C E8 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 48 8B 01 "
+    "45 33 C0 41 8D 50 40 FF 50 10",
+    Rule::Rip, 4, 3, 7, 0x5994c78};
+// The FStreamingManagerTexture constructor stores its vtable first.
+constexpr Sig kTextureStreamingManagerVtable{"FStreamingManagerTexture::vftable",
+                                             "48 8D 05 ?? ?? ?? ?? 4C 89 79 08 48 8B F9 48 89 01 4C 89 79 10 4C 89 79 18", Rule::Rip,
+                                             0, 3, 7, 0x4eb7c78};
+// FStreamingManagerCollection::AddOrRemoveTextureStreamingManagerIfNeeded: new of 0x4D8 bytes,
+// the constructor, then the store into TextureStreamingManager.
+constexpr Sig kTextureStreamingManagerMember{"FStreamingManagerCollection::TextureStreamingManager",
+                                             "BA D8 04 00 00 FF 50 10 48 85 C0 74 0B 48 8B C8 E8 ?? ?? ?? ?? 4C 8B F0 4D 89 77 30",
+                                             Rule::U8, 27, 0, 0, 0x30};
+// Vtable slots of FStreamingManagerTexture whose one-instruction getters give the member
+// offsets (byte offsets in the vtable, this build's ITextureStreamingManager order).
+constexpr std::size_t kSlotGetNumWantingResources = 17 * 8;  // 8B 41 xx C3: mov eax, [rcx+xx]
+constexpr std::size_t kSlotGetMemoryOverBudget = 26 * 8;     // 48 8B 81 xx xx xx xx C3: mov rax, [rcx+xx]
+constexpr std::size_t kSlotGetPoolSize = 27 * 8;             // 48 8B 05 xx xx xx xx C3: mov rax, [rip+xx]
+constexpr std::size_t kSlotGetMaxEverRequired = 28 * 8;      // 48 8B 81 xx xx xx xx C3
 
 // Call sites whose vtable displacement must equal the slot our device implements.
 struct SlotCheck {
@@ -375,8 +399,51 @@ Addresses resolve_addresses(bool allow_unknown_build, const void* hmd_detour) {
             log::warn("engine: post-process settings constructor found, but its vignette default differs from this build's");
     }
 
+    // Texture streaming status: on the known build only (the members it reads besides the
+    // getters' were checked for this build alone).
+    if (a.known_build) {
+        auto* coll = reinterpret_cast<void**>(addr(kStreamingManagerCollection, false));
+        const std::uintptr_t vt = addr(kTextureStreamingManagerVtable, false);
+        const std::int64_t member = num(kTextureStreamingManagerMember, false);
+        // The function in a vtable slot, if it starts with `head` and is `len` bytes ending in ret.
+        auto getter = [&](std::size_t slot, std::initializer_list<std::uint8_t> head, std::size_t len) -> const std::uint8_t* {
+            void* const* p = reinterpret_cast<void* const*>(vt + slot);
+            if (!readable_pointer_slot(p)) return nullptr;
+            const auto* f = static_cast<const std::uint8_t*>(*p);
+            const auto fa = reinterpret_cast<std::uintptr_t>(f);
+            if (fa < a.base || fa + len > a.base + a.size) return nullptr;
+            if (std::memcmp(f, head.begin(), head.size()) != 0 || f[len - 1] != 0xc3) return nullptr;
+            return f;
+        };
+        if (coll && vt && member > 0) {
+            const std::uint8_t* wanting = getter(kSlotGetNumWantingResources, {0x8b, 0x41}, 4);
+            const std::uint8_t* over = getter(kSlotGetMemoryOverBudget, {0x48, 0x8b, 0x81}, 8);
+            const std::uint8_t* pool = getter(kSlotGetPoolSize, {0x48, 0x8b, 0x05}, 8);
+            const std::uint8_t* maxreq = getter(kSlotGetMaxEverRequired, {0x48, 0x8b, 0x81}, 8);
+            if (wanting && over && pool && maxreq) {
+                std::int32_t d_over, d_max, d_pool;
+                std::memcpy(&d_over, over + 3, 4);
+                std::memcpy(&d_max, maxreq + 3, 4);
+                std::memcpy(&d_pool, pool + 3, 4);
+                a.StreamingManagerCollection = coll;
+                a.TextureStreamingManagerVtable = vt;
+                a.off_TextureStreamingManager = static_cast<std::size_t>(member);
+                a.off_NumWantingResources = wanting[2];
+                a.off_MemoryOverBudget = static_cast<std::size_t>(d_over);
+                a.off_MaxEverRequired = static_cast<std::size_t>(d_max);
+                a.GTexturePoolSize = reinterpret_cast<const std::int64_t*>(pool + 7 + d_pool);
+                log::debug("engine: texture streaming: manager member {:#x}, wanting +{:#x}, over budget +{:#x}, max required +{:#x}, "
+                           "pool size {:#x}",
+                           member, a.off_NumWantingResources, a.off_MemoryOverBudget, a.off_MaxEverRequired,
+                           reinterpret_cast<std::uintptr_t>(a.GTexturePoolSize) - a.base);
+            } else {
+                log::warn("engine: texture streaming manager found, but its getters differ from this build's");
+            }
+        }
+    }
+
     a.stereo_ok = a.failure.empty();
-    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+    const auto ms =std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
     log::info("engine: build {} ({}), signatures resolved in {} ms, layout checks {}", a.known_build ? "1.0.0.7" : "unknown",
               a.known_build ? "known" : "not known", ms, slot_failures == 0 ? "passed" : "FAILED");
     return a;

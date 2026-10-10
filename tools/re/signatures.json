@@ -958,6 +958,46 @@
       "expect": "0x5923ad0",
       "desc": "The static FSceneRenderTargets: first argument of FSceneRenderTargets::BeginRenderingInGameUI in the UI loop of FDeferredShadingSceneRenderer::Render (the call at +24 of the pattern goes to 0x2541670). Its pooled targets include the scene depth (SceneDepthZ), found at run time by the depth layer (src/engine/src/scene_depth.cpp). STATIC.",
       "howto": "The lea rcx right before the call to BeginRenderingInGameUI in the UI loop (same pattern as 'FViewInfo size')."
+    },
+    {
+      "name": "IStreamingManager::StreamingManagerCollection",
+      "kind": "global",
+      "pattern": "48 83 EC 28 48 8B 05 ?? ?? ?? ?? 48 85 C0 75 45 48 8B 0D ?? ?? ?? ?? 48 85 C9 75 0C E8 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 48 8B 01 45 33 C0 41 8D 50 40 FF 50 10",
+      "resolve": {
+        "type": "rip",
+        "insn": 4,
+        "disp": 3,
+        "len": 7
+      },
+      "expect": "0x5994c78",
+      "desc": "FStreamingManagerCollection* static of IStreamingManager::Get() (0x2ec0f70; also inlined in many callers). Created on first use: operator new of 0x40 bytes, constructor 0x2ec18d0. Member TextureStreamingManager at +0x30 (see 'FStreamingManagerCollection::TextureStreamingManager'). Texture streaming status (src/engine/src/texture_streaming.cpp).",
+      "howto": "r.Streaming.PoolSize registration (0x58af60) stores the cvar data pointer at 0x59585c0; its reader 0x32d5530 is called from the FStreamingManagerTexture vtable; the vtable's constructor 0x32d3d60 is called from 0x2ec23b0 (AddOrRemoveTextureStreamingManagerIfNeeded), called from the collection constructor 0x2ec18d0, whose caller with a static store is IStreamingManager::Get."
+    },
+    {
+      "name": "FStreamingManagerTexture::vftable",
+      "kind": "vtable",
+      "pattern": "48 8D 05 ?? ?? ?? ?? 4C 89 79 08 48 8B F9 48 89 01 4C 89 79 10 4C 89 79 18",
+      "resolve": {
+        "type": "rip",
+        "insn": 0,
+        "disp": 3,
+        "len": 7
+      },
+      "expect": "0x4eb7c78",
+      "desc": "Vtable store at the start of the FStreamingManagerTexture constructor (0x32d3d60, object 0x4D8 bytes). One-instruction getters in its slots give the member offsets: slot 17 (+0x88) GetNumWantingResources = mov eax,[rcx+8]; slot 26 (+0xD0) GetMemoryOverBudget = mov rax,[rcx+0x308]; slot 27 (+0xD8) GetPoolSize = mov rax,[GTexturePoolSize 0x582c480]; slot 28 (+0xE0) GetMaxEverRequired = mov rax,[rcx+0x310]; slot 29 ResetMaxEverRequired. MemoryOverBudget and MaxEverRequired are never written in this build (always 0); the status computes over budget from StreamingTextures instead (docs/re/engine.md, 'Texture streaming').",
+      "howto": "The lea of the vtable in the constructor; constructor found as the callee of AddOrRemoveTextureStreamingManagerIfNeeded after operator new of 0x4D8."
+    },
+    {
+      "name": "FStreamingManagerCollection::TextureStreamingManager",
+      "kind": "offset",
+      "pattern": "BA D8 04 00 00 FF 50 10 48 85 C0 74 0B 48 8B C8 E8 ?? ?? ?? ?? 4C 8B F0 4D 89 77 30",
+      "resolve": {
+        "type": "u8",
+        "offset": 27
+      },
+      "expect": "0x30",
+      "desc": "FStreamingManagerTexture* member of FStreamingManagerCollection, stored in AddOrRemoveTextureStreamingManagerIfNeeded (0x2ec23b0) right after operator new of 0x4D8 bytes and the constructor.",
+      "howto": "The mov [r15+0x30], r14 after the constructor call."
     }
   ]
 }

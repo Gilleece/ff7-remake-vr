@@ -20,6 +20,7 @@
 #include "shaders.h"
 #include "scene_depth.h"
 #include "stereo_device.h"
+#include "texture_streaming.h"
 
 #if FF7VR_ENGINE_WITH_RENDER
 #include "render_host.h"
@@ -153,6 +154,7 @@ bool __fastcall initialize_hmd_device_detour(void* engine) {
 void __fastcall tick_detour(void* engine, float delta_seconds, bool idle) {
     g_game_thread = GetCurrentThreadId();
     cvar::apply_pending();
+    texstream::tick();
     const bool installed = g_installed.load();
     if (installed) {
         movie::tick();
@@ -223,6 +225,8 @@ void read_camera_settings(const Config& cfg) {
 void resolve_and_prepare() {
     g_addr = resolve_addresses(g_opt.allow_unknown_build, reinterpret_cast<const void*>(&initialize_hmd_device_detour));
     rhi::verify_layout(g_addr.base);
+    texstream::init({g_addr.StreamingManagerCollection, g_addr.TextureStreamingManagerVtable, g_addr.off_TextureStreamingManager,
+                     g_addr.off_MemoryOverBudget, g_addr.off_MaxEverRequired, g_addr.off_NumWantingResources, g_addr.GTexturePoolSize});
     if (g_addr.stereo_ok) {
         device::init(g_addr.GNearClippingPlane, g_opt.start_in_stereo, fixed_options());
         movie::init({g_addr.GUObjectArray, g_addr.FNamePool}, g_opt.movie_screen);
@@ -329,7 +333,9 @@ bool start(const StartupContext& ctx) {
                           [](std::string_view args) { return controls::command(std::string(args)); });
         dev_commands::add("snapturn", "snapturn status | snap <deg>|off | deadzone | repeat | log | stick <lx> <ly> <rx> <ry>: snap turn ([comfort] snap_turn)",
                           [](std::string_view args) { return snap_turn::command(std::string(args)); });
-        dev_commands::add("gpu", "gpu status | gpu names on | gpu trace <prefix> [dump <from> <to> | dump fullscreen] [scale <n>] [cbs 1]: one-frame GPU trace",
+        dev_commands::add("texstream", "texstream [status] | timing | raw | entry <i>: the texture streamer's pool, required and over-budget memory, r.Streaming.* values",
+                          [](std::string_view args) { return texstream::command(std::string(args)); });
+        dev_commands::add("gpu","gpu status | gpu names on | gpu trace <prefix> [dump <from> <to> | dump fullscreen] [scale <n>] [cbs 1]: one-frame GPU trace",
                           [](std::string_view args) { return gpu_trace::command(std::string(args)); });
         {
             std::string profile = cfg.get_string("graphics", "profile", "custom");

@@ -513,6 +513,13 @@ block: the frame rate over those 10 seconds, the mode (`screen` = virtual screen
 the 3D scene with foveated rendering. A Quest 3 at 90 Hz needs a frame every
 11.1 ms (80 Hz: 12.5 ms, 120 Hz: 8.3 ms).
 
+With a large texture pack, the `timing:   texture streaming:` line in the same block says
+whether the texture pool is big enough: `over budget 0 MB` means every texture gets the
+detail the view asks for; above zero, that many MB of texture detail is left out. If it
+stays above zero for 5 seconds the log also gets a `texture streaming: ... over the pool`
+warning. Raise `r.Streaming.PoolSize` under `[stereo_cvars]` (in MB; keep it within your
+graphics card's memory, see the `video memory:` line) or lower `r.Streaming.Boost`.
+
 For orientation only, two numbers from the development PC, first room of one save
 game, standing still, without a headset:
 

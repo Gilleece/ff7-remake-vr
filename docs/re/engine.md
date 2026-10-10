@@ -1369,6 +1369,64 @@ i.e. the mod's proxy: `e9` to a relay just below the mod's DLL, relay `e9` to
 path", for what the mod does about it. With no physical pad the hook answered all
 11583 polls of a run itself (`xinput probe`: none reached the mod's export or the system DLL).
 
+## 15. Texture streaming (STATIC + LIVE)
+
+Used by the texture streaming status (`src/engine/src/texture_streaming.cpp`, dev command
+`texstream`, `docs/engine-module.md`). Signatures in `tools/re/signatures.json`; the mod uses
+them on the known build only.
+
+**How it was found (STATIC).** `L"r.Streaming.PoolSize"` (0x490ac50) has one reference, its
+`TAutoConsoleVariable` registration 0x58af60, which stores the variable's data pointer at
+0x59585c0. Two functions read it: `FTextureStreamingSettings::Update` (0x32e6c60) and
+0x32d5530, a `FStreamingManagerTexture` member that starts with the inlined
+`CheckUserSettings` (writes `GTexturePoolSize` 0x582c480 = PoolSize << 20 unless the cvar
+is -1) and calls `Settings.Update` on `this+0x100`. Its callers are slots of the vtable
+0x4eb7c78, whose constructor 0x32d3d60 (object 0x4D8 bytes) is called from 0x2ec23b0
+(`FStreamingManagerCollection::AddOrRemoveTextureStreamingManagerIfNeeded`, stores it at
+collection+0x30), called from the collection constructor 0x2ec18d0, called from
+`IStreamingManager::Get` 0x2ec0f70: static `FStreamingManagerCollection*` at 0x5994c78,
+created on first use (0x40 bytes). Stat names (`STAT_StreamingPool` and so on) are not in the
+exe: the build has no stats.
+
+| What | Where (1.0.0.7) | Status |
+|---|---|---|
+| `IStreamingManager::Get` static | 0x5994c78 (`FStreamingManagerCollection*`) | verified live |
+| `FStreamingManagerCollection::TextureStreamingManager` | +0x30 | verified live (vtable check passes) |
+| `FStreamingManagerTexture::vftable` | 0x4eb7c78 | verified live |
+| `IStreamingManager::NumWantingResources` | +0x8 (slot 17 `mov eax,[rcx+8]`) | read live: 0 in the samples |
+| `GTexturePoolSize` (int64 bytes) | 0x582c480 (slot 27, `GetPoolSize`) | verified live: follows `r.Streaming.PoolSize` (4000, 1000, 6000) |
+| `MemoryOverBudget`, `MaxEverRequired` (int64) | +0x308, +0x310 (slots 26, 28; slot 29 resets +0x310) | live: stay 0. Only the constructor writes them (scan of every function in 0x3000000..0x3500000) |
+| `MemoryMargin`, `MinEvictSize` (int64, ini MB << 20) | +0x2F0, +0x2F8 | live: 20 MB, 10 MB |
+| `DisplayedStats`, `GatheredStats` (`FTextureStreamingStats`, 0xB8 bytes each) | +0x328, +0x3E0 (zeroed in the constructor) | live: all zero (no stats in this build) |
+| `AsyncWork` (`FAsyncTask<FAsyncTextureStreamingTask>`, 0x140 bytes) | +0x138 | static |
+| `StreamingTextures` (`TArray<FStreamingTexture>`) | +0x10 data, +0x18 count | verified live (1628 entries in the first room) |
+
+`FStreamingTexture`, 0xD8 bytes (int32 unless noted):
+
+| Offset | Member | Status |
+|---|---|---|
+| +0x00 | `UTexture2D*` (null for a removed entry) | static |
+| +0x08 | LOD group | static (`UpdateStaticData` 0x32d88d0) |
+| +0x10 | MipCount | static + live |
+| +0x14 | BoostFactor (float) | static |
+| +0x18 | TextureSizes[14]: bytes with 1..14 mips resident | static (loop of 14 in `UpdateStaticData`) + live (sizes grow 4x per mip, clamped at MipCount) |
+| +0x5C | ResidentMips | live: drops to the budget at pool 1000 MB, rises at 6000 MB; the sum of sizes equals the budgeted memory once loaded |
+| +0x60 | RequestedMips | inferred (Unreal's order; equal to +0x5C in every sample) |
+| +0x64, +0x68 | MinAllowedMips, MaxAllowedMips | live: do not change with the pool; the budget never went below +0x64; +0x68 = MipCount in the samples |
+| +0x6C | LastRenderTime (float; FLT_MAX = never rendered) | live |
+| +0x78 | InstanceRemovedTimestamp (double, -FLT_MAX at creation) | static |
+| +0x80 | DynamicBoostFactor (float, 1.0) | static |
+| +0x88 | NumMissingMips | static |
+| +0x8C, +0x90 | VisibleWantedMips, HiddenWantedMips | live: rise with `r.Streaming.Boost 2` |
+| +0x98 | BudgetedMips | live: below the wanted mips at pool 1000 MB |
+| +0xA0 | WantedMips | live |
+
+0x32d5530 initialises new entries with +0x8C, +0x90, +0x98, +0xA0 = +0x64 and +0x94, +0x9C = 0.
+Verified headless 2026-10-10 (Null backend, 2 x 3072x3264, first room of the latest save): pool
+4000 MB: required 2207 MB, budgeted 2270 MB; `r.Streaming.PoolSize 1000`: budgeted and resident
+548 MB, 473 textures under their wanted mips; 6000: everything at the wanted mips;
+`r.Streaming.Boost 2`: required 2207 -> 2360 MB.
+
 ## Tools
 
 All in `tools/re/`, run with the repo's `.venv` Python. The exe is found through Steam's
