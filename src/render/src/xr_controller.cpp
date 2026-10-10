@@ -4,6 +4,7 @@
 
 #include "comfort.h"
 #include "foveation.h"
+#include "frame_budget.h"
 #include "menu.h"
 #include "ui_battle.h"
 #include "video_memory.h"
@@ -441,10 +442,11 @@ void XrController::LogStats() {
               seconds, seconds > 0 ? double(frames) / seconds : 0.0, ready_.load() ? BackendName(cfg_.backend) : "off", xr::ToString(st),
               ModeName(mode_.load()), presents_.load(), submittedScreen_.load(), submittedStereo_.load(), heldStereo_.load(),
               presentsWithoutFrame_.load(), submitErrors_.load(), uiSubmitted_.load(), uiHeld_.load(), uiDropped_.load());
-    std::string runtimeCalls;
+    std::string runtimeCalls, runtimeName;
     if (ready_.load()) {
         std::lock_guard rl(rtMutex_);
         if (backend_) {
+            runtimeName = backend_->GetRuntimeInfo().runtimeName;
             for (float ms : backend_->TakeGpuCopyTimes()) t.gpuCopy.Add(ms);
             const xr::FrameStats cur = backend_->GetStats();
             const uint64_t ended = (cur.framesSubmitted + cur.framesSkipped) - (lastFrameStats_.framesSubmitted + lastFrameStats_.framesSkipped);
@@ -458,6 +460,29 @@ void XrController::LogStats() {
             lastFrameStats_ = cur;
         }
     }
+    // The frame budget's figures of this window, before the summaries reset the series.
+    frame_budget::Window bw;
+    bw.seconds = seconds;
+    bw.frames = frames;
+    bw.intervalMs = t.frameInterval.Median(nullptr, &bw.intervalMaxMs);
+    bw.waitMs = t.wait.Median(&bw.waitSamples);
+    foveation::PeekGpuMedians(&bw.sceneMs, &bw.sceneSamples, &bw.afterMs, &bw.afterSamples);
+    bw.stereoMode = mode_.load() == Mode::Stereo && ready_.load();
+    {
+        const uint64_t stereo = submittedStereo_.load();
+        bw.stereoSubmitted = stereo - budgetStereoSubmitted_;
+        budgetStereoSubmitted_ = stereo;
+    }
+    bw.runtime = runtimeName;
+    {
+        EyeSetup es;
+        if (GetEyeSetup(&es)) {
+            bw.refreshHz = es.refreshHz;
+            bw.eyeWidth = es.eyeWidth;
+            bw.eyeHeight = es.eyeHeight;
+        }
+    }
+    bw.foveationPreset = foveation::PresetName();
     for (Series* s : {&t.frameInterval, &t.presentCall, &t.hook, &t.submit, &t.wait, &t.gpuCopy, &t.gpu}) {
         const std::string line = s->TakeSummary();
         if (!line.empty()) log::info("timing:   {}", line);
@@ -480,7 +505,21 @@ void XrController::LogStats() {
         std::lock_guard lk(devMutex_);
         dev = seenDevice_;
     }
-    if (dev) video_memory::LogReport(dev.Get());
+    if (dev) bw.copyEnginePercent = video_memory::LogReport(dev.Get()).processCopyPercent;
+    frame_budget::Evaluate(bw);
+}
+
+void XrController::SetMode(Mode m) {
+    if (mode_.exchange(m) != m) frame_budget::NoteModeChange();
+}
+
+double XrController::DedicatedVideoMemoryMb() {
+    ComPtr<ID3D11Device> dev;
+    {
+        std::lock_guard lk(devMutex_);
+        dev = seenDevice_;
+    }
+    return dev ? video_memory::DedicatedMb(dev.Get()) : 0.0;
 }
 
 std::string XrController::VideoMemoryStatus() {
@@ -1322,6 +1361,7 @@ std::string XrController::Capture(const std::string& prefix, uint32_t timeoutMs)
     const std::string path = log::narrow(p.wstring());
     backend_->WaitForCaptures(0);  // drop results of earlier requests
     backend_->RequestCapture(xr::CaptureRequest{path});
+    frame_budget::NoteCapture();
     log::info("render: capture requested: {}_L.png / _R.png", path);
     const auto results = backend_->WaitForCaptures(timeoutMs);
     if (results.empty()) return std::format("err no frame submitted within {} ms (request stays queued)", timeoutMs);
@@ -1372,6 +1412,7 @@ std::string XrController::SetModeCommand(const std::string& mode) {
     } else {
         return "err usage: mode screen|stereo|stereo-test";
     }
+    frame_budget::NoteModeChange();
     log::info("render: mode {}", ModeName(mode_.load()));
     return std::string("ok mode ") + ModeName(mode_.load());
 }

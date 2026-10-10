@@ -249,10 +249,19 @@ std::string Line(const Info& i) {
                        i.localBudgetMb, i.localBudgetMb > 0 ? 100.0 * i.localUsageMb / i.localBudgetMb : 0.0, card, SharedMb(i), copy);
 }
 
-void LogReport(ID3D11Device* device) {
+double DedicatedMb(ID3D11Device* device) {
+    if (!device) return 0;
+    ComPtr<IDXGIDevice> dxgiDevice;
+    ComPtr<IDXGIAdapter> adapter;
+    DXGI_ADAPTER_DESC d{};
+    if (FAILED(device->QueryInterface(IID_PPV_ARGS(&dxgiDevice))) || FAILED(dxgiDevice->GetAdapter(&adapter)) || FAILED(adapter->GetDesc(&d))) return 0;
+    return double(d.DedicatedVideoMemory) / kMb;
+}
+
+Info LogReport(ID3D11Device* device) {
     const Info i = Query(device);
     const std::string l = Line(i);
-    if (l.empty()) return;
+    if (l.empty()) return i;
     log::info("timing:   {}", l);
     const double shared = SharedMb(i);
     double base = 0;
@@ -300,6 +309,7 @@ void LogReport(ID3D11Device* device) {
         log::info("video memory: the game's copy engines are no longer busy ({:.0f} %)", i.processCopyPercent);
         g_copyWarned = false;
     }
+    return i;
 }
 
 }  // namespace ff7vr::render::video_memory

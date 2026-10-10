@@ -170,7 +170,7 @@ All keys are optional. `ff7vr.ini` sits next to the DLL.
 | `[ui] mirror` | `1` | also draw the UI over the desktop window in stereo (the window shows an eye image, which no longer has the UI) |
 | `[ui] once_per_frame` | `1` | engine side: draw the UI for the first eye only (`0`: the game draws it for both eyes, as without the mod) |
 | `[foveation] ...` | on, `quality` | foveated rendering in stereo; keys in [Foveated rendering](#foveated-rendering) |
-| `[picture] brightness`, `contrast`, `saturation`, `gamma`, `black_level` | `0`, `1`, `1`, `1`, `0` | colour adjustment of the eye images and the virtual screen, not the UI layer; the defaults change nothing (see [Picture controls](#picture-controls)) |
+| `[picture] brightness`, `contrast`, `saturation`, `gamma`, `black_level` | `-0.25`, `1.5`, `1.2`, `1`, `0` | colour adjustment of the eye images and the virtual screen, not the UI layer; the defaults make the picture a little darker, with more contrast and colour, and `picture reset` (`0`, `1`, `1`, `1`, `0`) changes nothing (see [Picture controls](#picture-controls)) |
 | `[controls] brightness_up_key`, `brightness_down_key`, `brightness_step` | `0`, `0`, `0.05` | keys (virtual-key codes, 0 = none) that change `[picture] brightness` by the step while the game window has the focus |
 
 Screen size: 1.8 m at 2 m covers about 48 x 28 degrees for a 16:9 image, so
@@ -491,6 +491,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev\send-input.ps1 -Pi
 | `xr-depth dump <prefix> [timeout ms]` | a `capture` that also writes the frame's depth images as `<prefix>_depthL.png` / `_depthR.png` (grey = 255 * depth^(1/4), depth 0 black) and logs their range and the distance at the centre |
 | `xr-sim status` | Null backend: emulated tracker head, LOCAL origin, head in LOCAL, recenter offset, the head the game sees, validity, and the yaw the last submitted left image was rendered at against the yaw its frame was located at |
 | `xr-sim yawrate <deg/s>` | Null backend: the head turns at a constant rate with the wall clock, so every location (the frame wait's and a late one) sees the yaw of its own moment (`0` = off) |
+| `xr-sim pace <n>` | Null backend: the frame wait releases one frame every n refresh periods (a runtime that halves its rate) while the reported refresh rate stays the same; `pace 1` = normal (test of the frame budget's runtime-bound case) |
+| `budget status`, `budget on`, `budget off` | the frame budget warning ([Frame budget](#frame-budget)): the summary line, the last window's figures, warnings written and held back, the last disturbance |
 | `xr-sim late-yaw <deg>` | Null backend: an extra yaw that only late locations (`RelocateViews`) see, a deterministic test of the late update (`docs/engine-module.md`, "Late update of the head pose") |
 | `xr-sim depth` | Null backend: depth images written, frames with a depth layer, the last nearZ / farZ |
 | `xr-sim head <yaw deg> [pitch deg] [x y z m]` | Null backend: sets the emulated head pose (on top of `[xr] null_motion`) |
@@ -666,7 +668,7 @@ turn everything below sRGB 25 black.
 Implementation: saturation is computed in the shader; the rest is one curve
 per channel, evaluated on the CPU into a 4096-entry `R32_FLOAT` texture over
 `t = sqrt(linear / 2)` whenever the values change, and read with linear
-filtering. With all keys at their defaults the shader skips the adjustment
+filtering. With all keys at their neutral values (`picture reset`) the shader skips the adjustment
 (one uniform branch) and a source that could be copied as it is still is.
 
 Live: dev command `picture status | reset | <key> <value>` (values are
@@ -710,7 +712,7 @@ both eyes and the UI quad), alternating 25 s with and without an adjustment
 in the same run: the powers evaluated in the shader added 0.12 ms (0.158 ->
 0.281 ms; the pixel shader became limited by its transcendental units at
 20 million pixels per frame); the curve texture adds 0.02 ms (0.161 ->
-0.184 ms, p50), about 0.2 % of an 11 ms frame. At the defaults the shader
+0.184 ms, p50), about 0.2 % of an 11 ms frame. With all keys neutral the shader
 runs the same instructions as before plus one uniform branch.
 
 Example, not a default, for a picture that looks washed out in the
@@ -723,7 +725,7 @@ repository).
 
 ### Sharpening
 
-`[picture] sharpen` (0..1, default `0.5`, `0` = off; live: `sharpen <v>`) is an unsharp
+`[picture] sharpen` (0..1, default `1`, `0` = off; live: `sharpen <v>`) is an unsharp
 mask in the eye blit, for a picture that looks soft with DLSS or a reduced render
 scale: the pixel's Rec. 709 luminance minus the mean of its four direct neighbours,
 times the amount, is added to all three channels (no colour fringes), limited to
@@ -747,7 +749,12 @@ clear zone is a circle around what the eye looks straight at.
 
 Input: the XInput proxy keeps the deflection of both sticks of the last successful
 poll of user 0, the virtual pad included (`xinput::stick_magnitudes`, handed to the
-render module with `render::SetStickSource` at start-up). Per submitted stereo frame
+render module with `render::SetStickSource` at start-up). A PlayStation pad never
+reaches the XInput proxy: the engine's libScePad hook passes its sticks through the
+snap turn's stick filter, which hands their deflection, before any filtering, to
+`render::NotePlayStationSticks`; a reading older than 250 ms counts as sticks at rest.
+The larger of the two pads' deflections drives the vignette, and `comfort status`
+shows the PlayStation reading and its age. Per submitted stereo frame
 (`comfort::Update`, presenting thread) the larger deflection beyond a 0.25 dead
 zone, scaled to 0..1, is the target; the level follows it linearly, from rest to
 full in 100 ms and back in 300 ms, and is eased (smoothstep) into the strength.
@@ -807,6 +814,46 @@ stalling. The header counts `held` frames (rule 2 under
 [Switching](#switching-between-stereo-and-the-screen)) and `without XR frame`
 (Presents that had no started frame to end, normal when the game renders
 faster than the headset).
+
+## Frame budget
+
+`src/render/src/frame_budget.cpp`, `[log] frame_budget` (default `1`). At the end of each
+timing window (the block above), before the series are summarised, the XR thread takes
+the window's medians: game frame interval, xr frame wait, GPU scene and GPU after the
+scene (foveation's timers), the frames ended with a stereo image, the runtime's name and
+refresh rate (`EyeSetup::refreshHz`), and from the engine (`render::SetFrameBudgetFacts`)
+the frames whose 3D scene was rendered, DLSS's timed evaluations (both eyes, running
+totals), its preset and sizes, `[stereo] ssr_fix` and the render scale.
+
+A window is judged only in stereo gameplay: mode stereo, at least half the frames ended
+with a stereo image, the 3D scene rendered in at least 80 % of the frames (none on loading
+screens and movies), no frame of 500 ms or more, no capture in the window, and the window
+starting at least 30 s after the last mode change, load or stall (and the start). A window
+is over budget when the median interval exceeds the refresh period by more than 5 %. After
+two such windows in a row one `WARN frame budget: ...` names the cause:
+
+| Cause | Test (in this order) | Suggestion |
+|---|---|---|
+| GPU-bound | scene + after the scene >= 85 % of the interval; the largest part is DLSS when its two-eye time is at least half of the after-scene time and after >= scene, otherwise the scene (eye size, render scale, foveation preset) or the work after it | DLSS: `[dlss] preset = default` or a lower `input_scale`; scene: one foveation preset coarser or `render_scale = 0.9`; and a lower resolution in the runtime |
+| runtime-bound | the xr frame wait is the largest part and at least 30 % of the interval | the runtime's refresh and frame rate settings |
+| game-thread-bound | GPU < 70 % and the wait < 30 % of the interval | the copy engine figure of the `video memory:` line; the slow state after a quick restart |
+| cause unclear | none of the above (also when the GPU is not measured: foveation off) | a lower resolution in the runtime |
+
+`INFO frame budget: back within budget` follows at the first window within budget. At most
+one warning a minute; nothing else is logged. The reflections fix has no timer of its own,
+so its share is not named. `render::frame_budget_summary()` gives one short line for the
+settings panel ("73 fps / 90 Hz, GPU-bound: DLSS preset m", "within budget", "not
+measured (not in stereo gameplay)"); dev command `budget status`.
+
+Checked headless (Null backend, 90 Hz; 2 x 3302x3533 with `resolution_scale 1.6`, DLSS
+preset m at 0.60): stereo started at 14:57:28 and the windows until 14:58:02 were skipped
+(few stereo frames, then the 30 s after the switch); two windows at 13.7 ms gave
+`frame budget: 73 fps against 90 Hz (13.7 ms per frame, budget 11.1). GPU-bound: scene
+6.3 ms, after the scene 6.5 ms, of which DLSS about 5.9 ms (preset m at 3302x3533). Try
+[dlss] preset = default, or a lower resolution in Null`; `dynres scale 0.6` gave
+`back within budget (90 fps against 90 Hz)`; `xr-sim pace 2` gave `45 fps against 90 Hz
+(22.2 ms per frame, budget 11.1). runtime-bound: Null paces the frames: the frame wait takes
+19.7 ms of each frame, the GPU 7.7 ms. ...`.
 
 ## Measured overhead
 

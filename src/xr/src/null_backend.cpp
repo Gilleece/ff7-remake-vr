@@ -250,11 +250,14 @@ public:
         if (!initialized_) return Result::NotInitialized;
         const int64_t period = Period();
         if (opt_.paceToRefresh) {
+            // `pace <n>`: the frame wait releases one frame every n refresh periods, as a runtime
+            // that halves its rate does (the reported refresh rate stays the same).
+            const int64_t pace = period * std::max(1, paceEvery_.load());
             const int64_t now = QpcNowNs();
-            if (nextDeadline_ == 0 || nextDeadline_ < now - period) nextDeadline_ = now;
+            if (nextDeadline_ == 0 || nextDeadline_ < now - pace) nextDeadline_ = now;
             const int64_t wait = nextDeadline_ - now;
             if (wait > 0) SleepPrecise(wait);
-            nextDeadline_ += period;
+            nextDeadline_ += pace;
         }
         {
             std::lock_guard lk(frameMutex_);
@@ -545,7 +548,7 @@ public:
         const char* usage =
             "err usage: xr-sim status | head <yaw deg> [pitch deg] [x y z m] | recenter-event [nopose] [delay <frames>] | lose "
             "orientation|position <frames> | gaze <yaw> <pitch> | gaze off | gaze sweep [radius deg] [period s] | gaze blink <frames> | "
-            "motion static|yaw|sway|yawsway|ini | focus 0|1 | presence 0|1|off | yawrate <deg/s> | late-yaw <deg> | depth";
+            "motion static|yaw|sway|yawsway|ini | focus 0|1 | presence 0|1|off | yawrate <deg/s> | late-yaw <deg> | depth | pace <n>";
         if (!initialized_) return "err null backend not initialised";
         if (a.empty() || a[0] == "status") {
             std::lock_guard lk(frameMutex_);
@@ -599,6 +602,13 @@ public:
             const NullMotion now = m >= 0 ? static_cast<NullMotion>(m) : opt_.motion;
             log_.Info("null backend: scripted head motion now {}", MotionName(now));
             return std::format("ok motion {}", MotionName(now));
+        }
+        if (a[0] == "pace" && a.size() == 2) {
+            double n = 0;
+            if (!num(a[1], &n) || n < 1 || n > 8) return usage;
+            paceEvery_ = static_cast<int>(n);
+            log_.Info("null backend: the frame wait releases one frame every {} refresh periods", paceEvery_.load());
+            return std::format("ok one frame every {} refresh periods ({:.1f} fps at {:.0f} Hz)", paceEvery_.load(), opt_.refreshHz / n, opt_.refreshHz);
         }
         if (a[0] == "yawrate" && a.size() == 2) {
             // The head turns at a constant rate with the wall clock: every location (the
@@ -754,6 +764,7 @@ private:
         return QuatPose(QuatFromAxisAngle(Vec3{0, 1, 0}, float(std::fmod(deg, 360.0)) * kDegToRad));
     }
     std::atomic<uint64_t> relocations_{0};
+    std::atomic<int> paceEvery_{1};  // `pace`: frames released every n refresh periods
     float lastSubmittedYaw_ = 0, lastSubmittedFrameYaw_ = 0;  // under frameMutex_
     uint64_t lastSubmittedId_ = 0;
     float lastDepthNear_ = 0, lastDepthFar_ = 0;

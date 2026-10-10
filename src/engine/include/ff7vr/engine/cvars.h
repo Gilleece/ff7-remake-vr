@@ -44,6 +44,16 @@ void apply_pending();
 void set_stereo_overrides(std::vector<std::pair<std::wstring, std::wstring>> overrides);
 void stereo_overrides(bool on);
 
+// Texture streaming defaults by the graphics card's size, for the [stereo_cvars] the ini does
+// not set (pool_from_ini / boost_from_ini: the ini has the line, which always wins). Decided
+// once, when stereo first starts and the card's dedicated memory is known (dedicated_mb()
+// returns it in MB, 0 while unknown): r.Streaming.PoolSize 6000 on a card of 16 GB, 3500 from
+// 10 GB, 2000 below; r.Streaming.Boost 2 on 16 GB. Held only while stereo renders, like the
+// other [stereo_cvars].
+void set_card_defaults(bool pool_from_ini, bool boost_from_ini, double (*dedicated_mb)());
+// The choice made ("" before it was made), for status lines.
+std::string card_defaults_text();
+
 // Any thread: adds or replaces one stereo override at run time (the live `graphics profile`
 // command). Applied on the game thread with the next frame; while stereo renders the
 // variable's current value is saved first (if it is not already) and put back when stereo

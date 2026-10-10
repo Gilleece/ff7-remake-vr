@@ -57,6 +57,11 @@ FixedStereoHost* fixed_host();  // the built-in host (for dev commands)
 void request_active(bool on);
 bool wanted();  // switched on
 bool active();  // the current frame renders in stereo (wanted and the host can show it)
+// Any thread: stereo frames whose eye views were built so far (the 3D scene rendered; none
+// on loading screens and movies), and the render scale in effect ([stereo] render_scale or
+// the dynamic resolution's current scale).
+std::uint64_t scene_frames();
+float render_scale_now();
 // The last stereo frame's listener pose: the centre between the two eye cameras and the
 // left eye camera's rotation (headset included); `frame` counts stereo frames. False
 // before the first stereo frame.

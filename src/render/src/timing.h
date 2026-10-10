@@ -27,6 +27,8 @@ public:
     // Same summary without resetting.
     std::string Peek() const;
     size_t Count() const;
+    // Median and largest sample of the current period without resetting (0 when empty).
+    double Median(size_t* count = nullptr, double* max = nullptr) const;
     // The most recent sample and the number of samples added so far (not reset by TakeSummary).
     double Last(uint64_t* added = nullptr) const;
 

@@ -23,6 +23,20 @@ double Series::Last(uint64_t* added) const {
     return last_;
 }
 
+double Series::Median(size_t* count, double* max) const {
+    std::vector<double> v;
+    {
+        std::lock_guard lk(m_);
+        v = samples_;
+    }
+    if (count) *count = v.size();
+    if (max) *max = v.empty() ? 0.0 : *std::max_element(v.begin(), v.end());
+    if (v.empty()) return 0.0;
+    const auto mid = v.begin() + static_cast<std::ptrdiff_t>(v.size() / 2);
+    std::nth_element(v.begin(), mid, v.end());
+    return *mid;
+}
+
 size_t Series::Count() const {
     std::lock_guard lk(m_);
     return samples_.size();

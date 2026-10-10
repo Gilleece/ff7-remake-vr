@@ -44,6 +44,7 @@ Settings g_settings;
 float* g_near_plane = nullptr;
 
 std::atomic<bool> g_active{false};             // this frame renders in stereo; read by both threads
+std::atomic<std::uint64_t> g_scene_frames{0};  // stereo frames whose left eye view was built (the 3D scene renders)
 std::atomic<bool> g_wanted{false};             // stereo switched on (ini, dev command, EnableStereo)
 std::atomic<std::uint64_t> g_rt_size{0};       // committed eye size: width | height << 32
 std::atomic<StereoHost*> g_host{nullptr};
@@ -412,6 +413,7 @@ void CalculateStereoViewOffset(void*, EStereoscopicPass pass, FRotator* rotation
             math::rotator_from_quat(math::normalize(math::mul(math::quat_from_rotator(base_level), math::xr_to_ue_quat(in.head.orientation))));
         head_move::publish(game_rot, head_world, force_decouple);
         ++g.stereo_draws;
+        g_scene_frames.fetch_add(1, std::memory_order_relaxed);
         g.views_built = true;
         if (g.logged_order < 3) {
             ++g.logged_order;
@@ -967,6 +969,8 @@ bool last_listener_pose(FVector& location, FRotator& rotation, std::uint64_t& fr
     return true;
 }
 bool wanted() { return g_wanted.load(); }
+std::uint64_t scene_frames() { return g_scene_frames.load(std::memory_order_relaxed); }
+float render_scale_now() { return g_dyn_scale.load(std::memory_order_relaxed); }
 
 void tick_begin() {
     if (framelog::g_on.load(std::memory_order_relaxed)) {

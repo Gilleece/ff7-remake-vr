@@ -71,7 +71,7 @@ click "Download raw file"; NVIDIA's licence applies to it) and put it beside
 `ff7remake_.exe` in `End\Binaries\Win64`. If there is one there already (from Luma or
 another DLSS mod) you're done. Without it the mod simply runs without DLSS (the log says
 `NGX is not available`). DLSS is on in that package (`[dlss] enabled = 1` in `ff7vr.ini`,
-`input_scale = 0.65`: each eye is rendered at 65 % of its width and height and scaled up);
+`input_scale = 0.60`: each eye is rendered at 60 % of its width and height and scaled up);
 `enabled = 0` turns it off. `-dlss-dropin.zip` is the same without the launcher.
 
 ## Controls

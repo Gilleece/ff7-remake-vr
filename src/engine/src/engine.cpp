@@ -24,6 +24,8 @@
 
 #if FF7VR_ENGINE_WITH_RENDER
 #include "render_host.h"
+
+#include "ff7vr/render/render.h"
 #endif
 #if FF7VR_ENGINE_WITH_DLSS
 #include "dlss.h"
@@ -38,7 +40,9 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cstring>
 #include <cctype>
 #include <cstdio>
 #include <cwchar>
@@ -189,7 +193,7 @@ void read_camera_settings(const Config& cfg) {
     p.follow_distance = static_cast<float>(cfg.get_float("camera", "follow_distance", p.follow_distance.load()));
     p.aim_tolerance = static_cast<float>(cfg.get_float("camera", "aim_tolerance", p.aim_tolerance.load()));
     p.camera_blend_seconds = std::max(0.0f, static_cast<float>(cfg.get_float("camera", "blend_seconds", p.camera_blend_seconds.load())));
-    p.combat_level = cfg.get_string("camera", "combat", "level") != "game";
+    p.combat_level = cfg.get_string("camera", "combat", "game") != "game";
     p.miss_seconds = std::clamp(static_cast<float>(cfg.get_float("camera", "miss_seconds", p.miss_seconds.load())), 0.0f, 30.0f);
     p.collision = cfg.get_bool("camera", "collision", p.collision.load());
     p.collision_margin = std::max(0.0f, static_cast<float>(cfg.get_float("camera", "collision_margin", p.collision_margin.load())));
@@ -220,6 +224,37 @@ void read_camera_settings(const Config& cfg) {
         p.eye_up = u;
     }
 }
+
+// The graphics card's dedicated memory in MB for the texture streaming defaults (0 while the
+// game's device is not known, or without the render module).
+double card_dedicated_mb() {
+#if FF7VR_ENGINE_WITH_RENDER
+    return render::DedicatedVideoMemoryMb();
+#else
+    return 0.0;
+#endif
+}
+
+#if FF7VR_ENGINE_WITH_RENDER
+// What the render module's frame budget warning needs from the engine (render.h).
+bool frame_budget_facts(render::FrameBudgetFacts* out) {
+    out->sceneFrames = device::scene_frames();
+    out->ssrFix = fixes::ssr_fix_mode();
+    out->renderScale = device::render_scale_now();
+#if FF7VR_ENGINE_WITH_DLSS
+    const dlss::BudgetFacts d = dlss::budget_facts();
+    out->dlss = d.on;
+    out->dlssEyeMs = d.eye_ms;
+    out->dlssEyeEvaluations = d.eye_evaluations;
+    strncpy_s(out->dlssPreset, d.preset, _TRUNCATE);
+    out->dlssInWidth = d.in_w;
+    out->dlssInHeight = d.in_h;
+    out->dlssOutWidth = d.out_w;
+    out->dlssOutHeight = d.out_h;
+#endif
+    return true;
+}
+#endif
 
 // Full resolution and the Tick hook, off the loader thread.
 void resolve_and_prepare() {
@@ -264,7 +299,7 @@ bool start(const StartupContext& ctx) {
         g_opt.allow_unknown_build = cfg.get_bool("stereo", "allow_unknown_build", false);
         g_opt.light_fix = cfg.get_bool("stereo", "light_fix", true);
         g_opt.movie_screen = cfg.get_bool("stereo", "movie_screen", true);
-        movie::set_cutscene(cfg.get_bool("stereo", "cutscene_screen", false));
+        movie::set_cutscene(cfg.get_bool("stereo", "cutscene_screen", true));
         movie::set_cutscene_times(static_cast<int>(cfg.get_int("stereo", "cutscene_screen_delay_ms", 500)),
                                   static_cast<int>(cfg.get_int("stereo", "cutscene_screen_hold_ms", 300)));
         audio_listener::set_enabled(cfg.get_bool("first_person", "audio_listener", true));
@@ -304,7 +339,16 @@ bool start(const StartupContext& ctx) {
                 stereo_cvars.emplace_back(std::move(name), log::widen(line.substr(eq + 3)));
             }
         }
+        {
+            auto in_ini = [&](const wchar_t* name) {
+                return std::any_of(stereo_cvars.begin(), stereo_cvars.end(), [&](const auto& kv) { return _wcsicmp(kv.first.c_str(), name) == 0; });
+            };
+            cvar::set_card_defaults(in_ini(L"r.Streaming.PoolSize"), in_ini(L"r.Streaming.Boost"), &card_dedicated_mb);
+        }
         cvar::set_stereo_overrides(std::move(stereo_cvars));
+#if FF7VR_ENGINE_WITH_RENDER
+        render::SetFrameBudgetFacts(&frame_budget_facts);
+#endif
 #if FF7VR_ENGINE_WITH_RENDER
         g_opt.host = cfg.get_string("stereo", "host", "render");
 #else

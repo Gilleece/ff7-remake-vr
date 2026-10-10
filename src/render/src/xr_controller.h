@@ -105,6 +105,8 @@ public:
     std::string Status();
     // `vram` dev command: the process's video memory usage and budget now.
     std::string VideoMemoryStatus();
+    // The dedicated video memory of the game's graphics card in MB (0 before its device is seen).
+    double DedicatedVideoMemoryMb();
     std::string Capture(const std::string& prefix, uint32_t timeoutMs);
     std::string Recenter();
     // Snap turn: turns the views by `degrees` (positive = right) on top of the recenter, from
@@ -122,7 +124,7 @@ public:
     std::string SimulateCommand(const std::string& args);
 
     // Engine interface (see render.h).
-    void SetMode(Mode m) { mode_.store(m); }
+    void SetMode(Mode m);
     Mode GetMode() const { return mode_.load(); }
     bool GetEyeSetup(EyeSetup* out);
     StereoFrame BeginGameFrame();
@@ -324,6 +326,7 @@ private:
     std::atomic<uint64_t> screenInStereo_{0};  // frames ended with the screen layer while in stereo mode
     GpuTimer gpu_;
     int64_t lastStatsQpc_ = 0;
+    uint64_t budgetStereoSubmitted_ = 0;  // submittedStereo_ at the previous timing window (XR thread)
     xr::FrameStats lastFrameStats_{};  // backend counters at the previous report (XR thread)
     std::string lastPresentInfo_;
 };

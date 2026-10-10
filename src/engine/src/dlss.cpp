@@ -714,6 +714,9 @@ struct Info {
     std::uint64_t ms_n[3]{};
     double win_ms_sum[2]{};  // since the last frame-time window line (window_line)
     std::uint64_t win_ms_n[2]{};
+    double all_ms_sum = 0;   // both eyes, never reset (budget_facts)
+    std::uint64_t all_ms_n = 0;
+    unsigned feat_preset = 0, feat_w = 0, feat_h = 0, feat_ow = 0, feat_oh = 0;  // the newest feature
     std::string bench;
     float jitter_px[2][2]{};
     std::string dump;
@@ -1210,6 +1213,13 @@ bool ensure_feature(ID3D11DeviceContext* ctx, int eye, UINT w, UINT h, bool& cre
     f.min_w = dynamic ? min_w : w;
     f.min_h = dynamic ? min_h : h;
     created = true;
+    with_info([&](Info& i) {
+        i.feat_preset = preset;
+        i.feat_w = w;
+        i.feat_h = h;
+        i.feat_ow = ow;
+        i.feat_oh = oh;
+    });
     static bool dll_logged = false;
     if (!dll_logged) {
         dll_logged = true;
@@ -1870,6 +1880,8 @@ void collect_timing(ID3D11DeviceContext* ctx) {
             if (t.eye < 2) {
                 i.win_ms_sum[t.eye] += total;
                 ++i.win_ms_n[t.eye];
+                i.all_ms_sum += total;
+                ++i.all_ms_n;
             }
         });
     }
@@ -3506,7 +3518,7 @@ void start(const Config& cfg, const std::filesystem::path& dll_dir) {
     g_set.enabled = cfg.get_bool("dlss", "enabled", false);
     g_set.init_requested = cfg.get_bool("dlss", "init", false);
     unsigned p = 0;
-    if (parse_preset(cfg.get_string("dlss", "preset", "default"), p)) g_set.preset = p;
+    if (parse_preset(cfg.get_string("dlss", "preset", "m"), p)) g_set.preset = p;
     g_set.auto_exposure = cfg.get_bool("dlss", "auto_exposure", true);
     g_set.mv_jitter = static_cast<int>(cfg.get_int("dlss", "mv_jitter", 2));
     g_set.cut_reset = cfg.get_bool("dlss", "camera_cut_reset", true);
@@ -3520,7 +3532,7 @@ void start(const Config& cfg, const std::filesystem::path& dll_dir) {
     g_set.own_params = cfg.get_string("dlss", "params", "shared") == "feature";
     g_set.firefly = cfg.get_bool("dlss", "firefly", false);
     {
-        const std::string tb = cfg.get_string("dlss", "texture_bias", "off");
+        const std::string tb = cfg.get_string("dlss", "texture_bias", "auto");
         if (!parse_tex_bias(tb)) {
             log::warn("dlss: texture_bias '{}' not understood (auto, auto-1, off or a negative number); off", tb);
             parse_tex_bias("off");
@@ -3589,7 +3601,7 @@ void start(const Config& cfg, const std::filesystem::path& dll_dir) {
     // [dlss] input_scale: the share of each eye's width and height rendered before DLSS scales
     // it up. It sets [stereo] render_scale (the view rects; with dynamic resolution its upper
     // bound) while DLSS upscales; r.ScreenPercentage, if also set, multiplies with it.
-    const double input = cfg.get_float("dlss", "input_scale", 0.5);
+    const double input = cfg.get_float("dlss", "input_scale", 0.60);
     {
         const std::string out = cfg.get_string("dlss", "output", "runtime");
         g_set.output_runtime = out != "engine";
@@ -3816,6 +3828,21 @@ void output_texture(EyeTexture& eyes) {
 }
 
 bool is_output_texture(ID3D11Texture2D* t) { return t && g_up_out && t == g_up_out.Get(); }
+
+BudgetFacts budget_facts() {
+    BudgetFacts b;
+    b.on = g_set.enabled.load(std::memory_order_relaxed);
+    with_info([&](Info& i) {
+        b.eye_ms = i.all_ms_sum;
+        b.eye_evaluations = i.all_ms_n;
+        b.preset = preset_name(i.feat_preset);
+        b.in_w = i.feat_w;
+        b.in_h = i.feat_h;
+        b.out_w = i.feat_ow;
+        b.out_h = i.feat_oh;
+    });
+    return b;
+}
 
 std::string window_line(double seconds) {
     Tally w;

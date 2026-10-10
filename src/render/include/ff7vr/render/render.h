@@ -54,6 +54,7 @@
 #include "ff7vr/xr/xr.h"
 
 #include <cstdint>
+#include <string>
 
 struct ID3D11Texture2D;
 
@@ -69,6 +70,10 @@ enum class Mode { Screen, Stereo };
 // Any thread.
 void SetMode(Mode mode);
 Mode GetMode();
+
+// Any thread: the dedicated video memory of the game's graphics card in MB (the adapter of
+// the device whose swap chain is presented); 0 before that device was seen.
+double DedicatedVideoMemoryMb();
 
 // What the engine needs to size its render target and build projections.
 struct EyeSetup {
@@ -200,6 +205,31 @@ void FoveationSetUpscaling(bool upscaled, float inputShare);
 // thread; must be cheap and thread-safe.
 using StickSource = void (*)(float* left, float* right);
 void SetStickSource(StickSource source);
+// The same for a PlayStation pad (libScePad, read by the engine's pad hook): its stick
+// deflections, 0..1, at each poll. Any thread, lock-free. A reading older than a quarter of
+// a second counts as sticks at rest (the pad was unplugged or is no longer polled).
+void NotePlayStationSticks(float left, float right);
+
+// ============================ FRAME BUDGET =================================
+// Every timing window in stereo gameplay the render module compares the game's frame
+// interval with the headset's refresh period and, when frames take longer for two windows
+// in a row, writes one warning naming the likely cause ([log] frame_budget; docs/render.md,
+// "Frame budget"). What only the engine knows comes from this callback, called on the XR
+// thread once per window; counters are running totals (the module takes differences).
+struct FrameBudgetFacts {
+    uint64_t sceneFrames = 0;       // frames whose 3D scene was rendered in stereo (none on loading screens and movies)
+    bool dlss = false;              // DLSS replaces the anti-aliasing (on and evaluating)
+    double dlssEyeMs = 0;           // GPU time of DLSS evaluations, summed over eyes and frames
+    uint64_t dlssEyeEvaluations = 0;
+    char dlssPreset[12]{};          // "default", "J" .. "M"
+    uint32_t dlssInWidth = 0, dlssInHeight = 0, dlssOutWidth = 0, dlssOutHeight = 0;  // per eye, the newest feature
+    int ssrFix = -1;                // [stereo] ssr_fix in effect (-1 unknown)
+    float renderScale = 1.0f;       // [stereo] render_scale (or the dynamic resolution's current scale)
+};
+using FrameBudgetFactsFn = bool (*)(FrameBudgetFacts* out);
+void SetFrameBudgetFacts(FrameBudgetFactsFn fn);
+// One short line: "54 fps / 72 Hz, GPU-bound: DLSS preset L" or "within budget" (any thread).
+std::string frame_budget_summary();
 
 // ============================ SETTINGS PANEL ===============================
 // The in-headset settings panel ([menu] in ff7vr.ini) reads the real gamepad and hands

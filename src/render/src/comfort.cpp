@@ -19,7 +19,11 @@ namespace ff7vr::render {
 namespace {
 
 std::atomic<StickSource> g_source{nullptr};
-std::atomic<float> g_sharpen{0.5f};
+// The PlayStation pad's sticks (NotePlayStationSticks) and the QPC of the reading.
+std::atomic<float> g_psLeft{0.0f}, g_psRight{0.0f};
+std::atomic<int64_t> g_psQpc{0};
+constexpr double kPsStaleS = 0.25;  // an older reading counts as sticks at rest
+std::atomic<float> g_sharpen{1.0f};
 
 struct Settings {
     float vignette = 0.0f;  // strength at full stick deflection, 0 = off
@@ -53,16 +57,40 @@ double QpcSeconds(int64_t d) {
 // Stick deflection beyond the dead zone, 0..1.
 float Deflection(float mag) { return std::clamp((mag - kDeadZone) / (1.0f - kDeadZone), 0.0f, 1.0f); }
 
+int64_t QpcNow() {
+    LARGE_INTEGER q;
+    QueryPerformanceCounter(&q);
+    return int64_t(q.QuadPart);
+}
+
+// The PlayStation pad's stick deflections if the reading is recent, else 0.
+void PlayStationSticks(float* left, float* right) {
+    const int64_t at = g_psQpc.load(std::memory_order_relaxed);
+    const bool fresh = at != 0 && QpcSeconds(QpcNow() - at) < kPsStaleS;
+    *left = fresh ? g_psLeft.load(std::memory_order_relaxed) : 0.0f;
+    *right = fresh ? g_psRight.load(std::memory_order_relaxed) : 0.0f;
+}
+
 std::string Text(const Settings& s) {
+    const int64_t at = g_psQpc.load();
+    const std::string ps = at ? std::format("; PlayStation pad sticks {:.2f} {:.2f} ({:.0f} ms ago)", g_psLeft.load(), g_psRight.load(),
+                                            QpcSeconds(QpcNow() - at) * 1000.0)
+                              : std::string("; no PlayStation pad reading");
     return std::format("vignette {:.2f} radius {:.2f} softness {:.2f}{}; level now {:.2f}, peak since last status {:.2f}, last stick {:.2f}, "
-                       "frames darkened {}",
+                       "frames darkened {}{}",
                        s.vignette, s.radius, s.softness, s.test ? " (test: forced on)" : "", g_shownLevel.load(), g_peakLevel.exchange(0.0f),
-                       g_lastStick.load(), g_framesOn.load());
+                       g_lastStick.load(), g_framesOn.load(), ps);
 }
 
 }  // namespace
 
 void SetStickSource(StickSource source) { g_source = source; }
+
+void NotePlayStationSticks(float left, float right) {
+    g_psLeft.store(std::clamp(left, 0.0f, 1.0f), std::memory_order_relaxed);
+    g_psRight.store(std::clamp(right, 0.0f, 1.0f), std::memory_order_relaxed);
+    g_psQpc.store(QpcNow(), std::memory_order_relaxed);
+}
 
 namespace comfort {
 
@@ -77,7 +105,7 @@ void Start(const Config& c) {
                       "comfort status | vignette <0..1> | radius <half-heights> | softness <half-heights> | test 0|1: the comfort vignette "
                       "while the sticks move or turn the view",
                       [](std::string_view args) { return Command(std::string(args)); });
-    g_sharpen = static_cast<float>(std::clamp(c.get_float("picture", "sharpen", 0.5), 0.0, 1.0));
+    g_sharpen = static_cast<float>(std::clamp(c.get_float("picture", "sharpen", 1.0), 0.0, 1.0));
     log::info("render: picture sharpen {:.2f}", g_sharpen.load());
     dev_commands::add("sharpen", "sharpen [0..1]: the unsharp mask of the eye images ([picture] sharpen); no value = status",
                       [](std::string_view args) {
@@ -106,18 +134,17 @@ xr::Vignette Update(const xr::Fov fov[2]) {
         std::lock_guard lk(g_mutex);
         s = g_set;
     }
-    const int64_t now = [] {
-        LARGE_INTEGER q;
-        QueryPerformanceCounter(&q);
-        return int64_t(q.QuadPart);
-    }();
+    const int64_t now = QpcNow();
     const float dt = g_lastQpc ? std::clamp(float(QpcSeconds(now - g_lastQpc)), 0.0f, 0.1f) : 0.0f;
     g_lastQpc = now;
 
     float target = 0.0f;
     if (s.vignette > 0.0f) {
-        float l = 0.0f, r = 0.0f;
+        float l = 0.0f, r = 0.0f, psl = 0.0f, psr = 0.0f;
         if (const StickSource src = g_source.load()) src(&l, &r);
+        PlayStationSticks(&psl, &psr);  // either pad moves the view
+        l = std::max(l, psl);
+        r = std::max(r, psr);
         g_lastStick = std::max(l, r);
         target = s.test ? 1.0f : std::max(Deflection(l), Deflection(r));
     }

@@ -1559,6 +1559,11 @@ std::string Command(const std::string& argsIn) {
 
 bool EyeTrackingRequested() { return g_eyeTrackingRequested.load(); }
 
+void PeekGpuMedians(double* sceneMs, size_t* sceneSamples, double* afterMs, size_t* afterSamples) {
+    *sceneMs = g_sceneSeries.Median(sceneSamples);
+    *afterMs = g_afterSeries.Median(afterSamples);
+}
+
 std::vector<std::string> TakeTimingLines() {
     std::vector<std::string> out;
     for (Series* s : {&g_sceneSeries, &g_afterSeries, &g_cpuSeries}) {

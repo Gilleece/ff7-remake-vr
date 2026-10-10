@@ -107,6 +107,16 @@ void tick() {
 }
 
 void filter_sticks(unsigned long user, short* lx, short* ly, short* rx, short* ry) {
+#if FF7VR_ENGINE_WITH_RENDER
+    // The comfort vignette reads XInput pad 0 from the XInput proxy; a PlayStation pad
+    // (users 4..7) only passes here. Its sticks as they are, before any filtering.
+    if (user >= 4 && user < kPads && lx && ly && rx && ry) {
+        auto mag = [](short x, short y) {
+            return std::min(1.0f, std::sqrt(float(x) * float(x) + float(y) * float(y)) / 32767.0f);
+        };
+        render::NotePlayStationSticks(mag(*lx, *ly), mag(*rx, *ry));
+    }
+#endif
     (void)ry;
     // Only while 3D renders: menus, movies and the virtual screen get the stick as it is.
     if (user >= kPads || !lx || !ly || !rx || !device::active()) return;

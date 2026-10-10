@@ -307,12 +307,13 @@ character, so it often fails the aim test; in play the mode flipped between the 
 and the game camera several times per battle, and each flip moved the eyes by up to a couple
 of metres in one frame. Two things change that:
 
-- `[camera] combat = level` (default): while the battle signal (or `fp combat 1`) says a
+- `[camera] combat = level`: while the battle signal (or `fp combat 1`) says a
   battle is in progress, the aim test is waived as long as the view target is still the
   game's camera actor or the pawn and the pivot is within `follow_distance`; the eyes stay on
   the level boom around the character. A cutscene camera in a battle (a `CineCameraActor`)
-  fails the view-target test and still gets the game camera. `combat = game` keeps the aim
-  test in battles. The status shows `in_battle` and `hold` (1 = the aim test failed and was
+  fails the view-target test and still gets the game camera. `combat = game` (default)
+  keeps the aim test in battles, so the game's own battle shots are used when its camera
+  looks away from the character. The status shows `in_battle` and `hold` (1 = the aim test failed and was
   waived this frame); the mode line reads `third person (level boom)` with the reason
   `battle, held through the battle camera`.
 - Every change between the level boom, the game boom, first person and the game camera,
@@ -986,7 +987,7 @@ movement (not rotated by design), how it feels.
 | `follow_distance` | `1500` | cm; a camera farther than this from the pivot is not treated as the follow camera |
 | `aim_tolerance` | `75` | cm; largest distance of the pivot from the camera's line of sight for the follow camera |
 | `miss_seconds` | `1.5` | seconds the camera must look away from the pivot before the game camera takes over |
-| `combat` | `level` | `level`: in a battle the level boom holds while the battle camera frames the enemies (see "Battle camera"); `game`: the aim test as outside battles |
+| `combat` | `game` | `game`: the aim test as outside battles, so the game's own battle shots are used when its camera looks away from the character; `level`: in a battle the level boom holds while the battle camera frames the enemies (see "Battle camera") |
 | `blend_seconds` | `0.35` | seconds a change between the camera modes takes (0 = cut); a change of view target is always a cut |
 | `collision` | `1` | the level boom is shortened in front of what is between the character and the eyes (see "Camera collision") |
 | `collision_margin` | `20` | cm kept between the eyes and what the collision trace hit |
@@ -2170,6 +2171,20 @@ Warning: when over budget stays above 1 MB for 5 s, the log gets once
 r.Streaming.PoolSize or lower r.Streaming.Boost (...)`, and `texture streaming: back within
 the pool` once it has been back at zero for 3 s.
 
+Defaults by card size (`cvar::set_card_defaults`, `src/engine/src/cvars.cpp`): when the ini
+has no `r.Streaming.PoolSize` (or no `r.Streaming.Boost`) under `[stereo_cvars]`, the first
+start of stereo reads the dedicated memory of the game's graphics card
+(`DXGI_ADAPTER_DESC::DedicatedVideoMemory` of the presented device's adapter,
+`render::DedicatedVideoMemoryMb`) and adds to the stereo overrides: pool 6000 MB and Boost 2
+from 15 GB (a 16 GB card reports a little less than 16), pool 3500 MB from 9.5 GB, 2000 MB
+below; Boost is left to the game below 15 GB. Like every `[stereo_cvars]` line they are set
+only while stereo renders and put back after. One line in the log: `cvar: card 16 GB:
+texture streaming pool 6000 MB and Boost 2 by default; set r.Streaming.PoolSize under
+[stereo_cvars] to choose`. An ini line for a key always wins for that key (graphics profiles
+count as ini lines). Without the render module (fixed host) nothing is added. Checked
+headless on the 16 GB development card: that line, then `cvar: r.Streaming.PoolSize = 6000`
+and `cvar: r.Streaming.Boost = 2` at the switch to stereo.
+
 Tuning: raise `r.Streaming.PoolSize` (under `[stereo_cvars]`, or live with `cvar set`) until
 over budget stays at 0 in the places that matter, keeping it below what the card's memory
 allows (the `video memory:` line); or lower `r.Streaming.Boost`. Measured headless
@@ -2272,7 +2287,7 @@ WebMMedia plugin, so every movie frame is most likely decoded on the CPU and upl
 
 ### Cutscenes on the virtual screen
 
-`[stereo] cutscene_screen = 1` (default 0) treats a scripted camera shot like a movie.
+`[stereo] cutscene_screen = 1` (default; `0` = off) treats a scripted camera shot like a movie.
 At the end of every `player::tick` (game thread) `audio_listener::player_frame` hands the
 watcher the frame's camera state: the view target counts as an **authored camera** when it
 is neither the pawn nor the game's `EndCameraActor` (a `CineCameraActor` or any other

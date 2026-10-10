@@ -44,6 +44,11 @@ std::string Line(const Info& i);
 // quick restart can leave (docs/benchmarking.md). The first query also logs how long
 // after the previous session's last log line this one started, as a warning when it
 // was less than 90 s.
-void LogReport(ID3D11Device* device);
+// Returns the figures it logged (valid = false when the query failed).
+Info LogReport(ID3D11Device* device);
+
+// The adapter's dedicated video memory in MB (DXGI_ADAPTER_DESC of the device's adapter),
+// 0 when it cannot be read. Thread-safe, no side effects on the reports.
+double DedicatedMb(ID3D11Device* device);
 
 }  // namespace ff7vr::render::video_memory

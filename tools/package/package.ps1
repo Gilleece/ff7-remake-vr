@@ -125,14 +125,13 @@ foreach ($k in $items.Keys) {
     Copy-Item -LiteralPath $items[$k] -Destination (Join-Path $pkg $k) -Force
 }
 if ($Dlss) {
-    # The -dlss package ships with DLSS on at input_scale 0.65 (the template keeps it off:
-    # the standard build has no DLSS).
+    # The -dlss package ships with DLSS on at the template's input_scale, 0.60 (the template
+    # keeps DLSS off: the standard build has no DLSS).
     $iniPath = Join-Path $pkg 'ff7vr.ini'
     $ini = [System.IO.File]::ReadAllText($iniPath)
     $ini = $ini -replace '(?m)^(\[dlss\](?:\r?\n(?!\[)[^\r\n]*)*?\r?\nenabled = )0 ', '${1}1 '
-    $ini = $ini -replace '(?m)^(\[dlss\](?:\r?\n(?!\[)[^\r\n]*)*?\r?\ninput_scale = )0\.5 ', '${1}0.65'
     if ($ini -notmatch '(?m)^\[dlss\](?:\r?\n(?!\[)[^\r\n]*)*?\r?\nenabled = 1 ') { throw 'Could not switch DLSS on in the package ini' }
-    if ($ini -notmatch '(?m)^\[dlss\](?:\r?\n(?!\[)[^\r\n]*)*?\r?\ninput_scale = 0\.65') { throw 'Could not set input_scale = 0.65 in the package ini' }
+    if ($ini -notmatch '(?m)^\[dlss\](?:\r?\n(?!\[)[^\r\n]*)*?\r?\ninput_scale = 0\.60 ') { throw 'The package ini does not have input_scale = 0.60 under [dlss]' }
     [System.IO.File]::WriteAllText($iniPath, $ini)
 }
 $ver = @(

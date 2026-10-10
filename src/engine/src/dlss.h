@@ -75,6 +75,18 @@ bool is_output_texture(ID3D11Texture2D* t);
 // creations and failed checks. Empty while DLSS is off and nothing happened.
 std::string window_line(double seconds);
 
+// Any thread: running totals for the frame budget warning (render.h, FrameBudgetFacts): the
+// GPU time of the timed evaluations (both eyes, motion vectors and copy included) and their
+// count, and the newest feature's preset and per-eye sizes.
+struct BudgetFacts {
+    bool on = false;
+    double eye_ms = 0;
+    std::uint64_t eye_evaluations = 0;
+    const char* preset = "default";
+    unsigned in_w = 0, in_h = 0, out_w = 0, out_h = 0;
+};
+BudgetFacts budget_facts();
+
 // Dev pipe: "dlss ..." (see docs/dlss.md).
 std::string command(const std::string& args);
 

@@ -477,8 +477,8 @@ anti-aliasing at 3264x3072 without DLSS, `d3`; luma gradient and outliers as in 
 So at this size DLSS's image from 0.75 already carries more fine detail (and more specks)
 than the game's own image at full size, the bias moves it further that way, and the visible
 gain is small. NVIDIA's warning about flicker and moiré was not tested under motion. The bias
-is therefore off by default and left as an option (`auto` or `auto-1`) for players who find
-textures soft; it costs 0.1 to 0.3 ms. Textures in the coarsely shaded part of foveated
+was therefore first left off, with `auto` and `auto-1` as options for players who find
+textures soft; `auto` is the default now. It costs 0.1 to 0.3 ms. Textures in the coarsely shaded part of foveated
 rendering are limited by the shading rate, not by the mip (`d2/sheet_tb_sign.png`).
 
 ### DLSS before the tonemapper (not built; what it would take)
@@ -1178,8 +1178,8 @@ always uses AutoExposure"; the mod sets the auto-exposure flag.
 - A mod DLL built with `-DFF7VR_DLSS=ON`: `tools\package\package.ps1 -Dlss` builds it into
   `build\release-dlss` and makes a package named `ff7vr-<date>-<commit>-dlss` (the default package
   is built explicitly without DLSS, and the script checks the DLL for NGX names either way).
-- `[dlss] enabled = 1` in `ff7vr.ini`; `mode = upscale` and `input_scale = 0.5` (or 0.58, 0.67)
-  are the defaults. With `output = runtime` (the default) `input_scale` is a share of the
+- `[dlss] enabled = 1` in `ff7vr.ini`; `mode = upscale` and `input_scale = 0.60` (0.5 to 0.67 are
+  useful) are the defaults. With `output = runtime` (the default) `input_scale` is a share of the
   headset's resolution: to keep the cost of rendering about 3072 wide per eye and get a
   larger, sharper eye image, raise the headset's resolution and lower `input_scale` to match
   (Virtual Desktop's 4032x3648 with 0.76; section "Output at the runtime's size").
@@ -1220,12 +1220,12 @@ the attribution of supplement 7.1(b) is in that file and the README.
 | `enabled` | `0` | `1`: DLSS replaces the game's temporal anti-aliasing while the engine renders in stereo |
 | `init` | `0` | `1`: initialise NGX and query DLSS at the first stereo frame even while `enabled = 0` (diagnostics) |
 | `mode` | `upscale` | `upscale`: DLSS scales each eye up to its full size from the rendered part (see "Upscale mode"); `dlaa`: anti-aliasing at the rendered size, in place of the game's |
-| `input_scale` | `0.5` | upscale mode: the rendered share of each eye's width and height. With `output = runtime` the engine's eye target is this share of the runtime's eye size; with `output = engine` it sets `[stereo] render_scale` at start (also the upper bound of `[stereo] dynamic_resolution`), and `0` leaves `render_scale` alone |
+| `input_scale` | `0.60` | upscale mode: the rendered share of each eye's width and height. With `output = runtime` the engine's eye target is this share of the runtime's eye size; with `output = engine` it sets `[stereo] render_scale` at start (also the upper bound of `[stereo] dynamic_resolution`), and `0` leaves `render_scale` alone |
 | `output` | `runtime` | upscale mode: `runtime`: the engine renders at `input_scale` of the runtime's eye size and DLSS writes the runtime's size into a texture of its own that goes to the runtime (section "Output at the runtime's size"); `engine`: the engine's buffers at the runtime's size, the views at `input_scale` of them, DLSS's result copied back (the way before 06/10) |
 | `mv_textures` | `eye` | `eye`: each eye's motion vectors at the origin of a texture of its own; `shared`: one double-wide texture read at the right eye's sub-rectangle base, which made the right eye shimmer (section "The right eye's shimmer"; only to compare) |
-| `preset` | `default` | DLSS model: `default` (NVIDIA's choice for the mode), `j`, `k`, `l`, `m`. The NVIDIA App's override for the game wins |
+| `preset` | `m` | DLSS model: `default` (NVIDIA's choice for the mode), `j`, `k`, `l`, `m`. The NVIDIA App's override for the game wins |
 | `firefly` | `0` | `1`: NGX's `Hint.UseFireflySwatter` at feature creation (features are recreated when it changes). No visible change and no cost measured in this game (section "The dots at 3264x3072") |
-| `texture_bias` | `off` | upscale mode: a mip bias added to the game's anisotropic sampler states while DLSS upscales: `off`, `auto` (`log2` of the input's share of the output), `auto-1` (one more, NVIDIA's recommendation), `auto+<x>`/`auto-<x>`, or a fixed negative number (section "Texture mip bias") |
+| `texture_bias` | `auto` | upscale mode: a mip bias added to the game's anisotropic sampler states while DLSS upscales: `off`, `auto` (`log2` of the input's share of the output, about -0.7 at 0.60), `auto-1` (one more, NVIDIA's recommendation), `auto+<x>`/`auto-<x>`, or a fixed negative number (section "Texture mip bias") |
 | `texture_bias_trilinear` | `0` | `1`: also the game's trilinear samplers |
 | `auto_exposure` | `1` | DLSS computes the exposure itself |
 | `mv_jitter` | `2` | how the camera motion vectors treat the jitter: `2` as the engine computes them, not flagged; `1` flagged as jittered; `0` the jitter difference removed |

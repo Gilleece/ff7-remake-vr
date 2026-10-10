@@ -57,6 +57,10 @@ std::string PresetName();
 // One line for the status command.
 std::string Status();
 
+// Medians of the GPU scene and after-the-scene series of the current timing period (not
+// reset) and their sample counts; both counts 0 while foveation does not measure.
+void PeekGpuMedians(double* sceneMs, size_t* sceneSamples, double* afterMs, size_t* afterSamples);
+
 // Summaries of the foveation timing series for the periodic timing block (resets them).
 std::vector<std::string> TakeTimingLines();
 

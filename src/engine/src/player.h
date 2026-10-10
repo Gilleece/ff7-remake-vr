@@ -35,7 +35,7 @@ struct Settings {
     std::atomic<float> aim_tolerance{75.0f}; // [camera] aim_tolerance: the pivot's largest distance from the camera's line of sight (cm)
     std::atomic<float> follow_distance{1500.0f};  // camera farther than this from the pawn: not the follow camera (cm)
     std::atomic<float> camera_blend_seconds{0.35f};  // [camera] blend_seconds: moves between level boom, game boom and game camera (0 = cut)
-    std::atomic<bool> combat_level{true};    // [camera] combat = level: in a battle the level boom holds while the camera frames
+    std::atomic<bool> combat_level{false};   // [camera] combat = level: in a battle the level boom holds while the camera frames
                                              // enemies (view target still the game's camera, pivot within follow_distance);
                                              // game = the same test as outside battles
     std::atomic<float> miss_seconds{1.5f};   // [camera] miss_seconds: how long the camera must look away before the game camera takes over

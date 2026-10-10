@@ -146,10 +146,57 @@ void set_stereo_overrides(std::vector<std::pair<std::wstring, std::wstring>> ove
     g_stereo_overrides = std::move(overrides);
 }
 
+namespace {
+bool g_card_pool_ini = true, g_card_boost_ini = true;  // nothing to decide until set_card_defaults
+double (*g_card_mb)() = nullptr;
+bool g_card_decided = false;
+std::string g_card_text;  // g_mutex
+
+// Game thread, before the overrides are applied: adds the card-size defaults once.
+void decide_card_defaults() {
+    if (g_card_decided || !g_card_mb || (g_card_pool_ini && g_card_boost_ini)) return;
+    const double mb = g_card_mb();
+    if (!(mb > 0)) return;  // the device is not known yet: try again at the next start of stereo
+    g_card_decided = true;
+    const double gb = mb / 1024.0;
+    // Cards report a little less than their nominal size (a 16 GB card about 15.99 GB).
+    const bool big = gb >= 15.0, mid = gb >= 9.5;
+    const int pool = big ? 6000 : mid ? 3500 : 2000;
+    std::string chosen, why;
+    if (!g_card_pool_ini) {
+        g_stereo_overrides.emplace_back(L"r.Streaming.PoolSize", std::to_wstring(pool));
+        chosen = std::format("texture streaming pool {} MB", pool);
+    }
+    if (!g_card_boost_ini && big) {
+        g_stereo_overrides.emplace_back(L"r.Streaming.Boost", L"2");
+        chosen += chosen.empty() ? "r.Streaming.Boost 2" : " and Boost 2";
+    }
+    const std::string set = g_card_pool_ini ? "r.Streaming.Boost" : "r.Streaming.PoolSize";
+    std::string text = chosen.empty() ? std::format("card {:.0f} GB: the [stereo_cvars] lines decide the texture streaming pool", gb)
+                                      : std::format("card {:.0f} GB: {} by default; set {} under [stereo_cvars] to choose", gb, chosen, set);
+    log::info("cvar: {}", text);
+    std::lock_guard lock(g_mutex);
+    g_card_text = std::move(text);
+}
+}  // namespace
+
+void set_card_defaults(bool pool_from_ini, bool boost_from_ini, double (*dedicated_mb)()) {
+    g_card_pool_ini = pool_from_ini;
+    g_card_boost_ini = boost_from_ini;
+    g_card_mb = dedicated_mb;
+    if (pool_from_ini && boost_from_ini) log::info("cvar: texture streaming pool and Boost from [stereo_cvars] (no defaults by card size)");
+}
+
+std::string card_defaults_text() {
+    std::lock_guard lock(g_mutex);
+    return g_card_text;
+}
+
 void stereo_overrides(bool on) {
     if (on == g_overrides_on) return;
     g_overrides_on = on;
     if (on) {
+        decide_card_defaults();
         g_saved.clear();
         for (const auto& [name, value] : g_stereo_overrides) {
             const auto cur = get(name);

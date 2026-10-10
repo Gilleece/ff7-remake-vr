@@ -3,6 +3,7 @@
 #include "comfort.h"
 #include "d3d11_hooks.h"
 #include "foveation.h"
+#include "frame_budget.h"
 #include "menu.h"
 #include "ui_battle.h"
 #include "xr_controller.h"
@@ -99,11 +100,13 @@ RenderConfig LoadConfig(const StartupContext& ctx) {
     r.uiLayerWidth = static_cast<uint32_t>(std::clamp<long long>(c.get_int("ui", "layer_width", r.uiLayerWidth), 0, 8192));
     r.uiMirror = c.get_bool("ui", "mirror", r.uiMirror);
 
+    // Defaults: a picture adjustment that suits the eye images in the headsets tried so far
+    // (docs/render.md, "Picture adjustment"); `picture reset` gives the unadjusted image.
     xr::PictureAdjust pic;
-    pic.brightness = static_cast<float>(c.get_float("picture", "brightness", pic.brightness));
-    pic.contrast = static_cast<float>(c.get_float("picture", "contrast", pic.contrast));
-    pic.saturation = static_cast<float>(c.get_float("picture", "saturation", pic.saturation));
-    pic.gamma = static_cast<float>(c.get_float("picture", "gamma", pic.gamma));
+    pic.brightness = static_cast<float>(c.get_float("picture", "brightness", -0.25));
+    pic.contrast = static_cast<float>(c.get_float("picture", "contrast", 1.5));
+    pic.saturation = static_cast<float>(c.get_float("picture", "saturation", 1.2));
+    pic.gamma = static_cast<float>(c.get_float("picture", "gamma", 1.0));
     pic.blackLevel = static_cast<float>(c.get_float("picture", "black_level", pic.blackLevel));
     r.picture = ClampPicture(pic);
     r.brightnessUpKey = static_cast<int>(std::clamp<long long>(c.get_int("controls", "brightness_up_key", 0), 0, 255));
@@ -173,6 +176,8 @@ void RegisterCommands() {
                           if (a.size() >= 2 && a.front() == '"' && a.back() == '"') a = a.substr(1, a.size() - 2);
                           return XrController::Get().Capture(a, timeout);
                       });
+    dev_commands::add("budget", "budget status | on | off: the frame budget warning (frame interval against the headset's refresh period)",
+                      [](std::string_view args) { return frame_budget::Command(std::string(args)); });
     dev_commands::add("vram", "vram: the game's video memory usage against the budget Windows grants it (card and shared system memory)",
                       [](std::string_view) { return XrController::Get().VideoMemoryStatus(); });
     dev_commands::add("xr-pause", "xr-pause status | on | off | key <vk> | send: the pause key sent when the headset comes off",
@@ -242,6 +247,7 @@ bool start(const StartupContext& ctx) {
               cfg.brightnessDownKey, cfg.brightnessStep);
     foveation::Configure(*ctx.config);
     comfort::Start(*ctx.config);
+    frame_budget::Configure(*ctx.config);
     ui_battle::Start(*ctx.config);
     menu::Start(*ctx.config, ctx.config->source().empty() ? ctx.dll_dir / L"ff7vr.ini" : ctx.config->source());
     HookCallbacks cb;
@@ -266,6 +272,7 @@ void stop() {
 }
 
 void SetMode(Mode mode) { XrController::Get().SetMode(mode); }
+double DedicatedVideoMemoryMb() { return g_started.load(std::memory_order_relaxed) ? XrController::Get().DedicatedVideoMemoryMb() : 0.0; }
 Mode GetMode() { return XrController::Get().GetMode(); }
 bool GetEyeSetup(EyeSetup* out) { return XrController::Get().GetEyeSetup(out); }
 void RequestSnapTurn(float degrees) {

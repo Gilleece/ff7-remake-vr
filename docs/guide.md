@@ -185,13 +185,14 @@ while an `xinput1_3.dll` it did not put there is in the folder.
   shoulder height. The horizon stays level: the game camera turns you left and
   right, but looking up and down is done with your head. Leaning moves the view.
 - **In a battle** the view switches to third person by itself and back to first
-  person afterwards (seen working in play). You stay behind the character while the
-  game's battle camera frames the enemies (`[camera] combat = level`); any change of
+  person afterwards (seen working in play). The game's own battle shots are used when
+  its camera looks away from the character (`[camera] combat = game`); `combat = level`
+  keeps you behind the character instead; any change of
   shot glides over a third of a second instead of jumping (`[camera] blend_seconds`).
-- **Conversations and cutscenes** that use their own camera shots are shown from the
-  game's camera, as the game frames them (not seen in testing either).
-  `[stereo] cutscene_screen = 1` shows them flat on the virtual screen instead, like a
-  movie, if the game camera's cuts and pans in 3D are uncomfortable.
+- **Conversations and cutscenes** that use their own camera shots play flat on the
+  virtual screen, like a movie (`[stereo] cutscene_screen = 1`, the default). With
+  `cutscene_screen = 0` they are shown from the game's camera in 3D, as the game frames
+  them (not seen in testing), with its cuts and pans.
 - **HUD and menus in the world:** on a flat panel about 3 m in front of you, 3.56 x
   2 m, that stays in place when you turn your head. Whatever the game shows full
   screen (main menu, command menu, dialogue) is on that panel too.
@@ -302,8 +303,8 @@ session it is `ff7vr.log` in the game's `End\Binaries\Win64` folder).
    too dark or washed out compared with the monitor.
 5. **Load a save. The world in 3D.** Correct depth, both eyes aligned (no double
    vision when looking at a near object), the horizon level, the scene stable when
-   you turn your head. The 3D view is sharpened a little by default (`[picture]
-   sharpen = 0.5`; `0` turns it off, `1` is strong). The log shows `stereo: rendering STEREO ... (eye WxH ...)` with
+   you turn your head. The 3D view is sharpened by default (`[picture]
+   sharpen = 1`, strong; `0` turns it off, `0.5` is medium). The log shows `stereo: rendering STEREO ... (eye WxH ...)` with
    the per-eye size the headset's runtime asked for.
 6. **Smoothness.** Turning your head must feel smooth. The log's `timing:` lines
    every 10 seconds show the frame rate and `errors 0`.
@@ -372,10 +373,12 @@ session it is `ff7vr.log` in the game's `End\Binaries\Win64` folder).
 
 - **The picture looks washed out and too bright in the headset.** Cause not known
   yet. It is there with HDR off in the game's options and the game's brightness
-  setting at 0. Switching bloom off makes it a little better: in `ff7vr.ini`, section
-  `[stereo_cvars]` at the end, remove the `;` at the start of the line
-  `; r.BloomQuality = 0` (console variables in that section apply only while 3D
-  runs).
+  setting at 0. Bloom is off in the packages (`r.BloomQuality = 0` in `ff7vr.ini`, section
+  `[stereo_cvars]` at the end), which makes it a little better; put a `;` at the start
+  of that line to get the game's bloom back (console variables in that section apply only
+  while 3D runs). The picture controls also default to a darker, more contrasty image
+  (`[picture] brightness = -0.25`, `contrast = 1.5`, `saturation = 1.2`; `0`, `1`, `1`
+  give the game's image unchanged).
 - **Wait a minute and a half between quitting the game and starting it again**: a game
   started sooner can run at about 10 frames per second for minutes (the launcher and
   `ff7vr-start.cmd` wait by themselves; a start from Steam does not).
@@ -520,6 +523,24 @@ stays above zero for 5 seconds the log also gets a `texture streaming: ... over 
 warning. Raise `r.Streaming.PoolSize` under `[stereo_cvars]` (in MB; keep it within your
 graphics card's memory, see the `video memory:` line) or lower `r.Streaming.Boost`.
 
+Without an `r.Streaming.PoolSize` line the mod picks the pool by the graphics card's memory,
+only while 3D renders: 6000 MB and `r.Streaming.Boost = 2` on a 16 GB card, 3500 MB on a
+10 to 12 GB card, 2000 MB on a smaller one (the game's own pool is 4000 MB). The log says
+which, for example `cvar: card 16 GB: texture streaming pool 6000 MB and Boost 2 by default;
+set r.Streaming.PoolSize under [stereo_cvars] to choose`. A line of your own always wins
+(each of the two keys separately).
+
+When frames take longer than the headset's refresh allows for 20 seconds in a row, the log
+gets one warning with the likely cause and a suggestion, for example `frame budget: 54 fps
+against 72 Hz (18.5 ms per frame, budget 13.9). GPU-bound: scene 7.8 ms, after the scene
+9.6 ms, of which DLSS about 8 ms (preset l at 3708x3396). Try [dlss] preset = default, or a
+lower resolution in Virtual Desktop`, and `frame budget: back within budget` when they are
+back. The causes it names: GPU-bound (the 3D scene, DLSS, or the work after the scene), the
+game's own frame (CPU or uploads; see the copy engine figure in the `video memory:` line),
+or the headset's runtime pacing the frames at a lower rate. Loading screens, movies and
+the first 30 seconds after a load or a switch into 3D are left out, and there is at most
+one warning a minute. `[log] frame_budget = 0` turns it off.
+
 For orientation only, two numbers from the development PC, first room of one save
 game, standing still, without a headset:
 
@@ -554,7 +575,7 @@ previous frames, in place of the game's own anti-aliasing. The DLSS model, NVIDI
 there; without it the mod renders without DLSS (checked: the log says `NGX is not
 available` and both eyes are rendered at the headset's full size). In the `-dlss` package DLSS is on
 (`enabled = 1` under `[dlss]` in `ff7vr.ini`; `enabled = 0` turns it off); `input_scale`
-sets the rendered share of each eye's width and height (0.65 in the package; 0.5 = a
+sets the rendered share of each eye's width and height (0.60 in the package; 0.5 = a
 quarter of the pixels). On the development PC (RTX 5080, no headset,
 DLSS model L) 0.5 cost about as much as the game at full size (5 % more at 3072x3264 per
 eye, between 9 % less and 4 % more at 3600x3600), with detail close to it and far sharper
@@ -565,9 +586,8 @@ It has been played in a headset (Virtual Desktop at 3264x3072 per eye with `inpu
 coarsely drawn edges: DLSS keeps them sharp and, from a smaller rendered image, makes them
 larger. `[foveation] preset = quality` removes them for about 0.5 ms per frame (measured
 without a headset at 3264x3072 and 0.75: `performance` 9.6 ms, `quality` 10.1 ms, off 11.0 ms);
-at 4032x3648 with 0.76 they are smaller. `[dlss] texture_bias = auto` (or `auto-1`) makes
-textures a little crisper for 0.1 to 0.3 ms; it is off because DLSS's image is already more
-detailed than the game's own at that size. Earlier `-dlss` packages could hang
+at 4032x3648 with 0.76 they are smaller. `[dlss] texture_bias = auto` (the default; `auto-1` goes one step
+further, `off` turns it off) makes textures a little crisper for 0.1 to 0.3 ms. Earlier `-dlss` packages could hang
 the graphics card (within seconds at the title screen); that was a fault in the mod, fixed
 in commit `ef2688a` (a package's folder name contains the commit it was built from; any
 later one has the fix). It needs an NVIDIA RTX graphics
