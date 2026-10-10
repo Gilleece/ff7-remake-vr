@@ -174,6 +174,8 @@ All keys are optional. `ff7vr.ini` sits next to the DLL.
 | `[foveation] ...` | on, `quality` | foveated rendering in stereo; keys in [Foveated rendering](#foveated-rendering) |
 | `[picture] brightness`, `contrast`, `saturation`, `gamma`, `black_level` | `-0.25`, `1.5`, `1.2`, `1`, `0` | colour adjustment of the eye images and the virtual screen, not the UI layer; the defaults make the picture a little darker, with more contrast and colour, and `picture reset` (`0`, `1`, `1`, `1`, `0`) changes nothing (see [Picture controls](#picture-controls)) |
 | `[controls] brightness_up_key`, `brightness_down_key`, `brightness_step` | `0`, `0`, `0.05` | keys (virtual-key codes, 0 = none) that change `[picture] brightness` by the step while the game window has the focus |
+| `[comfort] cut_fade_ms`, `cut_fade_deg`, `cut_fade_m` | `0`, `25`, `1.0` | fade the eye images to black and back over `cut_fade_ms` when the game's own camera jumps by more than the angle or the distance between two frames (see [Fade on camera cuts](#fade-on-camera-cuts)); `0` = off |
+| `[headset:<name>]` | none | per-headset values as `section.key = value` lines, applied when `<name>` is part of the headset's or the runtime's name (see [Per-headset settings](#per-headset-settings)) |
 
 Screen size: 1.8 m at 2 m covers about 48 x 28 degrees for a 16:9 image, so
 the whole picture including the HUD in the corners is visible with small eye
@@ -255,6 +257,67 @@ would win if it were probed; a session, once created, is kept, so connecting
 a different headset later needs `xr-restart` or `xr-runtime auto`; the
 process names that mark a runtime as running for Meta Quest Link, PICO and
 Windows Mixed Reality are untested.
+
+### Per-headset settings
+
+`[headset:<name>]` sections (`src/core/config.cpp`, `src/core/headset_profile.cpp`) hold
+lines of the form `section.key = value`; the key may itself contain dots
+(`stereo_cvars.r.Streaming.PoolSize = 4000`). They are not base keys: `Config` keeps them
+apart, and one of them at a time becomes a layer that every getter consults before the
+base values (`Config::set_overlay`; thread-safe, the base map never changes). A section
+applies when `<name>` is contained, ignoring case, in the OpenXR system name
+(`XrSystemProperties::systemName`, the `system '...'` of the `xr: session created` line)
+or in the runtime name; the first matching section in file order wins. The same section
+written twice is merged (the later line wins); a line without a `section.` prefix is
+ignored and named in the log.
+
+When: the system name exists only once an OpenXR instance does, long after the modules
+read their settings at start. Probing the runtime before `start_modules` was rejected:
+it delays the hooks that must be in place before the engine creates its device, can
+start a runtime's server (SteamVR) and would run before the backend's implicit API layer
+handling. Instead:
+
+1. At start (`DllMain`, before `[graphics] profile` is expanded and before any module
+   reads the config) the headset is taken from what is known without an instance: the
+   Null backend's fixed names (`Null HMD (Quest 3 class)`, `Null`), otherwise the
+   previous session's names from `ff7vr-headset.txt` beside the DLL. Every key of the
+   matched section then counts as written in the ini, including keys read only at start
+   and a `graphics.profile` line.
+2. When a session is created (`xr_controller.cpp`, after the `session created` line)
+   the real names are matched again and written to `ff7vr-headset.txt` (only when the
+   ini has `[headset:...]` sections). If they select another section than the one in
+   effect, the layer is replaced and every key whose value changes is pushed through the
+   settings registry (`live_settings.h`) on a thread of its own: a key with a live setter
+   changes at once (`headset: change: applied live: ...`); a key with none, or one the
+   panel marks **next start**, is logged as `takes effect at the next start` and does,
+   because the next start reads the new headset from the file. A key the new layer drops
+   goes back to the base value, or to the built-in default.
+
+The launcher moves `ff7vr-headset.txt` to its package folder when it restores the game
+folder and copies it back at the next start. `cfg.dump()` (the `config:` lines at the
+top of the log) shows each key the layer sets with its base value
+(`picture.contrast = 1.25   [headset:quest 3; base 1.5]`) and lists every section.
+The settings panel saves a value that the active section sets into that section, so the
+other headsets' base value stays as it is. Dev commands: `headset status` (sections, the
+start's choice and its source, the last session's names, the active layer and its keys,
+the last change's live and next-start keys) and `headset session <system>|<runtime>`,
+which acts as if a session had reported those names (without writing the file).
+
+Checked on the Null backend (11/10, an ini with `[headset:quest 3]` setting
+`picture.contrast = 1.25`, `comfort.cut_fade_ms = 150`,
+`stereo_cvars.r.ViewDistanceScale = 1.7`, `xr.resolution_scale = 0.9`, and
+`[headset:pico]` setting `picture.contrast = 0.8`, `comfort.vignette = 0.5`): at start
+`[headset:quest 3]` applied from the Null backend's name and `[headset:pico]` did not
+(`picture` read contrast 1.25, `comfort status` cut fade 150 ms, `cvar get
+r.ViewDistanceScale` 1.7); `headset session PICO 4 Ultra|VirtualDesktopXR` switched to
+`[headset:pico]`: contrast 0.8, vignette 0.5 and cut fade back to its default 0 applied
+live, `r.ViewDistanceScale = 1.5` and `xr.resolution_scale = 1.0` were listed for the next
+start (the `[stereo_cvars]` rows of the panel have no live path) and the cvar stayed 1.7;
+`headset session Null HMD (Quest 3 class)|Null` brought every value back. Unit tests
+(`ff7vr_core_tests`): parsing, merging, matching, the layer, `dump()`, the panel's save
+into the section, and the start from the Null names and from `ff7vr-headset.txt`. Not
+tried: a real headset, a start that reads `ff7vr-headset.txt` in the game, the launcher's
+copy of the file.
 
 ### Implicit API layers
 
@@ -835,6 +898,52 @@ corner keep their brightness. `stick R 1 0 800` through the virtual pad raised
 the level to 1.00 (last stick 1.00) and it was back at 0 within 0.6 s. Cost: the
 eye images already go through the shader blit, and `gpu copy` read 0.081 ms per
 frame with and without the vignette (6 s each).
+
+## Fade on camera cuts
+
+`[comfort] cut_fade_ms` (default `0` = off; `150` is typical) fades both eye images to
+black over the first half of that time and back over the second half (smoothstep) when
+the game's own camera cuts. Detection (`render::NoteGameCamera`, called by the engine's
+`CalculateStereoViewOffset` once per stereo frame, game thread): the game camera's
+rotation and location before the camera modes change them, with the engine tick as the
+frame number. Two consecutive frames (a gap, such as stereo off or a loading screen,
+breaks the comparison) whose view directions differ by more than `cut_fade_deg`
+(default 25, the angle between the two directions; roll ignored) or whose locations
+differ by more than `cut_fade_m` (default 1.0 m) count as a cut, but only when both
+frames showed a scripted camera: `player::scripted_camera()`, the camera mode is the game
+camera as it is (no first person, no level or game boom: a cutscene's or conversation's
+authored shot, a scripted move of the game's camera, a battle shot with
+`[camera] combat = game`) and no move between camera modes is running. So the follow
+camera, the mod's mode blends and the switch into or out of a cutscene never fade; the
+snap turn and recenter turn the views after this point and are not seen at all. Jumps
+outside a scripted camera are only counted. A cut during the darkening half is covered
+by the running fade; one during the brightening half turns back to black from the level
+shown.
+
+Where: the eye blit (`blit.hlsl`), after the comfort vignette: `rgb *= 1 - black`
+(`xr::Vignette::black`, `vig1.z` in the shader constants), so the HUD panel and the
+virtual screen keep their brightness and the game itself is untouched. Live:
+`comfort cutfade <ms> | cutdeg <deg> | cutm <m>`, `comfort cut [ms]` starts one fade now
+(test; `cut_fade_ms`, else 150 ms), `comfort jump <deg>` turns the camera as the detection
+sees it by that angle from the next frame on (an emulated jump through the real gating;
+`jump -<deg>` takes it back), and `comfort status` ends with the cut-fade counters
+(fades, test fades, jumps outside a scripted camera, frames compared and scripted,
+frames darkened, the last and the largest jump, the darkness now). The settings panel
+has the three keys under Comfort (`cut_fade_ms` live, the thresholds live as well).
+
+Checked on the Null backend (11/10, 1858x1987 eye captures, the street of the latest
+save): `comfort cut 6000` with a capture about 2.7 s in took both eyes from a mean
+encoded level of 50.2 / 52.0 to 3.3 / 3.6, nearly black (the capture fell just before
+the darkest point; the HUD panel's "Commands Menu" kept its brightness), and 5 s later
+they were back at 50.3 / 52.1. Emulated jumps (`comfort jump 40`, seen as 39.4 degrees): in the follow camera
+(first person) two jumps were counted as outside a scripted camera and did not fade;
+with `fp aim 1` (every frame misses the aim test, so the game camera is used as it is,
+`cam_kind 0`) the same jump and the jump back each started a fade (`fades 2`), and a
+capture 0.7 s into a 2 s fade showed both eyes darkened (mean 20, brightest 136,
+against 50 and 255). A 3-minute walk with the keyboard (186 s, 18027 stereo frames
+compared, `cut_fade_ms = 150`) gave no fade and no jump above the
+thresholds. Not tried: a real cutscene or conversation (none is reached
+by the dev harness), a headset.
 
 ## Timing
 

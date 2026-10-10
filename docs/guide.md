@@ -124,6 +124,22 @@ To pin one runtime instead, set `[xr] runtime` in `ff7vr.ini` to `virtualdesktop
 `.json` file. Either way the choice applies to this game only; the PC's default
 OpenXR runtime is never changed.
 
+### Settings per headset
+
+If you switch between headsets (a Quest 3 and a PICO through Virtual Desktop, say), the
+end of `ff7vr.ini` can hold a section per headset: `[headset:quest 3]`, `[headset:pico]`.
+Its lines are `section.key = value` (`picture.contrast = 1.3`,
+`xr.resolution_scale = 0.9`, `stereo_cvars.r.Streaming.PoolSize = 4000`) and replace
+that key's value above for that headset only. A section applies when its name is part of
+the headset's name as the runtime reports it (the log's `system '...'` line, such as
+`Meta Quest 3`) or of the runtime's name (`VirtualDesktopXR`), ignoring case; the first
+matching section wins. The headset is only known once it connects, so the mod remembers
+the last one in `ff7vr-headset.txt`: a session with the same headset as last time starts
+with all of its settings. After a switch, everything the settings panel changes live
+follows at once and the rest (resolution, texture pool and the other **next start**
+rows) from the next start; the log lists which (`headset: ...` lines). Saving from the
+settings panel writes a value the headset's section sets into that section.
+
 ## Installing without the launcher
 
 The mod can also stay in the game folder for good, without the launcher. Every
@@ -163,7 +179,7 @@ are deleted.
 
 **Remove:** delete from `End\Binaries\Win64`: `xinput1_3.dll`, `ff7vr.ini`,
 `ff7vr-start.cmd`, `ff7vr.log`, the folders `ff7vr-docs` and `ff7vr-logs`, and any
-`ff7vr-crash-*.dmp` file or `ff7vr-captures` folder; rename `dxgi.dll.vr-disabled`
+`ff7vr-crash-*.dmp`, `ff7vr-headset.txt` or `ff7vr.ini.bak` file or `ff7vr-captures` folder; rename `dxgi.dll.vr-disabled`
 back to `dxgi.dll` if you set it aside. Nothing else on the PC is changed.
 
 The launcher package (`start-vr.cmd`, above) is the alternative that leaves nothing
@@ -391,7 +407,11 @@ session it is `ff7vr.log` in the game's `End\Binaries\Win64` folder).
 - **Turning comfort.** The game camera turns you smoothly, as in the flat game, which
   some players find uncomfortable: `[comfort] snap_turn = 45` turns in steps instead
   (pad only), and `[comfort] vignette = 0.6` darkens the edges of the view while you
-  move or turn with the sticks.
+  move or turn with the sticks. A cutscene's camera cuts from shot to shot like a film;
+  `[comfort] cut_fade_ms = 150` turns each cut into a short fade to black and back
+  (a turn above `cut_fade_deg`, 25 degrees, or a move above `cut_fade_m`, 1 m, from one
+  frame to the next while the game's own camera shows; the follow camera, snap turn and
+  recenter never fade). Off by default; not yet tried on a real cutscene.
 - **Markers over enemies and objects** sit over their objects at any HUD size
   (`[ui] align = 1`). Objects nearer than about 1.5 m can show them up to a degree
   apart, as the HUD panel is one flat image at `[ui] distance`. `[ui] align = 0`
