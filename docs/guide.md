@@ -212,21 +212,27 @@ while an `xinput1_3.dll` it did not put there is in the folder.
 | Delete | hold View/Back + Y | settings panel |
 
 The settings panel opens in front of you (1.2 m away, 0.8 m wide; `[menu] distance`,
-`size`). It lists first/third person, snap turn, the comfort vignette, the HUD panel's
-distance and size, render scale, the graphics profile, foveated rendering, brightness,
-contrast, saturation, gamma, sharpening, world scale, head bob, the level horizon
-(decoupled pitch), Recenter, 3D on/off, Save and Close. Every change applies at once.
-While it is open the game does not see the gamepad: D-pad up/down (or the left stick)
-choose a line, left/right change its value, A selects (Recenter, Save, Close, or the next
-choice), X saves, B closes, and View/Back + Y closes it again. On the keyboard: arrows,
-Enter, S to save and Escape to close; the game sees those keys too (Escape also opens
-the game's own menu, S walks backwards), so the pad is the better way. Saving writes
+`size`). It holds every setting of `ff7vr.ini` in seven categories shown as tabs: Picture,
+Comfort, View, HUD, Performance, Controls and Advanced. Most changes apply at once; a row
+marked **next start** (and its help line) is a setting the game only reads when it starts:
+its value is saved, and it takes effect the next time you start the game. The Performance
+tab shows the frame rate against the headset's, the GPU time and the video memory. While
+the panel is open the game sees neither the gamepad nor the panel's keys: D-pad up/down
+(or the left stick) choose a row (up from the first row reaches the tabs), left/right
+change its value (on the tabs: the category), LB/RB switch category, A selects (an action,
+the next choice, or "set / not set" on an optional line), Y resets the row to its
+default, X saves, B closes, and View/Back + Y closes it again. Each category ends with
+Reset this category, Reset all (both ask you to select twice), Save and Close. On the
+keyboard: arrows, Enter, Backspace (default), S (save) and Delete (close). Saving writes
 only the values that differ from `ff7vr.ini` into it, in place: every comment and the
-order stay, and the previous file is kept as `ff7vr.ini.bak`. The launcher copies a
+order stay (an optional line under `[stereo_cvars]` is uncommented or commented out where
+it is), and the previous file is kept as `ff7vr.ini.bak`. The launcher copies a
 changed `ff7vr.ini` back to the package folder after the session. Changing render scale
 or foveation sets the graphics profile to custom, so the saved values are the ones used
-at the next start. 3D on/off is not saved (it is for now only). `[menu] key` changes the
-key (0 = none), `[menu] pad = 0` turns the gamepad combination off.
+at the next start. "3D now" is not saved (it is for now only; "3D at start" is the saved
+switch). `[menu] key` changes the key (0 = none), `[menu] pad = 0` turns the gamepad
+combination off. With a PlayStation pad read by the game itself, touch pad click +
+triangle opens it.
 
 On the gamepad the game does not see the mod's combinations. View/Back pressed on its
 own still reaches the game, but only when you release it (so the map does not open on
