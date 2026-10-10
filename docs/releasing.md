@@ -10,7 +10,14 @@
    (`actions/attest-build-provenance`), uploads the zips and `SHA256SUMS.txt` as the
    run's artifact `ff7vr-packages` and, for a tag, creates a **draft** release with the
    zips, `SHA256SUMS.txt` and a "Verify your download" section as its notes.
-3. Read the draft, add the changes to the notes, publish it.
+3. Wait for the run to finish, open the draft, put the "What's new" and the setup text
+   above the "Verify your download" section it already carries, and publish it. Do
+   not create the release by hand before the run has made the draft: the
+   attestations belong to the zips the workflow built, so only those zips verify with
+   `gh attestation verify`. If a release for the tag exists already when the run gets
+   there, the workflow leaves it alone and only keeps its own zips as the run's
+   artifact (that is what happened for v1.3, whose assets were built locally and
+   carry hashes but no matching attestation).
 
 The version in the DLL's log line, its version resource and the first line of
 `VERSION.txt` comes from `git describe --tags --always --dirty` at build time
@@ -34,7 +41,8 @@ end up in the files). The hashes in a release are the ones of the files attached
   `Get-FileHash <zip>`), compared with the release notes or `SHA256SUMS.txt`.
 - Provenance (built by this repository's workflow from the tagged commit), with the
   GitHub CLI: `gh attestation verify <zip> --repo <owner>/ff7-remake-vr`, where
-  `<owner>` is the account the release is published under.
+  `<owner>` is the account the release is published under. This only matches the zips
+  the workflow attached; a zip built and attached by hand verifies by its hash only.
 
 ## Repository settings (by hand)
 

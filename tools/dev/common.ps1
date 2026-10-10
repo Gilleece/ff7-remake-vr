@@ -295,8 +295,32 @@ function Get-LockInfo([string]$lockPath = $script:GameLock) {
     if ($null -eq $text) { $text = '' }
     $owner = ($text.Trim() -split '\s+')[0]
     $created = (Get-Item -LiteralPath $lockPath).CreationTime
+    # The PowerShell that took the lock: alive or not decides whether a lock of the same
+    # owner name is really ours (re-entrant) or left behind by a run that died.
+    $lockPid = 0
+    if ($text -match 'pid=(\d+)') { $lockPid = [int]$Matches[1] }
+    $alive = $false
+    if ($lockPid -gt 0) { $alive = [bool](Get-Process -Id $lockPid -ErrorAction SilentlyContinue) }
     return [pscustomobject]@{ Path = $lockPath; Owner = $owner; Text = $text.Trim(); Created = $created;
-                              AgeMinutes = [math]::Round(((Get-Date) - $created).TotalMinutes, 1) }
+                              AgeMinutes = [math]::Round(((Get-Date) - $created).TotalMinutes, 1);
+                              Pid = $lockPid; PidAlive = $alive }
+}
+
+# True when $candidate is this PowerShell or one of its ancestors (the lock taken by a
+# script that then started this one).
+function Test-OwnProcess([int]$candidate) {
+    if ($candidate -le 0) { return $false }
+    $id = $PID
+    for ($i = 0; $i -lt 16 -and $id -gt 0; $i++) {
+        if ($id -eq $candidate) { return $true }
+        try {
+            $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $id" -ErrorAction Stop
+            # Only a chain of shells counts (a script started by a script); anything else ends it.
+            if ($proc.Name -notmatch '^(powershell|pwsh|cmd|conhost)\.exe$') { return $false }
+            $id = [int]$proc.ParentProcessId
+        } catch { return $false }
+    }
+    return $false
 }
 
 # Returns $true once the lock is ours. Waits (polling every PollSeconds) up to WaitSeconds.
@@ -306,12 +330,17 @@ function Lock-Game([string]$owner = (Get-DefaultOwner), [int]$waitSeconds = 0, [
     $deadline = (Get-Date).AddSeconds($waitSeconds)
     while ($true) {
         $info = Get-LockInfo $lockPath
-        if ($info -and $info.Owner -eq $owner) {
+        # Re-entrant only for the PowerShell that took the lock (or a script it started):
+        # a lock with our name but another live process is another run with the same
+        # name, and one with a dead process is left over from a run that died.
+        if ($info -and $info.Owner -eq $owner -and (Test-OwnProcess $info.Pid)) {
             Write-Step "Lock $lockPath already held by '$owner' (re-entrant)"
             return $true
         }
-        if ($info -and $info.AgeMinutes -gt 20 -and @(Get-GameProcesses).Count -eq 0) {
-            Write-Step "Removing stale lock held by '$($info.Owner)' ($($info.AgeMinutes) min old, game not running)"
+        $gameRunning = @(Get-GameProcesses).Count -gt 0
+        if ($info -and -not $gameRunning -and (($info.Pid -gt 0 -and -not $info.PidAlive) -or $info.AgeMinutes -gt 20)) {
+            $why = if ($info.Pid -gt 0 -and -not $info.PidAlive) { "its PowerShell (pid $($info.Pid)) is gone" } else { "$($info.AgeMinutes) min old" }
+            Write-Step "Removing stale lock held by '$($info.Owner)' ($why, game not running)"
             Remove-Item -Recurse -Force -LiteralPath $lockPath -ErrorAction SilentlyContinue
         }
         $ok = $false
@@ -1033,6 +1062,13 @@ function Stop-GameRun([string]$owner = (Get-DefaultOwner), [switch]$force) {
     $info = Get-LockInfo
     if ($info -and $info.Owner -ne $owner -and -not $force) {
         Write-Step "The game lock is held by '$($info.Owner)' ($($info.Text)); not touching their run. Use -Force to override."
+        return $false
+    }
+    # -Force covers a run whose PowerShell is gone (a crash, a closed window), never a run
+    # that is still going: stopping that one and taking its lock is how two launchers ended
+    # up driving one game.
+    if ($info -and $force -and $info.PidAlive -and -not (Test-OwnProcess $info.Pid)) {
+        Write-Step "The game lock is held by a live run of '$($info.Owner)' (pid $($info.Pid)); -Force does not stop a live run. Wait for it or ask its owner."
         return $false
     }
     $ok = $true

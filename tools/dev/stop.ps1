@@ -10,7 +10,7 @@
 
   If the game lock is held by another owner (env FF7VR_DEV_NAME differs), the
   script does nothing and exits 1, so it cannot kill someone else's run.
-  -Force overrides that.
+  -Force overrides that for a run whose PowerShell is gone; a live run of another owner is never stopped.
 
 .EXAMPLE
   powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev\stop.ps1

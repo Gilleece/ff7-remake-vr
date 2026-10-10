@@ -490,9 +490,11 @@ real backup folder).
 Only one person or script may run the game (or SteamVR) at a time on a
 machine. The lock is the directory `.locks\game` (`.locks\steamvr` for
 SteamVR). Creating a directory is atomic, so whoever creates it owns it;
-`owner.txt` inside records `<owner> <time> pid=<pid>`. A lock is stale when it
-is older than 20 minutes and no `ff7remake_` process runs; the next acquire
-removes a stale lock. Waiting callers poll every 30 seconds.
+`owner.txt` inside records `<owner> <time> pid=<pid>`. The lock is re-entrant only
+for the PowerShell that took it (or a script it started): a lock with the same owner
+name but another live process is treated as busy. A lock is stale when no
+`ff7remake_` process runs and either its PowerShell is gone or it is older than 20
+minutes; the next acquire removes a stale lock. Waiting callers poll every 30 seconds.
 
 ```
 lock.ps1 -Status
