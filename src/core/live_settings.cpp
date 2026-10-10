@@ -138,6 +138,7 @@ constexpr Default kDefaults[] = {
     {"log", "level", "debug"},
     {"log", "keep_sessions", "5"},
     {"log", "frame_budget", "1"},
+    {"log", "upload_check", "1"},
     {"crash", "enabled", "1"},
     {"crash", "first_chance", "1"},
     {"crash", "full_memory", "0", true},

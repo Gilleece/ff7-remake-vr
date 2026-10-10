@@ -1,6 +1,7 @@
 // Entry points of the render module: configuration, hooks, dev commands.
 
 #include "comfort.h"
+#include "d3d11_census.h"
 #include "d3d11_hooks.h"
 #include "foveation.h"
 #include "frame_budget.h"
@@ -10,6 +11,7 @@
 #include "ui_battle.h"
 #include "xr_controller.h"
 #include "pause_on_remove.h"
+#include "upload_check.h"
 
 #include "ff7vr/core/dev_commands.h"
 #include "ff7vr/core/hook.h"
@@ -182,6 +184,10 @@ void RegisterCommands() {
                       });
     dev_commands::add("budget", "budget status | on | off: the frame budget warning (frame interval against the headset's refresh period)",
                       [](std::string_view args) { return frame_budget::Command(std::string(args)); });
+    dev_commands::add("census", "census status: D3D11 objects created on the game's device by this mod, the game and other modules ([log] d3d11_census)",
+                      [](std::string_view args) { return census::Command(std::string(args)); });
+    dev_commands::add("upload", "upload status | now: the timed copy from system memory to the graphics card ([log] upload_check)",
+                      [](std::string_view args) { return upload_check::Command(std::string(args)); });
     dev_commands::add("vram", "vram: the game's video memory usage against the budget Windows grants it (card and shared system memory)",
                       [](std::string_view) { return XrController::Get().VideoMemoryStatus(); });
     dev_commands::add("xr-pause", "xr-pause status | on | off | key <vk> | send: the pause key sent when the headset comes off",
@@ -253,6 +259,8 @@ bool start(const StartupContext& ctx) {
     foveation::Configure(*ctx.config);
     comfort::Start(*ctx.config);
     frame_budget::Configure(*ctx.config);
+    census::Configure(*ctx.config);
+    upload_check::Configure(*ctx.config);
     live_settings::set_status("frame_budget", [] { return ff7vr::render::frame_budget_summary(); });
     ui_battle::Start(*ctx.config);
     menu::Start(*ctx.config, ctx.config->source().empty() ? ctx.dll_dir / L"ff7vr.ini" : ctx.config->source());

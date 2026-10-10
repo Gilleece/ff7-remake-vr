@@ -34,8 +34,12 @@ add_library(ff7vr_render STATIC
     src/d3d11_hooks.cpp
     src/foveation.h
     src/foveation.cpp
+    src/d3d11_census.h
+    src/d3d11_census.cpp
     src/frame_budget.h
     src/frame_budget.cpp
+    src/upload_check.h
+    src/upload_check.cpp
     src/menu.h
     src/menu.cpp
     src/menu_canvas.h
