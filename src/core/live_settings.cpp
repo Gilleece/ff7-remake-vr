@@ -136,6 +136,7 @@ constexpr Default kDefaults[] = {
     {"loader", "force_d3d11", "1"},
     {"log", "level", "debug"},
     {"log", "keep_sessions", "5"},
+    {"log", "frame_budget", "1"},
     {"crash", "enabled", "1"},
     {"crash", "first_chance", "1"},
     {"crash", "full_memory", "0", true},
