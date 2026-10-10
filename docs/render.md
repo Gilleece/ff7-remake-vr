@@ -544,8 +544,10 @@ warns at start when it is on). Capture and trace output paths are not restricted
   out (and the detail-level lines) show "not set (value)"; A switches between set and not
   set, Left/Right change the value and set it.
 - **Defaults.** One table in `live_settings.cpp` holds the built-in default of every key,
-  which is the value `tools/package/ff7vr.ini` ships (keep the two in step). Y (Backspace)
-  resets the selected row to it; Reset this category and Reset all ask for a second select
+  which is the value `tools/package/ff7vr.ini` ships (keep the two in step:
+  `ff7vr_core_tests.exe defaults tools/package/ff7vr.ini` lists every key whose value
+  differs from its default, and every key the table lacks). Y (Backspace) resets the
+  selected row to it; Reset this category and Reset all ask for a second select
   within 4 s. Resetting the graphics profile comes first, so it cannot undo the settings
   reset after it.
 - **Input.** Delete (`[menu] key`) or View/Back + Y opens and closes it. Pad: D-pad (or the
