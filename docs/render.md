@@ -754,7 +754,10 @@ reaches the XInput proxy: the engine's libScePad hook passes its sticks through 
 snap turn's stick filter, which hands their deflection, before any filtering, to
 `render::NotePlayStationSticks`; a reading older than 250 ms counts as sticks at rest.
 The larger of the two pads' deflections drives the vignette, and `comfort status`
-shows the PlayStation reading and its age. Per submitted stereo frame
+shows the PlayStation reading and its age (checked headless with `vignette 0.6`: the
+virtual PlayStation pad's left stick at full, `controls ps 0 0 1`, gave level 1.00 and
+`PlayStation pad sticks 1.00 0.00 (5 ms ago)`; after `controls ps off` the level was back
+at 0). Per submitted stereo frame
 (`comfort::Update`, presenting thread) the larger deflection beyond a 0.25 dead
 zone, scaled to 0..1, is the target; the level follows it linearly, from rest to
 full in 100 ms and back in 300 ms, and is eased (smoothstep) into the strength.
@@ -854,6 +857,15 @@ preset m at 0.60): stereo started at 14:57:28 and the windows until 14:58:02 wer
 `back within budget (90 fps against 90 Hz)`; `xr-sim pace 2` gave `45 fps against 90 Hz
 (22.2 ms per frame, budget 11.1). runtime-bound: Null paces the frames: the frame wait takes
 19.7 ms of each frame, the GPU 7.7 ms. ...`.
+
+A second session (2 x 2064x2208, no DLSS): the load before gameplay (a 1521 ms frame) held
+every window back for 30 s; `cvar set t.MaxFPS 40` gave `40 fps against 90 Hz (25.0 ms per
+frame, budget 11.1). game-thread-bound: the GPU takes 7.1 ms (scene 6.4, after the scene 0.7)
+and the frame wait 0.0 ms; the rest is the game's own frame (CPU, or uploads to the card);
+game copy engine 0 %. ...`; `t.MaxFPS 0` gave `back within budget` 20 s later; `xr-sim pace 2`
+right after was over budget in two windows 20 s after that warning, which were held back (`2
+held back` in `budget status`), and the runtime-bound warning came 60.0 s after the previous
+one. A window with a `capture` in it was skipped.
 
 ## Measured overhead
 
