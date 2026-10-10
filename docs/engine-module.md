@@ -525,19 +525,64 @@ captures after the toggles (`h05_third_toggled`, `h08_third_after_toggles`,
 - **Blend**: switching between third and first person moves the eye base over
   `blend_seconds` (smoothstep); a switch to or from an authored camera is a cut, as the
   game's own camera cuts there.
-- **Combat**: with `auto_combat = 1` the mode switches to third person while a battle is in
-  progress and back to the default afterwards (a manual toggle holds until then). The
-  signal is `battle_signal`, read once per frame on the game thread; every change of its
-  value is logged (`player: battle signal 0 -> 1`) together with the switch it causes
-  (`player: battle started: third person`). `fp combat 1|0|auto` overrides it for tests.
+- **Combat**: with `auto_combat = 1` the mode switches to third person while a fight is in
+  progress and back to the default afterwards (a manual toggle holds until then). A fight
+  is on when two conditions hold (`battle_state.h`, `battle_objects.cpp`):
+
+  1. the battle signal (`battle_signal`, read once per frame on the game thread) is on. In
+     play it turns on when the first fight of a battle area starts and **stays on until the
+     player leaves the area**, through the walks, shops and menus between fights (seen in a
+     session of 2026-10-10: on at the first fight, never off again in 25 minutes and two
+     more fights). It is a gate, not the fight;
+  2. with `battle_objects = 1` (default), the battle HUD's target marker is shown: a live
+     instance of `BattleTarget_New_C` (`battle_object_classes`) whose `Widget.IsVisible()`
+     is true, polled every 100 ms. The instances are found a slice of the object array per
+     poll (16,384 objects, a whole pass in about 1.5 s); objects destroyed and waiting for
+     the garbage collector are left out (`FUObjectItem::Flags` PendingKill/Unreachable).
+
+  A fight starts at once when the signal turns on (the start of the first fight in an area;
+  it then holds 8 s while the scan finds the marker of the new fight), or when the marker is
+  shown for two polls in a row while the signal is on (the later fights of the area). It
+  ends when the signal turns off, or when the marker has not been shown for
+  `battle_exit_seconds` (3 s). Shorter values flicker: the marker hides for 1.4, 2.0 and
+  2.3 s mid-fight while the target changes (recorded session; with 1.5 s the first fight
+  splits into four). `battle_objects = 0` gives the old behaviour (the signal alone).
+
+  Every change is logged with the condition that caused it, for example
+  `player: battle started (battle signal on): third person`,
+  `player: battle ended (no battle objects shown for 3.0 s): first person`,
+  `player: battle started (battle objects shown): third person`; changes of the signal
+  itself as `player: battle signal 0 -> 1`. Test overrides: `fp combat 1|0` force the
+  verdict, `fp combat area` forces the signal on and leaves the decision to the objects
+  (a fight then starts at once, as for a real signal, and ends 8 s later when no marker is
+  shown), `fp combat auto` returns to the real signals. `fp combat status` shows the
+  verdict, the last reason, the signal and the object poll; `fp combat objects 0|1`,
+  `fp combat exit <s>` and `fp combat classes <names>` change the settings live.
+  `ff7vr_engine_tests` replays the recorded session (three fights found, at 567.5 to
+  629.9 s, 885.1 to 963.8 s and 1004.3 to 1032.7 s; the owner switched back to first person
+  by hand at 632.6 s after the first) and `ff7vr_engine_tests --replay <ff7vr.log>` replays
+  any log recorded with `battle_log = 1`.
+
+  Why the target marker: in the recorded session the other battle classes did not follow
+  the fights closely. The damage-source components (`EndBattleDamageSourceComponent*`)
+  and `ATBEffect_Cell_C` stayed in the object array long after their fight and left it at
+  about 60 s intervals (929.7, 989.7, 1050.0, 1110.4 s; inferred: the engine's garbage
+  collection, which removes destroyed objects about once a minute), one homing
+  component for 58 s after its fight while the player walked and opened menus;
+  `ATBEffect_Cell_C` appears only when an ATB bar first fills (8 s into the first fight).
+  `BattleTarget_New_C` is created at the first fight (2.5 s after the signal) and kept;
+  its visibility followed all three fights. The HUD instances the diagnostic polled before
+  (two per class: `ATBGauge_C`, `EnemyStatus_C`, `Command_*`) never changed: they belong
+  to other widget trees than the live HUD (the battle diagnostic now also counts the
+  visible instances of every listed HUD class, `n:<class>=<visible>/<instances>`, and the
+  fight detection's poll, `objects=<shown>:<visible>/<instances>`).
 
   The default signal is `EndBattleAPI.GetBattleSceneID` (Square Enix's static battle
   function library, `/Script/EndGame`): no parameters, returns an FName, the ID of the
   current battle scene; the module treats a non-zero name index (anything but `None`) as a
-  battle. **Confidence: moderate, not verified in a battle.** What is verified: the function
-  exists, is called without faults every frame, and returns `None` in exploration (street
-  and first room of the Sector 7 slums). What is inferred: that it returns a battle scene
-  ID during a battle and `None` again afterwards. It was chosen over the other candidates
+  battle area. Verified in play (2026-10-10): `None` in exploration and after loading a save,
+  a scene ID from the first fight of an area on, and still on after the fights (see
+  above). It was chosen over the other candidates
   found in the object and name tables because it needs no object of a battle class (it is
   static) and its name and the game's data tables (`BattleSceneID`, `BattleScenePhase`,
   `GetBattleSceneCount(Name)`) describe battles as "battle scenes". Other candidates, all 0
@@ -1003,6 +1048,9 @@ movement (not rotated by design), how it feels.
 | `eye` | `head` | `head`: the eyes between the character's eye bones (`L_Eye`, `R_Eye`), or at its head bone if it has no eye bones; `offset`: at the pawn's location plus `eye_offset` |
 | `head_offset` | `2 0 0` | forward, right, up in cm from the eye bones (or head bone), turned with the camera's yaw |
 | `eye_offset` | `10 0 75` | forward, right, up in cm from the pawn's location (capsule centre), turned with the camera's yaw; used with `eye = offset` and whenever the head bone cannot be read |
+| `battle_objects` | `1` | a fight also needs the battle HUD's target marker shown; it ends `battle_exit_seconds` after the marker goes (see "Combat"); `0` = the signal alone |
+| `battle_exit_seconds` | `3` | seconds without the target marker before a fight ends |
+| `battle_object_classes` | `BattleTarget_New_C` | the classes whose live instances count as battle objects (widgets: when visible; other classes: while alive); comma separated |
 | `battle_signal` | `EndBattleAPI.GetBattleSceneID result=0:4` | `Class.Function [world] [result=<offset>:<size>]`: a reflected function read every frame on a live object of that class (or its class default object for a static function); a non-zero result means a battle; empty = no automatic switch (see "Combat") |
 | `hide` | `pass` | `pass`: the character's own meshes are left out of the main pass (shadow and footsteps kept) and the mesh components of other actors attached to them (the sword) are hidden, while in first person; `meshes`: hide all of them (footsteps go silent); `none`: hide nothing; `bones`, `head`: experimental |
 | `toggle_key` | `36` | virtual-key code of the keyboard toggle (36 = Home); `0` = none |
@@ -1060,7 +1108,8 @@ Through the dev pipe (`[dev] pipe = 1`, `tools\dev\send-input.ps1 -Pipe "<comman
 | `fp bones [text]` | bones of the character's skeletal meshes whose name contains the text (default `head`), with world location and offset from the pawn's location |
 | `fp funcs <text> [class text]`, `fp props <text> [class text]` | reverse engineering: reflected functions or properties whose name contains the text, with their class |
 | `fp call <object address \| class name> <Class.Function> [hex parameters]` | reverse engineering: calls a reflected function on the game thread and prints the first 48 bytes of its parameter block afterwards (return values follow the arguments); needs `[dev] unsafe_commands = 1` |
-| `fp combat <1\|0\|auto>` | test: pretend a battle is or is not in progress |
+| `fp combat <1\|0\|auto\|area>` | test: pretend a fight is or is not in progress; `area` forces the battle signal on and lets the battle objects decide |
+| `fp combat status`, `fp combat objects <0\|1>`, `fp combat exit <s>`, `fp combat classes <names>` | the fight detection: verdict, last reason, signal, object poll; its settings live |
 | `fp battlelog <0\|1>` | `[first_person] battle_log` (default 0): every 100 ms the candidate battle signals are read and one `battle diag:` line is written when one of them changes (and every 10 s): the mod's verdict, the mode, the battle signal's raw value, the battle HUD widgets (`IsVisible`/`IsInViewport`/`Visibility` enum), properties of the controller and the pawn (targets, battle components), objects whose class name contains Battle, the camera manager and the view target. Values that change more than 20 times in 10 s are left out of the change test. At start it lists the candidates and the widget blueprint classes present; later passes log the classes that come and go. Diagnostic only, no behaviour change (`src/engine/src/diag.cpp`) |
 | `fp promptlog <0\|1>`, `fp prompt status` | `[first_person] prompt_log` (default 0): the interaction prompt widget candidates (`FieldAction_Command_C`, `Field_BtnGuide_C`, `FieldTarget_*`, the talk menu...): one `prompt diag:` line when one changes visibility or moves more than 2 px (render translation, canvas slot offsets), with the game camera (`PlayerCameraManager.GetCameraLocation/Rotation`), the camera and eye base of the last stereo frame, the head pose (tracking space and world), the mode, `[ui] align` and the distances from the camera and the head to the pawn; at most 10 lines a second. `fp prompt status` shows the same facts at the last poll (only while the log is on) |
 | `fp signal <Class.Function> [world] [result=<offset>:<size>] \| none` | switch the battle signal while the game runs (same form as `battle_signal`); `fp status` shows its raw value |

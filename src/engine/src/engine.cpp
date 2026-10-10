@@ -5,6 +5,7 @@
 #include "fixes.h"
 #include "gpu_trace.h"
 #include "audio_listener.h"
+#include "battle_objects.h"
 #include "diag.h"
 #include "graphics.h"
 #include "menu_items.h"
@@ -210,6 +211,9 @@ void read_camera_settings(const Config& cfg) {
     p.pad_toggle = cfg.get_bool("first_person", "pad_toggle", p.pad_toggle.load());
     p.eye_head = cfg.get_string("first_person", "eye", "head") != "offset";
     player::set_battle_signal(cfg.get_string("first_person", "battle_signal", kBattleSignal));
+    p.battle_objects = cfg.get_bool("first_person", "battle_objects", p.battle_objects.load());
+    p.battle_exit_seconds = std::clamp(static_cast<float>(cfg.get_float("first_person", "battle_exit_seconds", p.battle_exit_seconds.load())), 0.1f, 60.0f);
+    battle::set_classes(cfg.get_string("first_person", "battle_object_classes", "BattleTarget_New_C"));
     const std::string hoff = cfg.get_string("first_person", "head_offset", "");
     float hf = 0, hr = 0, hu = 0;
     if (!hoff.empty() && sscanf_s(hoff.c_str(), "%f %f %f", &hf, &hr, &hu) == 3) {
