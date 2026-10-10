@@ -482,7 +482,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev\send-input.ps1 -Pi
 | `uihook proj` | log the projection matrices of the next two views the UI pass receives (in screen mode: the game camera's FOV) |
 | `fov ...` | foveated rendering: status, settings, one-frame trace, timing ([Foveation dev commands](#foveation-dev-commands)) |
 | `picture status` / `picture reset` / `picture <key> <value>` | the colour adjustment now, back to no change, or one key (`brightness`, `contrast`, `saturation`, `gamma`, `black_level`) set and clamped; applies from the next image copied to the headset ([Picture controls](#picture-controls)) |
-| `menu status` / `open` / `close` / `toggle` | the settings panel: open or closed, the selected line, every value, frames shown and images uploaded, the gamepad counters ([Settings panel](#settings-panel)) |
+| `menu status` / `open` / `close` / `toggle` / `cat` / `list` / `set` / `default` | the settings panel: open or closed, the category and selected row, the category's values, frames shown and images uploaded, the gamepad and keyboard counters; every setting with its default; set or reset one ([Settings panel](#settings-panel)) |
 | `menu up` / `down` / `left` / `right` / `select` / `back` / `save` | the panel's buttons: choose a line, change its value, select, close, save to `ff7vr.ini` |
 | `menu dump <png>` | write the panel texture as uploaded to the GPU (premultiplied alpha) to a PNG; the panel must be open |
 | `menu pad <hex buttons> [user]` | one XInput state through the panel's pad filter, as the game's poll passes it; replies with what the game receives |
@@ -516,18 +516,61 @@ warns at start when it is on). Capture and trace output paths are not restricted
 `src/render/src/menu.cpp`, `menu_canvas.cpp`; the settings come from
 `ff7vr/core/live_settings.h`, the save from `ff7vr/core/ini_file.h`.
 
-- **Settings.** Each module registers the settings it owns with a getter and a setter
-  that use its existing live path (`src/engine/src/menu_items.cpp`: first/third person,
-  snap turn, render scale, graphics profile, world scale, head bob, decoupled pitch, 3D;
-  `menu.cpp`: vignette, HUD distance and size, foveation preset, picture keys, sharpen,
-  Recenter, Save, Close). The panel lists them sorted by their order number.
+- **Every key of the ini template.** Each module registers the settings it owns with a
+  getter and a setter on its existing live path (`src/engine/src/menu_items.cpp`: camera,
+  first person, controls, snap turn, stereo fixes, render scale, dynamic resolution,
+  graphics profile, DLSS on/off and model; `menu.cpp`: picture, vignette, HUD, menu,
+  foveation, depth layer, pause on removal, log level). A key whose module has no getter but
+  a dev command keeps its value in the setting (`live_settings::held`) and runs the command
+  on a change. A key with no live path at all (read once at start: `[xr] backend`,
+  `runtime`, `resolution_scale`, `[stereo] enabled`, `[loader]`, `[crash]`, `[dlss] mode`,
+  `output`, `input_scale`, ...) is listed too: its row shows **next start**, the help line
+  says "takes effect at the next start", the value is saved like any other and nothing is
+  restarted. `[dev]` keys are shown **read only**. `menu list` prints every setting with its
+  category, value, default and whether it is live.
+- **Categories.** Picture, Comfort, View, HUD, Performance, Controls, Advanced, as tabs
+  across the top. Each category lists its settings (sorted by order), then Reset this
+  category, Reset all, Save and Close. The line under the tabs shows the category and the
+  position ("3 of 24"); a scroll bar appears when a category has more than 10 rows. In
+  Performance that line shows live figures instead: frames per second against the
+  headset's refresh, the GPU time of the stereo scene and of what follows it (the
+  foveation module's timestamps), video memory against the budget, the texture streamer's
+  over-budget memory, and a second line from a status provider named `frame_budget`
+  (`live_settings::set_status`) when one is registered. A gold bar at the left of a row
+  marks a value that is not the default.
+- **Types.** Numbers (step and range from the template's comments), on/off and named
+  choices, key codes (shown as "End (35)"; Left/Right step through the common keys, any
+  other code can be written in the ini or set with `menu set`), free text (`battle_signal`,
+  `runtime`, `vr_window`, `fp_toggle_chord`: shown, only reset to the default from the
+  panel), and optional lines: the `[stereo_cvars]` entries the template ships commented
+  out (and the detail-level lines) show "not set (value)"; A switches between set and not
+  set, Left/Right change the value and set it.
+- **Defaults.** One table in `live_settings.cpp` holds the built-in default of every key,
+  which is the value `tools/package/ff7vr.ini` ships (keep the two in step:
+  `ff7vr_core_tests.exe defaults tools/package/ff7vr.ini` lists every key whose value
+  differs from its default, and every key the table lacks). Y (Backspace) resets the
+  selected row to it; Reset this category and Reset all ask for a second select
+  within 4 s. Resetting the graphics profile comes first, so it cannot undo the settings
+  reset after it.
+- **Input.** Delete (`[menu] key`) or View/Back + Y opens and closes it. Pad: D-pad (or the
+  left stick) up/down choose, left/right change (on the tab row: switch category), LB/RB
+  switch category anywhere, A selects, Y resets the row, X saves, B closes. Keyboard:
+  arrows, Enter, Backspace (default), S (save), Delete (close); Escape no longer closes it
+  (it opened the game's menu as well). While the panel is open those keys never reach the
+  game: a `WH_GETMESSAGE` hook on the game window's thread (the `UnrealWindow` of the
+  process, found once it exists) turns their `WM_KEYDOWN` / `WM_SYSKEYDOWN` / `WM_CHAR` into
+  `WM_NULL` before the game's message loop translates or dispatches them; key-up messages
+  pass, every other key passes, and the hook is removed at process exit. The panel itself
+  reads the keys with `GetAsyncKeyState`, which the hook does not change. `menu status`
+  counts the keys kept from the game.
 - **Image.** 1024 x 720 RGBA8 with premultiplied alpha, drawn on the CPU by the panel's
-  own thread only when something shown changed (checked every 15 ms while open): a dark
-  background at 90 % opacity, the title with the build, twelve rows (the list scrolls),
-  one help line that shows the result of the last action for four seconds. Text is
-  stb_truetype with Segoe UI (or Arial) from the Windows fonts folder, found at run time
-  with `GetWindowsDirectoryW`. The presenting thread copies a new image into a
-  `D3D11_USAGE_DEFAULT` texture (`UpdateSubresource`) and hands it to the quad.
+  own thread only when something shown changed (checked every 15 ms while open): title
+  with the build, the category tabs, the info line, 10 rows of 30 px text, a two-line
+  footer (the selected row's ini key, restart marker and default, or the result of the
+  last action for four seconds; then the button help). Text is stb_truetype with Segoe UI
+  (or Arial) from the Windows fonts folder, found at run time with `GetWindowsDirectoryW`.
+  The presenting thread copies a new image into a `D3D11_USAGE_DEFAULT` texture
+  (`UpdateSubresource`) and hands it to the quad.
 - **Layer.** Its own quad layer (created at the first open, 1024 x 720), submitted after
   the HUD panel or the virtual screen, so it is drawn over both in stereo, in held frames
   and on the virtual screen. Placed when it opens and 200 ms after Recenter: straight
@@ -537,30 +580,39 @@ warns at start when it is on). Capture and trace output paths are not restricted
   high). At the HUD panel's 3 m the same 0.8 m would be 15 degrees wide and the text 0.4
   degrees high, too small to read, so the settings panel has its own distance.
 - **Closed, it costs nothing:** no layer in the frame, no upload, no drawing; the
-  panel's thread polls one key every 15 ms.
+  panel's thread polls one key every 15 ms (the keyboard hook only compares a flag).
 - **Gamepad.** The XInput proxy calls `MenuFilterPad` (`render.h`) on every successful
-  poll before its other filters. It records the real state for the panel, opens the panel
-  on View/Back + Y (only while the game window has the focus) and, while the panel is open
-  and until every button is released after it closed, replaces the state with a neutral
-  one (no buttons, triggers or stick deflection). The engine's pad filter and snap turn
-  then run on that neutral state, so they see the buttons' release. The pad filter would
-  answer the release of a View/Back it held back (View held before Y, as a player does)
-  with its short View press for the game, which opened the game's map under the panel;
-  the XInput proxy therefore clears the buttons again after the pad filter while the
-  panel withholds the pad (the `controls: pad` log line still shows the filter's own
-  output). `xinput status` shows the last state the game received and how many polls the
-  panel withheld. PlayStation pads (`scePadReadState`) do not go through `MenuFilterPad`:
-  with one the panel opens only with the keyboard key.
+  poll before its other filters (users 0..3), and the libScePad hook calls it for each
+  PlayStation pad the game reads itself (slots 4..7; the Sony buttons mapped to the XInput
+  word with the controls module's table, the touch pad click as View/Back). It records the
+  real state for the panel, opens the panel on View/Back + Y (only while the game window
+  has the focus) and, while the panel is open and until every button is released after it
+  closed, replaces the state with a neutral one (no buttons, triggers or stick deflection).
+  The engine's pad filter and snap turn then run on that neutral state, so they see the
+  buttons' release. The pad filter would answer the release of a View/Back it held back
+  (View held before Y, as a player does) with its short View press for the game, which
+  opened the game's map under the panel; both paths therefore clear the buttons again
+  after the pad filter while the panel withholds the pad. `xinput status` and
+  `controls ps status` show the last state the game received and how many polls the panel
+  withheld.
 - **Placement and snap turn.** The open pose comes from `FrameInfo::layerHead`, the head
   in the quad layers' space without the snap turn (see "Snap turn" in
   `engine-module.md`).
 - **Saving** (`ini_file::update_file`): for each setting with an ini key, the value is
   written when it differs from the file's (numbers compared as numbers) or, for a key the
   file does not have, when it differs from the value in effect when the panel first
-  opened. The key's line keeps its inline comment at the same column; a missing key goes
-  after the last key of its section, a missing section at the end. The previous file is
-  copied to `ff7vr.ini.bak`; the new one is written to `ff7vr.ini.tmp` and moved over the
-  old one. Each changed line is logged (`menu: saved comfort.vignette: 0 -> 0.3`).
+  opened. The key's line keeps its inline comment at the same column; a key that is in its
+  section only as a line commented out at the start (`; r.Streaming.PoolSize = 2500`) is
+  uncommented in place; an optional line set to "not set" is commented out again; a
+  missing key goes after the last key of its section, a missing section at the end. The
+  previous file is copied to `ff7vr.ini.bak`; the new one is written to `ff7vr.ini.tmp`
+  and moved over the old one. Each changed line is logged
+  (`menu: saved comfort.vignette: 0 -> 0.3`); the save's message says when some of the
+  saved values take effect at the next start.
+- **Dev commands.** `menu open | close | cat <name|next|prev> | up | down | left | right |
+  select | reset | save | dump <png>`, `menu set <id or section.key> <ini value>` (`unset`
+  for an optional line), `menu default <id>`, `menu list`, `menu focus any` (input without
+  the window focus, for tests).
 
 ## Captures
 

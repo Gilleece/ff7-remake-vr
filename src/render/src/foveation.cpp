@@ -1562,6 +1562,13 @@ bool EyeTrackingRequested() { return g_eyeTrackingRequested.load(); }
 void PeekGpuMedians(double* sceneMs, size_t* sceneSamples, double* afterMs, size_t* afterSamples) {
     *sceneMs = g_sceneSeries.Median(sceneSamples);
     *afterMs = g_afterSeries.Median(afterSamples);
+bool LastGpuTimes(double* sceneMs, double* afterMs) {
+    uint64_t n = 0;
+    const double scene = g_sceneSeries.Last(&n);
+    if (n == 0) return false;
+    if (sceneMs) *sceneMs = scene;
+    if (afterMs) *afterMs = g_afterSeries.Last();
+    return true;
 }
 
 std::vector<std::string> TakeTimingLines() {

@@ -1,11 +1,13 @@
 #pragma once
-// The engine's settings in the in-headset settings panel (ff7vr/core/live_settings.h):
-// first/third person, snap turn, render scale, graphics profile, world scale, head bob,
-// decoupled pitch and 3D on/off. Each one changes the same state as the matching dev
-// command.
+
+namespace ff7vr {
+class Config;
+}
 
 namespace ff7vr::engine::menu_items {
 
-void register_all();
+// Registers the engine's settings for the in-headset panel (live_settings.h). `cfg`: the
+// values read at start, for settings whose module keeps no getter.
+void register_all(const Config& cfg);
 
 }  // namespace ff7vr::engine::menu_items

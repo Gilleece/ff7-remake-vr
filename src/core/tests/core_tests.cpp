@@ -5,12 +5,15 @@
 //   ff7vr_core_tests.exe crash           install the crash handler and crash on purpose;
 //                                        check ff7vr_core_tests.log and the .dmp next to the exe
 //   ff7vr_core_tests.exe hook            inline + vtable hook round trip
+//   ff7vr_core_tests.exe defaults <ini>  every key of <ini> (tools/package/ff7vr.ini) has its
+//                                        value as the built-in default in live_settings.cpp
 
 #include "ff7vr/core/config.h"
 #include "ff7vr/core/crash.h"
 #include "ff7vr/core/graphics_profile.h"
 #include "ff7vr/core/hook.h"
 #include "ff7vr/core/ini_file.h"
+#include "ff7vr/core/live_settings.h"
 #include "ff7vr/core/log.h"
 #include "ff7vr/core/module.h"
 #include "ff7vr/core/pattern.h"
@@ -162,6 +165,38 @@ static void test_ini_file() {
     // No trailing newline, no sections.
     CHECK(ff7vr::ini_file::apply("[a]\nk = 1", {{"a", "k", "2"}, {"a", "j", "3"}}) == "[a]\nk = 2\nj = 3\n");
     CHECK(ff7vr::ini_file::apply("", {{"a", "k", "2"}}) == "[a]\r\nk = 2\r\n");
+    // A key that exists only as a commented line is uncommented in place (comment column kept);
+    // comment_out puts the marker back. Indented comment lines are never taken for keys.
+    const std::string cv =
+        "[stereo_cvars]\n"
+        "; Remove the ; to use a line; name = value\n"
+        "; r.Streaming.PoolSize = 2500   ; pool in MB\n"
+        "                                ; more text = 1\n"
+        "r.BloomQuality = 0              ; bloom\n";
+    Update setPool{"stereo_cvars", "r.Streaming.PoolSize", "3000"};
+    Update unsetBloom{"stereo_cvars", "r.BloomQuality", "0"};
+    unsetBloom.comment_out = true;
+    ff7vr::ini_file::Report r2;
+    const std::string cvOut = ff7vr::ini_file::apply(cv, {setPool, unsetBloom}, &r2);
+    const std::string cvWant =
+        "[stereo_cvars]\n"
+        "; Remove the ; to use a line; name = value\n"
+        "r.Streaming.PoolSize = 3000     ; pool in MB\n"
+        "                                ; more text = 1\n"
+        "; r.BloomQuality = 0            ; bloom\n";
+    CHECK(cvOut == cvWant);
+    if (cvOut != cvWant) std::printf("--- got:\n%s--- want:\n%s", cvOut.c_str(), cvWant.c_str());
+    CHECK(r2.changed.size() == 2 && r2.added.empty());
+    Config cvc;
+    cvc.load_from_string(cvOut);
+    CHECK(cvc.get_int("stereo_cvars", "r.Streaming.PoolSize", 0) == 3000);
+    CHECK(!cvc.has("stereo_cvars", "r.BloomQuality"));
+    // And back: the original text again.
+    Update unsetPool{"stereo_cvars", "r.Streaming.PoolSize", "2500"};
+    unsetPool.comment_out = true;
+    const std::string back = ff7vr::ini_file::apply(cvOut, {unsetPool, {"stereo_cvars", "r.BloomQuality", "0"}});
+    CHECK(back == cv);
+    if (back != cv) std::printf("--- got:\n%s--- want:\n%s", back.c_str(), cv.c_str());
     std::printf("ini_file: ok\n");
 }
 
@@ -253,7 +288,36 @@ static int crash_test() {
     return 0;
 }
 
+// Every key of an ini (the shipped template) has a built-in default in live_settings, equal
+// to the value written there. Returns the number of mismatches.
+static int check_defaults(const char* path) {
+    Config c;
+    if (!c.load(path)) {
+        std::printf("defaults: cannot read %s\n", path);
+        return 1;
+    }
+    int bad = 0, n = 0;
+    for (const std::string& line : c.dump()) {
+        const size_t eq = line.find(" = ");
+        const size_t dot = line.find('.');
+        if (eq == std::string::npos || dot == std::string::npos || dot > eq) continue;
+        const std::string section = line.substr(0, dot), key = line.substr(dot + 1, eq - dot - 1), value = line.substr(eq + 3);
+        ++n;
+        const auto def = live_settings::default_value(section, key);
+        if (!def) {
+            std::printf("defaults: [%s] %s has no built-in default in live_settings.cpp\n", section.c_str(), key.c_str());
+            ++bad;
+        } else if (!live_settings::same_value(*def, value)) {
+            std::printf("defaults: [%s] %s = %s in the ini, %s in live_settings.cpp\n", section.c_str(), key.c_str(), value.c_str(), def->c_str());
+            ++bad;
+        }
+    }
+    std::printf("defaults: %d keys of %s checked, %d mismatches\n", n, path, bad);
+    return bad;
+}
+
 int main(int argc, char** argv) {
+    if (argc >= 3 && std::strcmp(argv[1], "defaults") == 0) return check_defaults(argv[2]) ? 1 : 0;
     if (argc >= 3 && std::strcmp(argv[1], "bench") == 0) {
         std::wstring w(argv[2], argv[2] + std::strlen(argv[2]));
         return bench(w.c_str());

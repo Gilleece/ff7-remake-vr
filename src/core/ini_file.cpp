@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <fstream>
 #include <sstream>
 
@@ -79,6 +80,33 @@ void value_region(const std::string& body, size_t* vb, size_t* ve, std::string* 
     *old = body.substr(b, e - b);
 }
 
+// Moves the inline comment of a key line by `delta` columns (positive: right) by changing the
+// padding in front of it; at least one space stays.
+std::string shift_comment(const std::string& body, int delta) {
+    size_t vb = 0, ve = 0;
+    std::string old;
+    value_region(body, &vb, &ve, &old);
+    size_t cs = ve;
+    while (cs < body.size() && (body[cs] == ' ' || body[cs] == '	')) ++cs;
+    if (cs >= body.size() || delta == 0) return body;
+    const int pad = int(cs - ve);
+    const int want = std::max(1, pad + delta);
+    return body.substr(0, ve) + std::string(size_t(want), ' ') + body.substr(cs);
+}
+
+// A key line commented out at the start of the line ("; key = value ; comment"): the key
+// line without the marker, and how many characters the marker took.
+bool commented_key(const std::string& body, std::string* name, std::string* uncommented, size_t* marker) {
+    if (body.empty() || (body[0] != ';' && body[0] != '#')) return false;
+    size_t n = 1;
+    if (n < body.size() && body[n] == ' ') ++n;
+    const std::string rest = body.substr(n);
+    if (classify(rest, name) != LineKind::Key) return false;
+    if (uncommented) *uncommented = rest;
+    if (marker) *marker = n;
+    return true;
+}
+
 std::string replace_value(const std::string& body, const std::string& value) {
     size_t vb = 0, ve = 0;
     std::string old;
@@ -134,6 +162,7 @@ std::string apply(std::string_view text, const std::vector<Update>& updates, Rep
         std::string name;
         bool inSection = u.section.empty();
         bool found = false;
+        size_t commentedAt = std::string::npos;  // a "; key = value" line in the section
         size_t lastOfSection = std::string::npos;  // last key line (or the header) of a matching section
         for (size_t i = 0; i < lines.size(); ++i) {
             const LineKind k = classify(lines[i].body, &name);
@@ -143,12 +172,25 @@ std::string apply(std::string_view text, const std::vector<Update>& updates, Rep
                 continue;
             }
             if (!inSection) continue;
+            if (k == LineKind::Comment) {
+                if (commentedAt == std::string::npos && commented_key(lines[i].body, &name, nullptr, nullptr) && iequal(name, u.key))
+                    commentedAt = i;
+                continue;
+            }
             if (k == LineKind::Key || k == LineKind::Other) lastOfSection = i;
             if (k != LineKind::Key || !iequal(name, u.key)) continue;
             size_t vb = 0, ve = 0;
             std::string old;
             value_region(lines[i].body, &vb, &ve, &old);
             found = true;
+            if (u.comment_out) {
+                // "Not set": the line stays, commented out, with the inline comment at its column.
+                std::string body = replace_value(lines[i].body, u.value);
+                body = "; " + shift_comment(body, -2);
+                lines[i].body = body;
+                if (report) report->changed.push_back(full + ": " + old + " -> not set (line commented out)");
+                continue;
+            }
             if (old == u.value) {
                 if (report) report->unchanged.push_back(full + " = " + u.value);
                 continue;
@@ -157,6 +199,23 @@ std::string apply(std::string_view text, const std::vector<Update>& updates, Rep
             if (report) report->changed.push_back(full + ": " + old + " -> " + u.value);
         }
         if (found) continue;
+        if (u.comment_out) {
+            if (report) report->unchanged.push_back(full + " not set");
+            continue;
+        }
+        if (commentedAt != std::string::npos) {
+            // The key exists only as a commented line: it is uncommented in place.
+            std::string body;
+            size_t marker = 0;
+            commented_key(lines[commentedAt].body, &name, &body, &marker);
+            size_t vb = 0, ve = 0;
+            std::string old;
+            value_region(body, &vb, &ve, &old);
+            body = shift_comment(body, int(marker));
+            lines[commentedAt].body = replace_value(body, u.value);
+            if (report) report->changed.push_back(full + ": not set (" + old + ") -> " + u.value + " (line uncommented)");
+            continue;
+        }
         if (report) report->added.push_back(full + " = " + u.value);
         const Line add{u.key + " = " + u.value, newline};
         if (lastOfSection != std::string::npos || u.section.empty()) {
