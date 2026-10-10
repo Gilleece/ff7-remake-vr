@@ -46,7 +46,7 @@ using live_settings::Setting;
 constexpr uint32_t kW = 1024, kH = 720;
 constexpr int kTitleH = 56, kTabTop = 56, kTabH = 50, kInfoTop = kTabTop + kTabH, kInfoH = 34, kRowH = 46, kFooterH = 74;
 constexpr int kListTop = kInfoTop + kInfoH + 4;
-constexpr int kRows = (int(kH) - kFooterH - kListTop - 4) / kRowH;  // 11
+constexpr int kRows = (int(kH) - kFooterH - kListTop - 4) / kRowH;  // 10
 constexpr int kTitlePx = 32, kBodyPx = 30, kTabPx = 25, kSmallPx = 23;
 
 // XInput buttons.

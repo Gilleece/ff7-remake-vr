@@ -529,7 +529,7 @@ warns at start when it is on). Capture and trace output paths are not restricted
 - **Categories.** Picture, Comfort, View, HUD, Performance, Controls, Advanced, as tabs
   across the top. Each category lists its settings (sorted by order), then Reset this
   category, Reset all, Save and Close. The line under the tabs shows the category and the
-  position ("3 of 24"); a scroll bar appears when a category has more than 11 rows. In
+  position ("3 of 24"); a scroll bar appears when a category has more than 10 rows. In
   Performance that line shows live figures instead: frames per second against the
   headset's refresh, the GPU time of the stereo scene and of what follows it (the
   foveation module's timestamps), video memory against the budget, the texture streamer's
@@ -563,7 +563,7 @@ warns at start when it is on). Capture and trace output paths are not restricted
   counts the keys kept from the game.
 - **Image.** 1024 x 720 RGBA8 with premultiplied alpha, drawn on the CPU by the panel's
   own thread only when something shown changed (checked every 15 ms while open): title
-  with the build, the category tabs, the info line, 11 rows of 30 px text, a two-line
+  with the build, the category tabs, the info line, 10 rows of 30 px text, a two-line
   footer (the selected row's ini key, restart marker and default, or the result of the
   last action for four seconds; then the button help). Text is stb_truetype with Segoe UI
   (or Arial) from the Windows fonts folder, found at run time with `GetWindowsDirectoryW`.
