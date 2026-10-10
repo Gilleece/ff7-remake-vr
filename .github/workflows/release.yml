@@ -79,6 +79,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
+          gh release view "$env:GITHUB_REF_NAME" *> $null
+          if ($LASTEXITCODE -eq 0) { Write-Host "A release for $env:GITHUB_REF_NAME exists already; its assets are left as they are."; exit 0 }
           $files = @(Get-ChildItem -LiteralPath release -File | ForEach-Object { $_.FullName })
           gh release create "$env:GITHUB_REF_NAME" --draft --verify-tag --title "$env:GITHUB_REF_NAME" --notes-file (Join-Path $env:RUNNER_TEMP 'release-notes.md') @files
           if ($LASTEXITCODE -ne 0) { throw "gh release create failed ($LASTEXITCODE)" }
