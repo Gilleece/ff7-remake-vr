@@ -11,6 +11,7 @@
 #include "ff7vr/core/config.h"
 #include "ff7vr/core/crash.h"
 #include "ff7vr/core/graphics_profile.h"
+#include "ff7vr/core/headset_profile.h"
 #include "ff7vr/core/hook.h"
 #include "ff7vr/core/ini_file.h"
 #include "ff7vr/core/live_settings.h"
@@ -113,6 +114,112 @@ static void test_config() {
     std::printf("config: ok\n");
 }
 
+
+static bool dump_has(const Config& cfg, const std::string& text) {
+    for (const auto& l : cfg.dump())
+        if (l.find(text) != std::string::npos) return true;
+    return false;
+}
+
+static void test_headset_config() {
+    const char* ini =
+        "[picture]\ncontrast = 1.2\n"
+        "[stereo_cvars]\nr.Streaming.PoolSize = 3000\n"
+        "[headset: Quest 3]\n"
+        "picture.contrast = 1.3   ; brighter\n"
+        "stereo_cvars.r.Streaming.PoolSize = 4000\n"
+        "xr.resolution_scale = 0.9\n"
+        "nodot = 1\n"
+        "[headset:pico]\n"
+        "picture.contrast = 1.0\n"
+        "[HEADSET:quest 3]\n"  // the same section again: merged, the later value wins
+        "xr.resolution_scale = 0.85\n"
+        "[xr]\nbackend = null\n";
+    Config cfg;
+    cfg.load_from_string(ini);
+    // Base values untouched; headset lines are not base keys.
+    CHECK(cfg.headset_sections().size() == 2);
+    CHECK(cfg.get_string("picture", "contrast", "") == "1.2");
+    CHECK(!cfg.has("headset: quest 3", "picture.contrast"));
+    CHECK(!cfg.has("xr", "resolution_scale"));
+    const auto& q = cfg.headset_sections()[0];
+    CHECK(q.match == "Quest 3");
+    CHECK(q.entries.size() == 3);
+    CHECK(q.invalid.size() == 1 && q.invalid[0] == "nodot");
+    CHECK(cfg.headset_value("quest 3", "stereo_cvars", "r.streaming.poolsize").value_or("") == "4000");
+    CHECK(cfg.headset_value("QUEST 3", "xr", "resolution_scale").value_or("") == "0.85");
+    CHECK(!cfg.headset_value("pico", "xr", "resolution_scale"));
+    // Matching: case-insensitive substring of the system or the runtime name; first section wins.
+    CHECK(cfg.match_headset("Null HMD (Quest 3 class)", "Null") == 0);
+    CHECK(cfg.match_headset("Meta Quest 3", "VirtualDesktopXR") == 0);
+    CHECK(cfg.match_headset("PICO 4 Ultra", "VirtualDesktopXR") == 1);
+    CHECK(cfg.match_headset("Index", "PICO OpenXR") == 1);
+    CHECK(cfg.match_headset("Valve Index", "SteamVR/OpenXR") == -1);
+    CHECK(cfg.match_headset("", "") == -1);
+    // The layer.
+    cfg.set_overlay(q.match, q.entries);
+    CHECK(cfg.overlay_name() == "Quest 3");
+    CHECK(cfg.get_float("picture", "contrast", 0) == 1.3);
+    CHECK(cfg.get_int("stereo_cvars", "r.Streaming.PoolSize", 0) == 4000);
+    CHECK(cfg.has("xr", "resolution_scale") && cfg.get_float("xr", "resolution_scale", 1) == 0.85);
+    CHECK(cfg.base_get("picture", "contrast").value_or("") == "1.2");
+    CHECK(dump_has(cfg, "picture.contrast = 1.3   [headset:Quest 3; base 1.2]"));
+    CHECK(dump_has(cfg, "xr.resolution_scale = 0.85   [headset:Quest 3; not in the base]"));
+    CHECK(dump_has(cfg, "[headset:Quest 3] 3 keys (active); ignored 'nodot'"));
+    CHECK(dump_has(cfg, "[headset:pico] 1 keys"));
+    cfg.clear_overlay();
+    CHECK(cfg.overlay_name().empty() && cfg.get_float("picture", "contrast", 0) == 1.2 && !cfg.has("xr", "resolution_scale"));
+    // The settings panel saves a key the active section sets into that section.
+    {
+        ini_file::Report rep;
+        CHECK(cfg.headset_sections()[0].header == "headset: Quest 3");
+        const std::string out = ini_file::apply(ini, {{cfg.headset_sections()[0].header, "picture.contrast", "1.4"}}, &rep);
+        CHECK(rep.changed.size() == 1 && rep.added.empty());  // changed in place, no second section
+        Config again;
+        again.load_from_string(out);
+        CHECK(again.headset_value("quest 3", "picture", "contrast").value_or("") == "1.4");
+        CHECK(again.get_string("picture", "contrast", "") == "1.2");
+    }
+    // At start: the Null backend's name matches [headset:quest 3], not [headset:pico].
+    {
+        Config c;
+        c.load_from_string(ini);
+        const auto lines = headset_profile::apply_at_start(c, std::filesystem::path(L"Z:\\does\\not\\exist"));
+        CHECK(c.overlay_name() == "Quest 3");
+        CHECK(c.get_float("picture", "contrast", 0) == 1.3);
+        CHECK(!lines.empty() && lines[0].find("applied [headset:Quest 3]") != std::string::npos);
+    }
+    // At start with the OpenXR backend: the previous session's headset from ff7vr-headset.txt.
+    {
+        wchar_t tmp[MAX_PATH] = {};
+        GetTempPathW(MAX_PATH, tmp);
+        const std::filesystem::path dir = std::filesystem::path(tmp) / L"ff7vr-core-tests-headset";
+        std::filesystem::create_directories(dir);
+        std::string base(ini);
+        base = base.substr(0, base.find("[xr]"));
+        Config none;
+        none.load_from_string(base);
+        std::filesystem::remove(dir / headset_profile::kStateFile);
+        headset_profile::apply_at_start(none, dir);
+        CHECK(none.overlay_name().empty());
+        {
+            FILE* f = nullptr;
+            _wfopen_s(&f, (dir / headset_profile::kStateFile).c_str(), L"wb");
+            if (f) {
+                std::fputs("PICO 4 Ultra\r\nVirtualDesktopXR\r\n", f);
+                std::fclose(f);
+            }
+        }
+        Config pico;
+        pico.load_from_string(base);
+        headset_profile::apply_at_start(pico, dir);
+        CHECK(pico.overlay_name() == "pico");
+        CHECK(pico.get_float("picture", "contrast", 0) == 1.0);
+        CHECK(pico.get_int("stereo_cvars", "r.Streaming.PoolSize", 0) == 3000);
+        std::filesystem::remove_all(dir);
+    }
+    std::printf("headset config: ok\n");
+}
 
 static void test_ini_file() {
     using ff7vr::ini_file::Update;
@@ -324,6 +431,7 @@ int main(int argc, char** argv) {
     }
     if (argc >= 2 && std::strcmp(argv[1], "crash") == 0) return crash_test();
     test_config();
+    test_headset_config();
     test_ini_file();
     test_graphics_profile();
     test_pattern();

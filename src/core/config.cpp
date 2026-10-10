@@ -45,6 +45,7 @@ bool Config::load_from_string(std::string_view text) {
         text.remove_prefix(3);
 
     std::string section;
+    HeadsetSection* headset = nullptr;  // inside a [headset:...] section
     size_t pos = 0;
     while (pos <= text.size()) {
         size_t eol = text.find('\n', pos);
@@ -55,6 +56,13 @@ bool Config::load_from_string(std::string_view text) {
         if (line.front() == '[') {
             size_t close = line.find(']');
             section = std::string(trim(line.substr(1, close == std::string_view::npos ? line.size() - 1 : close - 1)));
+            headset = nullptr;
+            if (lower(section).starts_with("headset:")) {
+                const std::string match(trim(std::string_view(section).substr(8)));
+                for (auto& h : headsets_)
+                    if (lower(h.match) == lower(match)) headset = &h;
+                if (!headset) headset = &headsets_.emplace_back(HeadsetSection{match, section, {}, {}});
+            }
             continue;
         }
         size_t eq = line.find('=');
@@ -75,14 +83,82 @@ bool Config::load_from_string(std::string_view text) {
                 }
             }
         }
-        if (!key.empty()) values_[make_key(section, key)] = std::string(value);
+        if (key.empty()) continue;
+        if (headset) {
+            const size_t dot = key.find('.');
+            if (dot == std::string_view::npos || dot == 0 || dot + 1 == key.size()) {
+                headset->invalid.emplace_back(key);
+                continue;
+            }
+            HeadsetEntry e{std::string(trim(key.substr(0, dot))), std::string(trim(key.substr(dot + 1))), std::string(value)};
+            std::erase_if(headset->entries, [&](const HeadsetEntry& o) { return make_key(o.section, o.key) == make_key(e.section, e.key); });
+            headset->entries.push_back(std::move(e));
+            continue;
+        }
+        values_[make_key(section, key)] = std::string(value);
     }
     loaded_ = true;
     return true;
 }
 
 bool Config::has(std::string_view section, std::string_view key) const {
-    return values_.contains(make_key(section, key));
+    const std::string k = make_key(section, key);
+    return values_.contains(k) || overlay_get(k).has_value();
+}
+
+std::optional<std::string> Config::overlay_get(const std::string& k) const {
+    if (!has_overlay_.load(std::memory_order_acquire)) return std::nullopt;
+    std::lock_guard lk(overlay_mutex_);
+    auto it = overlay_.find(k);
+    if (it == overlay_.end()) return std::nullopt;
+    return it->second;
+}
+
+std::optional<std::string> Config::base_get(std::string_view section, std::string_view key) const {
+    auto it = values_.find(make_key(section, key));
+    if (it == values_.end()) return std::nullopt;
+    return it->second;
+}
+
+int Config::match_headset(std::string_view system_name, std::string_view runtime_name) const {
+    const std::string sys = lower(system_name), rt = lower(runtime_name);
+    for (size_t i = 0; i < headsets_.size(); ++i) {
+        const std::string m = lower(headsets_[i].match);
+        if (m.empty()) continue;
+        if (sys.find(m) != std::string::npos || rt.find(m) != std::string::npos) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+std::optional<std::string> Config::headset_value(std::string_view match, std::string_view section, std::string_view key) const {
+    const std::string m = lower(trim(match)), k = make_key(section, key);
+    for (const auto& h : headsets_) {
+        if (lower(h.match) != m) continue;
+        for (const auto& e : h.entries)
+            if (make_key(e.section, e.key) == k) return e.value;
+    }
+    return std::nullopt;
+}
+
+void Config::set_overlay(std::string name, const std::vector<HeadsetEntry>& entries) {
+    std::map<std::string, std::string> layer;
+    for (const auto& e : entries) layer[make_key(e.section, e.key)] = e.value;
+    std::lock_guard lk(overlay_mutex_);
+    overlay_ = std::move(layer);
+    overlay_name_ = std::move(name);
+    has_overlay_.store(true, std::memory_order_release);
+}
+
+void Config::clear_overlay() {
+    std::lock_guard lk(overlay_mutex_);
+    has_overlay_.store(false, std::memory_order_release);
+    overlay_.clear();
+    overlay_name_.clear();
+}
+
+std::string Config::overlay_name() const {
+    std::lock_guard lk(overlay_mutex_);
+    return overlay_name_;
 }
 
 bool Config::set_default(std::string_view section, std::string_view key, std::string_view value) {
@@ -95,7 +171,9 @@ bool Config::set(std::string_view section, std::string_view key, std::string_vie
 }
 
 std::optional<std::string> Config::get(std::string_view section, std::string_view key) const {
-    auto it = values_.find(make_key(section, key));
+    const std::string k = make_key(section, key);
+    if (auto o = overlay_get(k)) return o;
+    auto it = values_.find(k);
     if (it == values_.end()) return std::nullopt;
     return it->second;
 }
@@ -139,11 +217,32 @@ bool Config::get_bool(std::string_view section, std::string_view key, bool def) 
 
 std::vector<std::string> Config::dump() const {
     std::vector<std::string> out;
-    for (const auto& [k, v] : values_) {
-        std::string key = k;
+    auto dotted = [](std::string key) {
         size_t sep = key.find('\x1f');
         if (sep != std::string::npos) key[sep] = '.';
-        out.push_back(key + " = " + v);
+        return key;
+    };
+    std::map<std::string, std::string> layer;
+    std::string layer_name;
+    {
+        std::lock_guard lk(overlay_mutex_);
+        layer = overlay_;
+        layer_name = overlay_name_;
+    }
+    for (const auto& [k, v] : values_) {
+        auto o = layer.find(k);
+        if (o != layer.end())
+            out.push_back(dotted(k) + " = " + o->second + "   [headset:" + layer_name + "; base " + v + "]");
+        else
+            out.push_back(dotted(k) + " = " + v);
+    }
+    for (const auto& [k, v] : layer)
+        if (!values_.contains(k)) out.push_back(dotted(k) + " = " + v + "   [headset:" + layer_name + "; not in the base]");
+    for (const auto& h : headsets_) {
+        std::string line = "[headset:" + h.match + "] " + std::to_string(h.entries.size()) + " keys" +
+                           (!layer_name.empty() && h.match == layer_name ? " (active)" : "");
+        for (const auto& bad : h.invalid) line += "; ignored '" + bad + "' (no section. prefix)";
+        out.push_back(line);
     }
     return out;
 }

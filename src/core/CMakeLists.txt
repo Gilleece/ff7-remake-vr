@@ -9,6 +9,7 @@ add_library(ff7vr_core STATIC
     graphics_profile.cpp
     ini_file.cpp
     live_settings.cpp
+    headset_profile.cpp
 )
 target_include_directories(ff7vr_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(ff7vr_core PUBLIC minhook PRIVATE version)
