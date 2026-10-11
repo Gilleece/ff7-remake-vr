@@ -3,6 +3,7 @@
 #include "pause_on_remove.h"
 
 #include "comfort.h"
+#include "buffer_pool.h"
 #include "d3d11_census.h"
 #include "foveation.h"
 #include "frame_budget.h"
@@ -508,6 +509,8 @@ void XrController::LogStats() {
         dev = seenDevice_;
     }
     if (dev) bw.copyEnginePercent = video_memory::LogReport(dev.Get()).processCopyPercent;
+    // The pool first: the census, installed after it, then sees the game's calls (and counts them) before the pool answers them.
+    if (const std::string b = buffer_pool::TakeWindowLine(bw.stereoMode); !b.empty()) log::info("timing:   {}", b);
     if (const std::string c = census::TakeWindowLine(bw.stereoMode); !c.empty()) log::info("timing:   {}", c);
     if (const std::string u = upload_check::TakeWindowLine(); !u.empty()) log::info("timing:   {}", u);
     bw.uploadGBps = upload_check::LatestGBps();
@@ -905,6 +908,7 @@ void XrController::OnPresent(const PresentInfo& p) {
             if (seenDevice_) log::warn("render: the main swap chain is on a different D3D11 device now ({})", static_cast<void*>(p.device));
             seenDevice_ = p.device;
             census::NoteDevice(p.device);
+            buffer_pool::NoteDevice(p.device);
             if (device_ && device_.Get() != p.device) deviceChanged_ = true;
         }
     }

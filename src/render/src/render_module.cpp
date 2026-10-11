@@ -1,6 +1,7 @@
 // Entry points of the render module: configuration, hooks, dev commands.
 
 #include "comfort.h"
+#include "buffer_pool.h"
 #include "d3d11_census.h"
 #include "d3d11_hooks.h"
 #include "foveation.h"
@@ -184,6 +185,8 @@ void RegisterCommands() {
                       });
     dev_commands::add("budget", "budget status | on | off: the frame budget warning (frame interval against the headset's refresh period)",
                       [](std::string_view args) { return frame_budget::Command(std::string(args)); });
+    dev_commands::add("bufpool", "bufpool status | on | off: the ring for the game's light volume vertex buffers ([stereo] light_volume_pool)",
+                      [](std::string_view args) { return buffer_pool::Command(std::string(args)); });
     dev_commands::add("census", "census status: D3D11 objects created on the game's device by this mod, the game and other modules ([log] d3d11_census)",
                       [](std::string_view args) { return census::Command(std::string(args)); });
     dev_commands::add("upload", "upload status | now: the timed copy from system memory to the graphics card ([log] upload_check)",
@@ -260,6 +263,7 @@ bool start(const StartupContext& ctx) {
     comfort::Start(*ctx.config);
     frame_budget::Configure(*ctx.config);
     census::Configure(*ctx.config);
+    buffer_pool::Configure(*ctx.config);
     upload_check::Configure(*ctx.config);
     live_settings::set_status("frame_budget", [] { return ff7vr::render::frame_budget_summary(); });
     ui_battle::Start(*ctx.config);
