@@ -208,7 +208,7 @@ math::Vec axis_combo(const math::Vec& a, const math::Vec& fwd, const math::Vec& 
 // Replaces the full pass's view with the panel's (see the header).
 void align(std::uint8_t* data) {
     render::UiPanelPlacement p;
-    if (!render::UiPanel(&p) || p.align != 1 || !device::active()) {
+    if (!render::UiPanel(&p) || p.align != 1 || !device::presenting()) {
         ++g_skipped;
         return;
     }

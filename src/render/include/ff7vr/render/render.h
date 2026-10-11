@@ -70,6 +70,10 @@ enum class Mode { Screen, Stereo };
 // Any thread.
 void SetMode(Mode mode);
 Mode GetMode();
+// Any thread. True while the engine keeps rendering its eye target in screen mode and the
+// window holds its flat view ([stereo] screen_keeps_target): the game's UI is still
+// redirected to its own texture and drawn onto the window, which the screen layer shows.
+void SetScreenFromEyes(bool on);
 
 // Any thread: the dedicated video memory of the game's graphics card in MB (the adapter of
 // the device whose swap chain is presented); 0 before that device was seen.

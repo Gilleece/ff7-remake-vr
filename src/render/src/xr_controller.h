@@ -130,6 +130,9 @@ public:
     // Engine interface (see render.h).
     void SetMode(Mode m);
     Mode GetMode() const { return mode_.load(); }
+    // The engine renders stereo but the screen shows the window (its flat view): the game's UI
+    // stays on its own texture and is drawn onto the window (render.h, SetScreenFromEyes).
+    void SetScreenFromEyes(bool on);
     bool GetEyeSetup(EyeSetup* out);
     StereoFrame BeginGameFrame();
     void SubmitStereoFrame(const StereoSubmit& s);
@@ -284,6 +287,7 @@ private:
     std::mutex uiMutex_;
     std::atomic<bool> uiOn_{true};
     std::atomic<bool> uiMirror_{true};
+    std::atomic<bool> screenFromEyes_{false};
     std::atomic<bool> uiDumpRequested_{false};
     std::string uiDumpPath_;      // under uiMutex_
     std::string uiDumpResult_;    // under uiMutex_

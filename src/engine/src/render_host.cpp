@@ -110,6 +110,8 @@ public:
             mode_stereo_ = stereo_wanted;
         }
         const render::StereoFrame f = render::BeginGameFrame();
+        out.session = render::GetEyeSetup(nullptr);
+        out.screen = stereo_wanted && out.session && !f.stereo && render::GetMode() == render::Mode::Screen;
         out.stereo = f.stereo;
         out.frame_id = f.stereo ? f.frameId : 0;
         out.views_valid = f.stereo;
@@ -185,6 +187,13 @@ public:
 
     bool depth_wanted() override { return render::DepthLayerWanted(); }
 
+    void set_screen_from_eyes(bool on) override {
+        if (on != screen_from_eyes_) {
+            render::SetScreenFromEyes(on);
+            screen_from_eyes_ = on;
+        }
+    }
+
     bool relocate_views(std::uint64_t frame_id, HostView out[2]) override {
         xr::View v[2];
         if (!frame_id || !render::RelocateViews(frame_id, v)) return false;
@@ -202,6 +211,7 @@ public:
 
 private:
     bool mode_stereo_ = false;  // game thread only
+    bool screen_from_eyes_ = false;  // game thread only
 };
 
 }  // namespace

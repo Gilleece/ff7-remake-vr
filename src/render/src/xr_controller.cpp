@@ -525,6 +525,11 @@ void XrController::SetMode(Mode m) {
     if (mode_.exchange(m) != m) frame_budget::NoteModeChange();
 }
 
+void XrController::SetScreenFromEyes(bool on) {
+    if (screenFromEyes_.exchange(on) != on)
+        log::info("render: the screen shows {}", on ? "the engine's flat view of the left eye (the eye target is kept)" : "the game's window as rendered");
+}
+
 double XrController::DedicatedVideoMemoryMb() {
     ComPtr<ID3D11Device> dev;
     {
@@ -696,7 +701,10 @@ bool XrController::MenuQuad(const PresentInfo& p, const Waited& w, xr::QuadLayer
 // a crop of an eye in stereo) gets it drawn on top: the whole 16:9 UI over the whole window
 // (letterboxed if the window has another aspect), blended like the game draws its UI.
 void XrController::DrawUiOnWindow(const PresentInfo& p, const PendingUi& ui) {
-    if (!uiMirror_.load(std::memory_order_relaxed) || !ui.src.redirected || !ui.texture || !p.backBuffer) return;
+    // On the screen from the eyes the window is the screen's image: the UI always goes on it.
+    if (!(uiMirror_.load(std::memory_order_relaxed) || screenFromEyes_.load(std::memory_order_relaxed)) || !ui.src.redirected || !ui.texture ||
+        !p.backBuffer)
+        return;
     const double sa = double(ui.src.width) / std::max(1u, ui.src.height), wa = double(p.width) / std::max(1u, p.height);
     xr::Rect r{0, 0, p.width, p.height};
     if (wa > sa) {
@@ -1167,7 +1175,8 @@ std::string XrController::DepthCommand(const std::string& args) {
 }
 
 bool XrController::UiLayerWanted() const {
-    return uiOn_.load(std::memory_order_relaxed) && mode_.load(std::memory_order_relaxed) == Mode::Stereo &&
+    return uiOn_.load(std::memory_order_relaxed) &&
+           (mode_.load(std::memory_order_relaxed) == Mode::Stereo || screenFromEyes_.load(std::memory_order_relaxed)) &&
            ready_.load(std::memory_order_acquire) && !stopping_.load(std::memory_order_relaxed);
 }
 

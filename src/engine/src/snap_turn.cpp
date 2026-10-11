@@ -91,7 +91,7 @@ void read_config(const Config& cfg) {
 
 void tick() {
     const int keys[2] = {g_left_key.load(), g_right_key.load()};
-    if (g_degrees.load() == 0.0f || (keys[0] == 0 && keys[1] == 0) || !device::active()) return;
+    if (g_degrees.load() == 0.0f || (keys[0] == 0 && keys[1] == 0) || !device::presenting()) return;
     DWORD pid = 0;
     GetWindowThreadProcessId(GetForegroundWindow(), &pid);
     const bool focus = pid == GetCurrentProcessId();
@@ -119,7 +119,7 @@ void filter_sticks(unsigned long user, short* lx, short* ly, short* rx, short* r
 #endif
     (void)ry;
     // Only while 3D renders: menus, movies and the virtual screen get the stick as it is.
-    if (user >= kPads || !lx || !ly || !rx || !device::active()) return;
+    if (user >= kPads || !lx || !ly || !rx || !device::presenting()) return;
     const float deg = g_degrees.load(std::memory_order_relaxed);
     const std::int64_t now = now_us();
     if (deg != 0.0f) {

@@ -43,6 +43,12 @@ Quat xr_to_ue_quat(const HostQuat& q);
 // l, r, t, b are the tangents of the FOV angles (l and b negative).
 void stereo_projection(const HostFov& fov, float near_plane, ue::FMatrix& out);
 
+// The field of view of a flat view in an eye's rect (the screen phase): centred, the game
+// camera's horizontal angle across the rect's width, the vertical angle from the rect's
+// aspect. A centre crop of the rect at the window's aspect ratio then shows what the flat game
+// shows at that window size (same horizontal angle, same aspect).
+HostFov centred_fov(double horizontal_fov_deg, double width, double height);
+
 // What a seated player sees from a third-person game camera:
 //   orientation = camera * head-tracked eye orientation
 //   location    = camera location + camera.rotate(eye position * units per metre)

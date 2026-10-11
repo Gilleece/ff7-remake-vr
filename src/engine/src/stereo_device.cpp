@@ -50,6 +50,13 @@ float* g_near_plane = nullptr;
 std::atomic<bool> g_active{false};             // this frame renders in stereo; read by both threads
 std::atomic<std::uint64_t> g_scene_frames{0};  // stereo frames whose left eye view was built (the 3D scene renders)
 std::atomic<bool> g_wanted{false};             // stereo switched on (ini, dev command, EnableStereo)
+// The current frame renders stereo, but the headset shows a flat view of the game on the
+// virtual screen: the screen phase of [stereo] screen_keeps_target (stereo switched off by a
+// movie, a cutscene, the stereo key or `stereo off`, or the host's own screen mode). The eye
+// target and the scene buffers stay allocated; both eyes render the game's own camera with
+// its field of view, and the desktop mirror (a centre crop of the left eye at the window's
+// aspect ratio) is the screen's image.
+std::atomic<bool> g_screen{false};
 std::atomic<std::uint64_t> g_rt_size{0};       // committed eye size: width | height << 32
 std::atomic<StereoHost*> g_host{nullptr};
 FixedStereoHost* g_fixed = nullptr;            // created in init(), never freed
@@ -100,6 +107,11 @@ struct GameState {
     std::uint64_t stereo_draws = 0;
     std::uint64_t transitions = 0;
     bool in_tick = false;
+    bool screen = false;          // this frame is in the screen phase (see g_screen)
+    float screen_fov_deg = 90.0f;  // the game camera's horizontal field of view this frame (screen phase)
+    std::uint64_t screen_phases = 0;  // screen phases entered
+    std::uint64_t screen_frames = 0;  // frames rendered in them
+    std::chrono::steady_clock::time_point screen_since{};
     bool views_built = false;  // stereo views were built during this Tick
     bool frame_has_views = false;  // this Tick got fresh views from the host
     int host_gap = 0;          // consecutive stereo frames without a host frame
@@ -137,6 +149,7 @@ std::mutex g_diag_mutex;  // guards the diagnostic copies read by status()/last_
 struct FrameEntry {
     std::uint64_t frame_id = 0;  // 0: rendered with views held from an earlier frame
     bool stereo = false;         // the views were built (the frame was drawn in stereo)
+    bool screen = false;         // screen phase: a flat view in both eyes, shown through the mirror only
     HostView views[2]{};
     std::uint32_t rect_w = 0, rect_h = 0;  // eye view rect size the frame was rendered with (0 = whole half)
     // The eye cameras (late update) and how old the views are (pose age at the hand-over).
@@ -392,6 +405,27 @@ void CalculateStereoViewOffset(void*, EStereoscopicPass pass, FRotator* rotation
     ++g_count.view_offset;
     const int e = eye_index(pass);
     const Settings& s = g_settings;
+    if (g.screen) {
+        // Screen phase: both eyes see the game's own camera (no head pose, no eye offset, no
+        // camera mode) with its field of view (GetStereoProjectionMatrix), so the centre crop of
+        // the left eye that the mirror draws is the flat game's picture. The FOV follows the
+        // rotation in FMinimalViewInfo (docs/re/engine.md section 5).
+        if (e == 0) {
+            const float fov = reinterpret_cast<const float*>(rotation)[3];
+            g.screen_fov_deg = std::isfinite(fov) && fov > 5.0f && fov < 170.0f ? fov : 90.0f;
+            g_scene_frames.fetch_add(1, std::memory_order_relaxed);
+            g.views_built = true;
+        }
+        g.built_loc[e] = *location;
+        g.built_rot[e] = *rotation;
+        std::lock_guard lock(g_diag_mutex);
+        g.cam_rot = *rotation;
+        g.cam_loc = *location;
+        g.world_to_meters = world_to_meters;
+        g.eye_rot[e] = *rotation;
+        g.eye_loc[e] = *location;
+        return;
+    }
     // The game's camera, then the camera mode's eye base (level boom, first person).
     const FRotator game_rot = *rotation;
     const FVector game_loc = *location;
@@ -475,7 +509,15 @@ FMatrix* GetStereoProjectionMatrix(const void*, FMatrix* out, EStereoscopicPass 
     ++g_count.projection;
     const int e = eye_index(pass);
     const float near_plane = g_near_plane ? *g_near_plane : 10.0f;
-    math::stereo_projection(g.views[e].fov, near_plane, *out);
+    if (g.screen) {
+        // Screen phase: a centred projection with the game camera's horizontal field of view
+        // over the eye's whole view rect; the mirror's centre crop at the window's aspect ratio
+        // then frames it like the flat game (same horizontal angle, same aspect).
+        const double rw = g.rect_w ? g.rect_w : g.eye_w, rh = g.rect_h ? g.rect_h : g.eye_h;
+        math::stereo_projection(math::centred_fov(g.screen_fov_deg, rw, rh), near_plane, *out);
+    } else {
+        math::stereo_projection(g.views[e].fov, near_plane, *out);
+    }
     {
         std::lock_guard lock(g_diag_mutex);
         g.proj[e] = *out;
@@ -497,6 +539,7 @@ struct FrameEndCommand {
     std::int64_t located_qpc = 0, late_qpc = 0;  // pose age at the hand-over
     ID3D11Texture2D* back_buffer = nullptr;
     mirror::Mode mirror = mirror::Mode::Off;
+    bool screen = false;  // screen phase: the mirror only, nothing for the host
     std::atomic<bool> pending{false};
 };
 FrameEndCommand g_frame_end[4];
@@ -521,7 +564,7 @@ void frame_end_execute(void*, rhi::Command* self) {
             late_update::note_handover(static_cast<double>(q.QuadPart - c->located_qpc) * ms,
                                        c->late_qpc ? static_cast<double>(q.QuadPart - c->late_qpc) * ms : -1.0);
         }
-        if (StereoHost* h = g_host.load()) h->eye_texture_ready(c->eyes);
+        if (StereoHost* h = g_host.load(); h && !c->screen) h->eye_texture_ready(c->eyes);
         if (c->mirror != mirror::Mode::Off)
             mirror::draw(c->eyes.texture, c->back_buffer, c->eyes.eyes[0], c->eyes.eyes[1], c->mirror);
     } catch (...) {
@@ -591,7 +634,7 @@ void RenderTexture_RenderThread(const void*, FRHICommandListImmediate* cmd_list,
     // The scene depth for the headset's depth layer, at the rects the views rendered (the
     // colour rects may change below with DLSS's output; the depth is scaled to them).
     StereoHost* host = g_host.load();
-    if (fe.stereo && host && host->depth_wanted()) {
+    if (fe.stereo && !fe.screen && host && host->depth_wanted()) {
         DXGI_FORMAT srv = DXGI_FORMAT_UNKNOWN;
         if (ID3D11Texture2D* d = scene_depth::acquire(tw, th, *reinterpret_cast<void* const*>(src), &srv)) {
             out.depth = d;  // released by the frame-end command
@@ -606,8 +649,10 @@ void RenderTexture_RenderThread(const void*, FRHICommandListImmediate* cmd_list,
     c.eyes = out;
     c.located_qpc = fe.stereo ? fe.located_qpc : 0;
     c.late_qpc = fe.stereo ? fe.late_qpc : 0;
-    const auto mode = static_cast<mirror::Mode>(g_settings.mirror.load());
+    // In the screen phase the window is the screen's image: always the left eye's centre crop.
+    const auto mode = fe.screen ? mirror::Mode::Crop : static_cast<mirror::Mode>(g_settings.mirror.load());
     c.mirror = plausible_d3d_object(bb) ? mode : mirror::Mode::Off;
+    c.screen = fe.screen;
     c.back_buffer = bb;
     c.pending.store(true, std::memory_order_release);
     if (rhi::enqueue(cmd_list, &c.base)) {
@@ -890,6 +935,7 @@ void configure_render_scale(const Config& cfg) {
     g_settings.dynres_min = static_cast<float>(std::clamp(cfg.get_float("stereo", "dynamic_resolution_min", 0.75), 0.3, 1.0));
     g_settings.dynres_target = static_cast<float>(std::clamp(cfg.get_float("stereo", "dynamic_resolution_target", 0.85), 0.3, 1.2));
     g_settings.hold_target_seconds = static_cast<int>(std::clamp<long long>(cfg.get_int("stereo", "hold_target_seconds", 30), 0, 600));
+    g_settings.screen_keeps_target = cfg.get_bool("stereo", "screen_keeps_target", true);
     log::info("dynres: render scale {:.2f}, dynamic resolution {} (min {:.2f}, target {:.2f} of the frame period)",
               g_settings.render_scale.load(), g_settings.dynres.load() ? "on" : "off", g_settings.dynres_min.load(),
               g_settings.dynres_target.load());
@@ -984,6 +1030,8 @@ void request_active(bool on) {
     if (g_wanted.exchange(on) != on) log::info("stereo: switched {} (from the next frame)", on ? "on" : "off");
 }
 bool active() { return g_active.load(); }
+bool presenting() { return g_active.load() && !g_screen.load(std::memory_order_acquire); }
+bool screen_phase() { return g_screen.load(std::memory_order_acquire); }
 
 bool last_listener_pose(FVector& location, FRotator& rotation, std::uint64_t& frame) {
     std::lock_guard lock(g_diag_mutex);
@@ -998,7 +1046,42 @@ bool wanted() { return g_wanted.load(); }
 std::uint64_t scene_frames() { return g_scene_frames.load(std::memory_order_relaxed); }
 float render_scale_now() { return g_dyn_scale.load(std::memory_order_relaxed); }
 
+// Screen phase: nothing waits for the headset's frames (the render module paces only its
+// screen layer), so the engine would render its two eye views as fast as the card allows.
+// Hold the game thread to the headset's refresh rate instead, as the XR frame wait does in
+// stereo. Game thread only.
+void screen_pace() {
+    float ms = 0, hz = 0;
+    std::uint64_t samples = 0;
+    StereoHost* h = g_host.load();
+    if (h) h->gpu_frame_time(ms, samples, hz);
+    if (!(hz >= 30.0f && hz <= 500.0f)) hz = 72.0f;
+    static std::int64_t next = 0, freq = 0;
+    if (!freq) {
+        LARGE_INTEGER f;
+        QueryPerformanceFrequency(&f);
+        freq = f.QuadPart;
+    }
+    const auto period = static_cast<std::int64_t>(static_cast<double>(freq) / hz);
+    LARGE_INTEGER q;
+    QueryPerformanceCounter(&q);
+    std::int64_t now = q.QuadPart;
+    if (next == 0 || now - next > 4 * period || next - now > 2 * period) {
+        next = now + period;  // first frame of a phase, or far behind: start over from now
+        return;
+    }
+    while (now < next) {
+        const std::int64_t left_ms = (next - now) * 1000 / freq;
+        if (left_ms >= 2) Sleep(static_cast<DWORD>(left_ms - 1));
+        else SwitchToThread();
+        QueryPerformanceCounter(&q);
+        now = q.QuadPart;
+    }
+    next += period;
+}
+
 void tick_begin() {
+    if (g.screen) screen_pace();
     if (framelog::g_on.load(std::memory_order_relaxed)) {
         float gpu_ms = 0, hz = 0;
         std::uint64_t samples = 0;
@@ -1009,7 +1092,7 @@ void tick_begin() {
     g.views_built = false;
     ++g.ticks;
     const bool wanted = g_wanted.load();
-    bool host_stereo = false;
+    bool host_stereo = false, host_screen = false, host_session = false;
     g.frame_has_views = false;
     update_wanted_size();
     if (StereoHost* h = g_host.load()) {
@@ -1039,8 +1122,18 @@ void tick_begin() {
             if (f.frame_id) g_latest_frame_id = f.frame_id;
         }
         host_stereo = f.stereo;
+        host_screen = f.screen;
+        host_session = f.session;
     }
     bool frame_stereo = false;
+    // [stereo] screen_keeps_target: when stereo is switched off (a movie, a cutscene, the
+    // stereo key, `stereo off`) or the host shows its screen while the engine renders stereo,
+    // the engine keeps rendering its eye target with a flat view instead of going mono, so
+    // nothing is released and allocated again (about 1.1-1.3 GB at headset sizes) when the
+    // flat phase ends.
+    const bool keep = g_settings.screen_keeps_target.load(std::memory_order_relaxed) && g_active.load();
+    const bool screen_wanted = keep && (!wanted || host_screen);
+    bool screen = false;
     if (wanted && host_stereo) {
         frame_stereo = true;
         if (g.host_gap > kHoldFrames) {
@@ -1050,7 +1143,11 @@ void tick_begin() {
                       g.host_gap);
         }
         g.host_gap = 0;
-    } else if (wanted && g_active.load()) {
+    } else if (screen_wanted && host_session) {
+        frame_stereo = true;
+        screen = true;
+        g.host_gap = 0;
+    } else if ((wanted || screen_wanted) && g_active.load()) {
         // No frame from the host this time (a late XR frame, a hitch, the runtime reconnecting):
         // keep the eye target and render with the last views instead of flipping the engine to
         // mono and back.
@@ -1064,6 +1161,7 @@ void tick_begin() {
         const int limit_s = std::max(0, g_settings.hold_target_seconds.load(std::memory_order_relaxed));
         if (g.host_gap <= kHoldFrames || held_s <= limit_s) {
             frame_stereo = true;
+            screen = screen_wanted;
             ++g.held_frames;
             if (g.host_gap == kHoldFrames + 1)
                 log::info("stereo: no frames from the headset for {} frames: rendering with the last views for up to {} s before the eye target "
@@ -1099,6 +1197,23 @@ void tick_begin() {
             log::info("stereo: rendering {} from tick {} (eye {}x{}, transition {})", frame_stereo ? "STEREO" : "mono", g.ticks,
                       g.eye_w, g.eye_h, g.transitions);
     }
+    if (screen != g.screen) {
+        const auto now = std::chrono::steady_clock::now();
+        if (screen) {
+            ++g.screen_phases;
+            g.screen_since = now;
+            log::info("stereo: screen phase {} from tick {}: {}; the eye target ({}x{}) is kept, the screen shows the left eye's flat view",
+                      g.screen_phases, g.ticks, wanted ? "the host shows its screen" : "stereo switched off", g.eye_w, g.eye_h);
+        } else {
+            log::info("stereo: screen phase {} ended at tick {} after {:.1f} s: {}", g.screen_phases, g.ticks,
+                      std::chrono::duration<double>(now - g.screen_since).count(),
+                      frame_stereo ? "stereo again" : "mono (the eye target is released)");
+        }
+    }
+    g.screen = screen;
+    g_screen.store(screen, std::memory_order_release);
+    if (screen) ++g.screen_frames;
+    if (StereoHost* h = g_host.load()) h->set_screen_from_eyes(screen);
     update_render_scale(frame_stereo);
     if (frame_stereo)
         fixes::apply_system_resolution(static_cast<std::int32_t>(2 * g.eye_w), static_cast<std::int32_t>(g.eye_h));
@@ -1115,6 +1230,7 @@ void tick_end() {
         FrameEntry e;
         e.frame_id = g.frame_has_views ? g.views_frame_id : 0;
         e.stereo = g.views_built;
+        e.screen = g.screen;
         e.views[0] = g.views[0];
         e.views[1] = g.views[1];
         e.rect_w = g.rect_w;
@@ -1137,7 +1253,8 @@ std::string status() {
         "wanted={} active={} eye={}x{} want={}x{} rt_texture={}x{} fmt={} mirror={} scale={:.2f} decouple_pitch={} positional={} "
         "ticks={} stereo_draws={} transitions={} view_offset_calls={} proj_calls={} rect_calls={} render_texture_calls={} "
         "rt_size_calls={} reallocs={} frame_end_queued={} frame_end_run={} frame_end_failed={} fifo_dropped={} held_frames={} unusable_views={} "
-        "holds={} holds_expired={} longest_hold={:.1f}s hold_target_seconds={} sysres={} latest_frame={} frame_ms_avg={:.2f} p50={:.2f} p95={:.2f} max={:.2f} (n={}, {}) | {}",
+        "holds={} holds_expired={} longest_hold={:.1f}s hold_target_seconds={} screen_keeps_target={} screen={} screen_phases={} screen_frames={} screen_fov={:.1f} "
+        "sysres={} latest_frame={} frame_ms_avg={:.2f} p50={:.2f} p95={:.2f} max={:.2f} (n={}, {}) | {}",
         g_wanted.load() ? 1 : 0, g_active.load() ? 1 : 0, unpack_w(v), unpack_h(v), g.want_w, g.want_h, g_count.rt_tex_w.load(),
         g_count.rt_tex_h.load(),
         g_count.rt_tex_format.load(), mirror::to_string(static_cast<mirror::Mode>(g_settings.mirror.load())),
@@ -1145,7 +1262,9 @@ std::string status() {
         g.stereo_draws, g.transitions, g_count.view_offset.load(), g_count.projection.load(), g_count.adjust_rect.load(),
         g_count.render_texture.load(), g_count.calc_rt_size.load(), g_count.realloc_yes.load(), g_count.frame_end_queued.load(),
         g_count.frame_end_run.load(), g_count.frame_end_failed.load(), g_fifo_dropped.load(), g.held_frames, g.unusable_views,
-        g.holds, g.holds_expired, g.longest_hold_s, g_settings.hold_target_seconds.load(), fixes::system_resolution_overridden() ? 1 : 0, g_latest_frame_id.load(), g_timer.last_avg, g_timer.last_p50, g_timer.last_p95,
+        g.holds, g.holds_expired, g.longest_hold_s, g_settings.hold_target_seconds.load(), g_settings.screen_keeps_target.load() ? 1 : 0,
+        g_screen.load() ? 1 : 0, g.screen_phases, g.screen_frames, g.screen_fov_deg,
+        fixes::system_resolution_overridden() ? 1 : 0, g_latest_frame_id.load(), g_timer.last_avg, g_timer.last_p50, g_timer.last_p95,
         g_timer.last_max, g_timer.last_n, g_timer.last_window_stereo ? "stereo" : "mixed/mono", host_desc);
 }
 
@@ -1156,7 +1275,7 @@ std::size_t late_candidates(LateCandidate* out, std::size_t max) {
     std::size_t n = 0;
     for (std::size_t i = 0; i < g_fifo_count && n < max; ++i) {
         const FrameEntry& e = g_fifo[(g_fifo_head + i) % g_fifo.size()];
-        if (!e.stereo || !e.frame_id) continue;  // views held from an earlier frame: no XR frame to locate for
+        if (!e.stereo || e.screen || !e.frame_id) continue;  // views held from an earlier frame (or a flat view): no XR frame to locate for
         LateCandidate& c = out[n++];
         c.frame_id = e.frame_id;
         for (int k = 0; k < 2; ++k) {

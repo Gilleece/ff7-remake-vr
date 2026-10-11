@@ -296,6 +296,7 @@ void stop() {
 void SetMode(Mode mode) { XrController::Get().SetMode(mode); }
 double DedicatedVideoMemoryMb() { return g_started.load(std::memory_order_relaxed) ? XrController::Get().DedicatedVideoMemoryMb() : 0.0; }
 Mode GetMode() { return XrController::Get().GetMode(); }
+void SetScreenFromEyes(bool on) { XrController::Get().SetScreenFromEyes(on); }
 bool GetEyeSetup(EyeSetup* out) { return XrController::Get().GetEyeSetup(out); }
 void RequestSnapTurn(float degrees) {
     if (g_started.load(std::memory_order_relaxed)) XrController::Get().SnapTurn(degrees);

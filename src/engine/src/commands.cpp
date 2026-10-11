@@ -20,6 +20,7 @@
 //   stereo distortfix [0|1]       right-eye distortion (heat haze) fix (distortion_fix.h), with its counters
 //   stereo movie [on|off]         movie detection (movie_watch.h), with its state
 //   stereo cutscene [on|off|status|delay <ms>|hold <ms>|simulate on|off|<ms>]   cutscenes on the virtual screen (movie_watch.h)
+//   stereo screenkeep [0|1]   [stereo] screen_keeps_target: the eye target kept through the virtual screen's phases
 //   stereo window [<w>x<h>|0]     game window size while VR renders in a fullscreen mode (fixes.h)
 //   stereo frametime <s>          frame time window length in seconds; restarts the window
 //   stereo swap <0|1>             test: right eye rendered into the left half and vice versa, to tell
@@ -257,6 +258,10 @@ std::string stereo_command(const std::vector<std::string>& a) {
         if (a.size() == 4 && (a[2] == "delay" || a[2] == "hold") && to_float(a[3], v[0]) && v[0] >= 0)
             movie::set_cutscene_times(a[2] == "delay" ? static_cast<int>(v[0]) : -1, a[2] == "hold" ? static_cast<int>(v[0]) : -1);
         return "ok " + movie::cutscene_status();
+    }
+    if (c == "screenkeep") {
+        if (a.size() == 3) s.screen_keeps_target = a[2] == "1" || a[2] == "on";
+        return std::format("ok screen_keeps_target {} (screen phase now {})", s.screen_keeps_target.load() ? 1 : 0, device::screen_phase() ? 1 : 0);
     }
     if (c == "window") {
         if (a.size() == 3) fixes::set_vr_window_size(a[2]);
