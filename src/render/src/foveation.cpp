@@ -250,6 +250,7 @@ struct State {
     uint32_t tilesX = 0, tilesY = 0;
     double workFraction = 1.0;  // pixel shader invocations relative to full rate, inside the eye rects
     std::string surfaceText;
+    uint64_t creations = 0, refills = 0;  // shading-rate surfaces created / refilled in place for a new layout or rates
     // Per tile of the layout: the view direction of its centre in each eye it overlaps (eye
     // space, unit length), so a new ring centre needs one dot product per tile and eye.
     struct TileInfo {
@@ -745,6 +746,27 @@ bool BuildSurface(ID3D11DeviceContext* ctx) {
             }
         }
     ClassifyTiles();
+    std::string centres;
+    for (int e = 0; e < 2; ++e) {
+        float cx = 0, cy = 0;
+        MapOf(g.eyes[e]).ToPixel(0, 0, &cx, &cy);
+        centres += std::format("{}{} eye rect {},{} {}x{}, optical centre at ({:.0f}, {:.0f}) = {:.1f} % / {:.1f} % of the eye", e ? "; " : "",
+                               e ? "right" : "left", g.eyes[e].rect.x, g.eyes[e].rect.y, g.eyes[e].rect.width, g.eyes[e].rect.height, cx, cy,
+                               100.0 * (cx - g.eyes[e].rect.x) / g.eyes[e].rect.width, 100.0 * (cy - g.eyes[e].rect.y) / g.eyes[e].rect.height);
+    }
+    if (g.surface && g.surfaceView) {
+        // Same tile grid (a change of rates, as when DLSS stops and starts upscaling, or of the
+        // hidden area): the existing surface is refilled in place, nothing is created.
+        D3D11_TEXTURE2D_DESC cur{};
+        g.surface->GetDesc(&cur);
+        if (cur.Width == tilesX && cur.Height == tilesY) {
+            SwitchOff(ctx);  // the next scene target switches it on with the new rate table
+            ctx->UpdateSubresource(g.surface.Get(), 0, nullptr, g.tiles.data(), tilesX, 0);
+            ++g.refills;
+            log::info("foveation: {} (refilled in place); {}", g.surfaceText, centres);
+            return true;
+        }
+    }
     D3D11_TEXTURE2D_DESC td{};
     td.Width = tilesX;
     td.Height = tilesY;
@@ -776,14 +798,7 @@ bool BuildSurface(ID3D11DeviceContext* ctx) {
     RetireSurface(ctx);
     g.surface = tex;
     g.surfaceView = view;
-    std::string centres;
-    for (int e = 0; e < 2; ++e) {
-        float cx = 0, cy = 0;
-        MapOf(g.eyes[e]).ToPixel(0, 0, &cx, &cy);
-        centres += std::format("{}{} eye rect {},{} {}x{}, optical centre at ({:.0f}, {:.0f}) = {:.1f} % / {:.1f} % of the eye", e ? "; " : "",
-                               e ? "right" : "left", g.eyes[e].rect.x, g.eyes[e].rect.y, g.eyes[e].rect.width, g.eyes[e].rect.height, cx, cy,
-                               100.0 * (cx - g.eyes[e].rect.x) / g.eyes[e].rect.width, 100.0 * (cy - g.eyes[e].rect.y) / g.eyes[e].rect.height);
-    }
+    ++g.creations;
     log::info("foveation: {}; {}", g.surfaceText, centres);
     return true;
 }
