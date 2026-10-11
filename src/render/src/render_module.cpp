@@ -191,7 +191,7 @@ void RegisterCommands() {
                       [](std::string_view args) { return frame_budget::Command(std::string(args)); });
     dev_commands::add("bufpool", "bufpool status | on | off: the ring for the game's light volume vertex buffers ([stereo] light_volume_pool)",
                       [](std::string_view args) { return buffer_pool::Command(std::string(args)); });
-    dev_commands::add("census", "census status: D3D11 objects created on the game's device by this mod, the game and other modules ([log] d3d11_census)",
+    dev_commands::add("census", "census status | mark [label]: D3D11 objects created on the game's device by this mod, the game and other modules ([log] d3d11_census); mark = those since the previous mark, with the large ones",
                       [](std::string_view args) { return census::Command(std::string(args)); });
     dev_commands::add("upload", "upload status | now: the timed copy from system memory to the graphics card ([log] upload_check)",
                       [](std::string_view args) { return upload_check::Command(std::string(args)); });

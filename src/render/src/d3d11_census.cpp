@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <atomic>
 #include <cstdint>
 #include <format>
@@ -73,8 +74,133 @@ struct State {
     std::unordered_map<std::string, uint64_t> gameBufferKinds, gameBufferKindsTaken;
     // Call stacks (offsets into the executable, nearest first) of the game's dynamic vertex buffers.
     std::unordered_map<std::string, uint64_t> gameDynamicStacks, gameDynamicStacksTaken;
+    // Large textures and buffers (kLargeBytes or more) by caller and description: count and bytes.
+    struct Large {
+        uint64_t count = 0, bytes = 0;
+    };
+    std::unordered_map<std::string, Large> large, largeTaken, largeMarked;  // under siteMutex
+    std::array<std::array<uint64_t, kCallers>, kMaxSlot> markTaken{};       // under siteMutex
+    std::chrono::steady_clock::time_point markTime = std::chrono::steady_clock::now();
 };
 State* g = new State;  // never freed: the hooks stay valid until the process ends
+
+// A creation this large counts as a large one (render targets, staging copies, big buffers).
+constexpr uint64_t kLargeBytes = 4ull << 20;
+
+// Bytes per texel (block formats: per 4x4 block divided by 16), for the size estimate.
+double BytesPerTexel(DXGI_FORMAT f) {
+    switch (f) {
+        case DXGI_FORMAT_R32G32B32A32_TYPELESS:
+        case DXGI_FORMAT_R32G32B32A32_FLOAT:
+        case DXGI_FORMAT_R32G32B32A32_UINT:
+        case DXGI_FORMAT_R32G32B32A32_SINT: return 16;
+        case DXGI_FORMAT_R32G32B32_TYPELESS:
+        case DXGI_FORMAT_R32G32B32_FLOAT: return 12;
+        case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+        case DXGI_FORMAT_R16G16B16A16_FLOAT:
+        case DXGI_FORMAT_R16G16B16A16_UNORM:
+        case DXGI_FORMAT_R16G16B16A16_UINT:
+        case DXGI_FORMAT_R32G32_TYPELESS:
+        case DXGI_FORMAT_R32G32_FLOAT:
+        case DXGI_FORMAT_R32G8X24_TYPELESS:
+        case DXGI_FORMAT_D32_FLOAT_S8X24_UINT: return 8;
+        case DXGI_FORMAT_R8_TYPELESS:
+        case DXGI_FORMAT_R8_UNORM:
+        case DXGI_FORMAT_R8_UINT:
+        case DXGI_FORMAT_A8_UNORM: return 1;
+        case DXGI_FORMAT_R16_TYPELESS:
+        case DXGI_FORMAT_R16_FLOAT:
+        case DXGI_FORMAT_R16_UNORM:
+        case DXGI_FORMAT_R16_UINT:
+        case DXGI_FORMAT_D16_UNORM:
+        case DXGI_FORMAT_R8G8_TYPELESS:
+        case DXGI_FORMAT_R8G8_UNORM: return 2;
+        case DXGI_FORMAT_BC1_TYPELESS:
+        case DXGI_FORMAT_BC1_UNORM:
+        case DXGI_FORMAT_BC1_UNORM_SRGB:
+        case DXGI_FORMAT_BC4_TYPELESS:
+        case DXGI_FORMAT_BC4_UNORM:
+        case DXGI_FORMAT_BC4_SNORM: return 0.5;
+        case DXGI_FORMAT_BC2_TYPELESS:
+        case DXGI_FORMAT_BC2_UNORM:
+        case DXGI_FORMAT_BC2_UNORM_SRGB:
+        case DXGI_FORMAT_BC3_TYPELESS:
+        case DXGI_FORMAT_BC3_UNORM:
+        case DXGI_FORMAT_BC3_UNORM_SRGB:
+        case DXGI_FORMAT_BC5_TYPELESS:
+        case DXGI_FORMAT_BC5_UNORM:
+        case DXGI_FORMAT_BC5_SNORM:
+        case DXGI_FORMAT_BC6H_TYPELESS:
+        case DXGI_FORMAT_BC6H_UF16:
+        case DXGI_FORMAT_BC6H_SF16:
+        case DXGI_FORMAT_BC7_TYPELESS:
+        case DXGI_FORMAT_BC7_UNORM:
+        case DXGI_FORMAT_BC7_UNORM_SRGB: return 1;
+        default: return 4;
+    }
+}
+
+Caller CallerOf(void* ret) {
+    const auto a = reinterpret_cast<uintptr_t>(ret);
+    if (a >= g->modBase && a < g->modEnd) return kMod;
+    if (a >= g->exeBase && a < g->exeEnd) return kGame;
+    return kOther;
+}
+
+void NoteLarge(Caller c, std::string what, uint64_t bytes) {
+    if (bytes < kLargeBytes) return;
+    std::lock_guard lk(g->siteMutex);
+    auto key = std::format("{} {}", kCallerName[c], what);
+    auto it = g->large.find(key);
+    if (it == g->large.end()) {
+        if (g->large.size() >= 1024) return;
+        it = g->large.emplace(std::move(key), State::Large{}).first;
+    }
+    ++it->second.count;
+    it->second.bytes += bytes;
+}
+
+void CountLarge(int slot, void* ret, const void* desc) {
+    if (!desc) return;
+    if (slot == 5) {
+        const auto* d = static_cast<const D3D11_TEXTURE2D_DESC*>(desc);
+        double bytes = double(d->Width) * double(d->Height) * BytesPerTexel(d->Format) * std::max(1u, d->ArraySize) * std::max(1u, d->SampleDesc.Count);
+        if (d->MipLevels != 1) bytes *= 4.0 / 3.0;
+        const char* usage = d->Usage == D3D11_USAGE_STAGING ? " staging" : d->Usage == D3D11_USAGE_DYNAMIC ? " dynamic" : "";
+        NoteLarge(CallerOf(ret),
+                  std::format("tex {}x{}{} f{} b{:x}{}", d->Width, d->Height, d->ArraySize > 1 ? std::format("x{}", d->ArraySize) : std::string(),
+                              static_cast<int>(d->Format), d->BindFlags, usage),
+                  static_cast<uint64_t>(bytes));
+    } else if (slot == 3) {
+        const auto* d = static_cast<const D3D11_BUFFER_DESC*>(desc);
+        NoteLarge(CallerOf(ret), std::format("buffer {} b{:x}", d->ByteWidth, d->BindFlags), d->ByteWidth);
+    }
+}
+
+// Large creations since `taken` (and `taken` moved up to now), largest first.
+std::string LargeText(std::unordered_map<std::string, State::Large>& taken) {
+    std::vector<std::pair<std::string, State::Large>> v;
+    {
+        std::lock_guard lk(g->siteMutex);
+        for (const auto& [key, now] : g->large) {
+            State::Large& t = taken[key];
+            if (now.count > t.count) v.emplace_back(key, State::Large{now.count - t.count, now.bytes - t.bytes});
+            t = now;
+        }
+    }
+    if (v.empty()) return " none";
+    std::sort(v.begin(), v.end(), [](const auto& x, const auto& y) { return x.second.bytes > y.second.bytes; });
+    uint64_t n = 0, bytes = 0;
+    for (const auto& e : v) {
+        n += e.second.count;
+        bytes += e.second.bytes;
+    }
+    std::string s = std::format(" {} ({:.0f} MB):", n, double(bytes) / (1024.0 * 1024.0));
+    for (size_t i = 0; i < v.size() && i < 10; ++i)
+        s += std::format(" [{} x{} {:.0f} MB]", v[i].first, v[i].second.count, double(v[i].second.bytes) / (1024.0 * 1024.0));
+    if (v.size() > 10) s += std::format(" and {} more kinds", v.size() - 10);
+    return s;
+}
 
 void ModuleRange(HMODULE m, uintptr_t& base, uintptr_t& end) {
     MODULEINFO mi{};
@@ -136,6 +262,7 @@ void CountGameBuffer(uintptr_t ret, const D3D11_BUFFER_DESC* desc, const D3D11_S
 template <int Slot>
 HRESULT STDMETHODCALLTYPE Detour(ID3D11Device* d, void* a, void* b, void* c, void* e, void* f, void* h) {
     Count(Slot, _ReturnAddress());
+    if constexpr (Slot == 3 || Slot == 5) CountLarge(Slot, _ReturnAddress(), a);
     if constexpr (Slot == 3)
         CountGameBuffer(reinterpret_cast<uintptr_t>(_ReturnAddress()), static_cast<const D3D11_BUFFER_DESC*>(a),
                         static_cast<const D3D11_SUBRESOURCE_DATA*>(b));
@@ -262,11 +389,38 @@ std::string TakeWindowLine(bool stereo) {
         if (d && g->stereoWindows >= 2) Install(d);
         return {};
     }
-    return std::format("d3d11 objects created in the window: {}; mod call sites{}{}{}", Totals(true), ModSites(true), GameBuffers(true),
-                       MemoryText());
+    return std::format("d3d11 objects created in the window: {}; large (4 MB or more){}; mod call sites{}{}{}", Totals(true), LargeText(g->largeTaken),
+                       ModSites(true), GameBuffers(true), MemoryText());
 }
 
 std::string Command(const std::string& args) {
+    if (args == "mark" || args.starts_with("mark ")) {
+        // The creations since the previous mark, for one event (dlss off, stereo off, xr-restart).
+        if (!g->enabled) return "err off ([log] d3d11_census = 0)";
+        if (!g->installed) return "err not installed yet (two timing windows in stereo first)";
+        const std::string label = args.size() > 5 ? args.substr(5) : std::string("mark");
+        std::string totals;
+        {
+            std::lock_guard lk(g->siteMutex);
+            for (int c = 0; c < kCallers; ++c) {
+                std::string part;
+                for (const SlotInfo& s : kSlots) {
+                    const uint64_t now = g->total[s.slot][c].load(std::memory_order_relaxed);
+                    const uint64_t v = now - g->markTaken[s.slot][c];
+                    g->markTaken[s.slot][c] = now;
+                    if (v) part += std::format(" {} {}", s.name, v);
+                }
+                totals += std::format("{}{}:{}", totals.empty() ? "" : "; ", kCallerName[c], part.empty() ? " none" : part);
+            }
+        }
+        const auto now = std::chrono::steady_clock::now();
+        const double secs = std::chrono::duration<double>(now - g->markTime).count();
+        g->markTime = now;
+        const std::string line = std::format("d3d11 census mark '{}': {:.1f} s since the previous mark: {}; large (4 MB or more){}{}", label, secs, totals,
+                                             LargeText(g->largeMarked), MemoryText());
+        log::info("{}", line);
+        return "ok " + line;
+    }
     if (args == "status" || args.empty()) {
         if (!g->enabled) return "ok off ([log] d3d11_census = 0)";
         if (!g->installed) return "ok on, no device yet";
@@ -278,7 +432,7 @@ std::string Command(const std::string& args) {
         return std::format("ok totals since the start: {}; mod call sites{}; other modules{}{}{}", Totals(false), ModSites(false),
                            others.empty() ? std::string(" none") : others, GameBuffers(false), MemoryText());
     }
-    return "err census status";
+    return "err census status | mark [label]";
 }
 
 }  // namespace ff7vr::render::census
