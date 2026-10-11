@@ -37,7 +37,7 @@ Contents: [Modes](#modes) · [Switching between stereo and the screen](#switchin
 
 | Mode | What the headset shows | Who starts XR frames (`xrWaitFrame`) |
 |---|---|---|
-| `screen` (default) | the back buffer on a virtual screen, 1.8 m wide, 2 m in front of the recentered head, at eye height | the module's `ff7vr xr` thread (or the presenting thread, `[xr] frame_wait = present`) |
+| `screen` (default) | the back buffer on a virtual screen, 1.8 m wide, 2 m in front of the recentered head, at eye height. When the engine switches to it from stereo (movies, cutscenes, the stereo key) the back buffer holds the engine's flat view, a crop of its left eye, with the game's UI drawn on (see "The screen from the eye target") | the module's `ff7vr xr` thread (or the presenting thread, `[xr] frame_wait = present`) |
 | `stereo` | the engine's side-by-side image as a projection layer | the engine's game thread (`BeginGameFrame`); the `ff7vr xr` thread while the game thread is not starting frames |
 | `stereo-test` | the back buffer as both eyes of a projection layer (head-locked, no depth); a test thread stands in for the game thread | the test thread |
 
@@ -85,7 +85,7 @@ What the user sees at a switch:
 |---|---|---|
 | stereo -> screen | the engine calls `SetMode(Screen)` (menus, movies) | Frames already started by the game thread are ended with their stereo images. From the next frame on, `BeginGameFrame` returns `stereo = false` without blocking, the engine renders mono into the back buffer and the XR thread starts frames, which show the screen layer. The view changes from the 3D scene to the screen in one frame; no frame is empty or repeated |
 | stereo -> screen (automatic) | the game thread stops starting frames | Up to 100 ms with no new frame (the runtime re-projects the last one, as it does for any late frame), then up to 200 ms of the last stereo image, then the screen layer with whatever the game presents (the loading screen) |
-| screen -> stereo | `SetMode(Stereo)` | The XR thread keeps pacing until the game thread's first `BeginGameFrame`, then hands over. The first frames the engine still renders mono (before its eye target exists) show the screen layer with that mono image; the first stereo image replaces it in one frame |
+| screen -> stereo | `SetMode(Stereo)` | The XR thread keeps pacing until the game thread's first `BeginGameFrame`, then hands over. The first frames the engine still renders mono (before its eye target exists) show the screen layer with that mono image; the first stereo image replaces it in one frame. With `[stereo] screen_keeps_target = 1` (below) the eye target already exists and the first stereo frame follows at once |
 
 Measured with `mode stereo-test` and the Null backend (captures in
 `captures\xr\run2-null`, log lines in its `ff7vr.log`): after
@@ -96,6 +96,41 @@ Every second image dropped (`stereo-test drop 2`): every dropped frame
 re-showed the previous image. `mode screen` / `mode stereo-test`: one frame
 of overlap at most, no gap. Captures taken during each phase show the
 expected layer.
+
+### The screen from the eye target (`[stereo] screen_keeps_target`)
+
+When stereo is switched off while the engine renders stereo (a movie or a
+cutscene on the virtual screen, the stereo key or pad chord, `stereo off`),
+or `mode screen` is used while stereo is wanted, the engine does not go mono
+(`[stereo] screen_keeps_target = 1`, the default since 11/10). It keeps its
+side-by-side eye target and renders the game's own camera in both eyes, with
+the game camera's horizontal field of view and no head pose; its frame-end
+command draws the left eye's centre crop at the window's aspect ratio into the
+back buffer and offers no stereo image (`docs/engine-module.md`, "Frame flow",
+the screen phase). This module is in screen mode, so rule 3 applies and the
+screen layer shows the back buffer: the flat game, framed as on the monitor.
+The engine calls `SetScreenFromEyes(true)` for the phase, which keeps the UI
+layer wanted (the engine still redirects the game's UI into its own texture)
+and draws that UI onto the back buffer before the screen layer takes it, as
+the desktop mirror does, whatever `[ui] mirror` says. The HUD panel is not
+shown; the HUD is on the screen as in the old screen mode. The engine holds
+its game thread to the headset's refresh rate during the phase (nothing else
+paces it in screen mode).
+
+Why: the old path (`screen_keeps_target = 0`) released the engine's eye-size
+targets at every switch to the screen and allocated them again when stereo
+came back (1.1-1.3 GB at the headset player's DLSS settings, about 3.6 GB
+at 3476x3364 without DLSS), and such releases and allocations are the proven headless
+trigger of the slow PCIe state (`docs/benchmarking.md`). With the phase, a
+cutscene, a movie, `stereo off`/`on` and `mode screen`/`stereo` create no
+large object (table in `docs/benchmarking.md`, "Allocations per event").
+Cost: both eyes are rendered at their full rects at the headset's refresh
+rate, so the phase costs what stereo costs (measured with DLSS: the same scene
+time, the GPU a little less busy). Foveated rendering is not applied to the
+flat view (the crop shows the eye's whole width), so without DLSS and with
+foveation on the phase's scene takes about 1.8 ms more than foveated stereo
+(9.2 against 7.4 ms at 3476x3364, both paced at 72 Hz). The old path's mono frames at the window's
+size were much cheaper, but every switch moved gigabytes.
 
 ## Frame wait and pacing
 
@@ -1560,7 +1595,10 @@ feature switches itself off with one log line and nothing else changes.
   each stereo frame (`scene_timing.cpp`, "Timing" above), which run with foveation off as
   well; their sum is `render::GetGpuFrameTime` (render.h), which the engine's dynamic
   resolution reads.
-- **Never affected:** mono frames, screen mode and the plain game (no stereo
+- **Never affected:** the screen phase of `[stereo] screen_keeps_target` (a
+  stereo view family, but its flat view is shown as a crop across the left
+  eye's whole width: the engine passes no eye layout, so it is only timed),
+  mono frames, screen mode and the plain game (no stereo
   view family, so no scene is marked), the in-game UI pass (after the scene
   window), the post-processing chain including temporal AA, bloom and the
   tonemapper, the desktop mirror and the XR copies (after the scene window),
