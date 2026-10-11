@@ -94,6 +94,16 @@ Vec xr_to_ue_position(const HostVec3& p) { return Vec{-p.z, p.x, p.y}; }
 
 Quat xr_to_ue_quat(const HostQuat& q) { return normalize(Quat{-q.z, q.x, q.y, -q.w}); }
 
+HostFov centred_fov(double horizontal_fov_deg, double width, double height) {
+    const double tx = std::tan(horizontal_fov_deg * 0.5 * 3.14159265358979323846 / 180.0);
+    HostFov f;
+    f.angleRight = static_cast<float>(std::atan(tx));
+    f.angleLeft = -f.angleRight;
+    f.angleUp = static_cast<float>(std::atan(tx * (width > 0 && height > 0 ? height / width : 1.0)));
+    f.angleDown = -f.angleUp;
+    return f;
+}
+
 void stereo_projection(const HostFov& fov, float near_plane, ue::FMatrix& out) {
     const double l = std::tan(fov.angleLeft), r = std::tan(fov.angleRight);
     const double t = std::tan(fov.angleUp), b = std::tan(fov.angleDown);

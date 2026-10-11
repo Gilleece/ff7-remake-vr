@@ -215,6 +215,20 @@ int main(int argc, char** argv) {
     const double depth = (100 * m.M[2][2] + m.M[3][2]) / (100 * m.M[2][3]);
     check(near(depth, 0.1), "reversed-Z depth = near / z");
 
+    // Screen phase: a 60 degree flat view in a 2084x2020 eye rect, shown as the centre crop at
+    // 16:9. The edges of the flat game's 16:9 frustum must land on the crop's edges: x = +-1
+    // and y = +-(the crop's share of the rect's height).
+    {
+        const double w = 2084, h = 2020, aspect = 16.0 / 9.0, tx = std::tan(30 * kDeg);
+        stereo_projection(centred_fov(60.0, w, h), 10.0f, m);
+        const Vec re = ndc(tx * 100, 0, 100);
+        const Vec t = ndc(0, tx / aspect * 100, 100);
+        const Vec b = ndc(0, -tx / aspect * 100, 100);
+        const double crop_share = (w / aspect) / h;
+        check(near(re.x, 1) && near(re.y, 0) && near(t.y, crop_share) && near(b.y, -crop_share) && near(t.x, 0),
+              "screen phase: the flat game's 16:9 frustum fills the centre crop of the eye rect");
+    }
+
     // Level boom: a camera 400 cm behind the pivot on a boom pitched down 34 degrees (looking
     // down from above) comes back to the pivot's height, 400 cm behind it along the yaw.
     {

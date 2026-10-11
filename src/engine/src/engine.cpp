@@ -166,7 +166,7 @@ void __fastcall tick_detour(void* engine, float delta_seconds, bool idle) {
     if (installed) {
         movie::tick();
         device::tick_begin();
-        player::tick(device::active(), delta_seconds);
+        player::tick(device::presenting(), delta_seconds);
         controls::tick();
         snap_turn::tick();
         if (!g_view_states_logged) log_view_states(engine);

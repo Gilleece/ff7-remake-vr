@@ -22,7 +22,7 @@ std::atomic<std::uint64_t> g_calls{0}, g_scaled{0}, g_unexpected{0};
 void* __fastcall ctor_detour(void* self) {
     void* r = g_hook.original<CtorFn>()(self);
     const float s = g_scale.load(std::memory_order_relaxed);
-    if (s != 1.0f && self && device::active()) {
+    if (s != 1.0f && self && device::presenting()) {  // the flat view of the screen phase keeps it, as the flat game
         g_calls.fetch_add(1, std::memory_order_relaxed);
         float* v = reinterpret_cast<float*>(static_cast<std::uint8_t*>(self) + kVignetteIntensity);
         if (*v == 1.0f) {

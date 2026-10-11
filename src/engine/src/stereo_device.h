@@ -40,6 +40,10 @@ struct Settings {
     // scene buffers at the eye size) is kept while the host has no frames, e.g. while the
     // headset's runtime reconnects. At least 45 frames either way.
     std::atomic<int> hold_target_seconds{30};
+    // [stereo] screen_keeps_target (default 1): stereo switched off while the engine renders
+    // stereo keeps the eye target and shows a flat view on the virtual screen (the screen
+    // phase) instead of rendering mono; 0 = mono as before (the eye target is released).
+    std::atomic<bool> screen_keeps_target{true};
 };
 Settings& settings();
 
@@ -61,6 +65,12 @@ FixedStereoHost* fixed_host();  // the built-in host (for dev commands)
 void request_active(bool on);
 bool wanted();  // switched on
 bool active();  // the current frame renders in stereo (wanted and the host can show it)
+// The current frame renders stereo and the headset shows it in 3D: active() outside the
+// screen phase. In the screen phase ([stereo] screen_keeps_target) the engine still renders
+// its eye target (active() is true) but with the game's flat camera in both eyes, shown on
+// the virtual screen; camera modes, snap turn and the UI panel's alignment are off as in mono.
+bool presenting();
+bool screen_phase();
 // Any thread: stereo frames whose eye views were built so far (the 3D scene rendered; none
 // on loading screens and movies), and the render scale in effect ([stereo] render_scale or
 // the dynamic resolution's current scale).

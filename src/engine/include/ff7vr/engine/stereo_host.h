@@ -64,6 +64,11 @@ struct GameFrame {
     bool views_valid = false;    // false: the engine keeps using the last valid views
     HostView views[2]{};         // [0] left eye, [1] right eye
     HostPose head{};             // head pose in tracking space (informational)
+    // The host shows the flat virtual screen (its own mode switch, e.g. the `mode screen` dev
+    // command) although stereo is wanted. The engine may keep rendering its eye target and
+    // show a flat view through the desktop mirror instead ([stereo] screen_keeps_target).
+    bool screen = false;
+    bool session = false;        // the host has a running headset session (screen or stereo)
 };
 
 struct EyeRect {
@@ -118,6 +123,13 @@ public:
     // Any thread. GPU time of the most recently measured stereo frame, the number of
     // frames measured so far, and the display's refresh rate; false when not known.
     virtual bool gpu_frame_time(float& /*gpu_ms*/, std::uint64_t& /*samples*/, float& /*refresh_hz*/) { return false; }
+
+    // Game thread, once per engine frame after begin_game_frame: true while the engine keeps
+    // rendering stereo but shows a flat view of the game on the virtual screen (the screen
+    // phase of [stereo] screen_keeps_target). No eye texture is offered meanwhile; the window
+    // (the desktop mirror, a centre crop of the left eye) is the screen's image and the game's
+    // UI, still drawn on its own texture, has to be put on it.
+    virtual void set_screen_from_eyes(bool /*on*/) {}
 };
 
 }  // namespace ff7vr::engine

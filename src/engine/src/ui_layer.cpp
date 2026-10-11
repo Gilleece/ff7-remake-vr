@@ -38,6 +38,7 @@
 
 #include "late_update.h"
 #include "rhi_command.h"
+#include "stereo_device.h"
 #include "ui_align.h"
 
 #include "ff7vr/core/dev_commands.h"
@@ -462,7 +463,9 @@ void __fastcall render_detour(void* renderer, void* cmdList) {
     // of each stereo frame, which run with foveation off as well (only timed then).
     render::FoveationEye eyes[2];
     if (g_marksReady.load(std::memory_order_relaxed) && render::SceneMarksWanted() && stereo_family(renderer)) {
-        const bool foveated = render::FoveationWanted() && stereo_eyes(renderer, eyes);
+        // Not in the screen phase: the flat view on the virtual screen shows the left eye's
+        // whole width, coarse edges included.
+        const bool foveated = render::FoveationWanted() && !device::screen_phase() && stereo_eyes(renderer, eyes);
         if (append_mark(cmdList, true, foveated ? eyes : nullptr)) {
             g_sceneOpen = true;
             ++g_marksBegun;

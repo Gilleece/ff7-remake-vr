@@ -827,7 +827,7 @@ the estimate counts texels times format size.
 - **A session gap of up to 30 s no longer costs the eye target** (`xr-stop` above; a 38-s
   gap ended in mono after 30.0 s as intended, run 20261011-211843-hold). A new session still
   creates its swapchains: OpenXR swapchains belong to their session.
-- **Mode switches still reallocate**: `stereo off/on` and every cutscene or movie on the
+- **Mode switches still reallocated** (until the screen phase below): `stereo off/on` and every cutscene or movie on the
   virtual screen release the engine's eye-size targets (about 1.1-1.3 GB) and create them
   again 0.5-6 s later. `r.SceneRenderTargetResizeMethod 2` (grow only) changed nothing
   (31 large, 1094 MB at `stereo on` with it, run 20261011-211140-grow); inferred: the released
@@ -838,6 +838,59 @@ the estimate counts texels times format size.
   DLSS evaluates (none during a dropout), no buffers or textures.
 - During a hold without a session the engine renders unpaced (86-109 fps against 72 in the
   `xr-stop` window): nothing paces the frames until the runtime is back.
+
+#### The screen phase (`[stereo] screen_keeps_target = 1`)
+
+Since the screen phase (`docs/engine-module.md`, "Frame flow"; `docs/render.md`, "The screen
+from the eye target") the virtual screen's phases keep the eye target. Same method, same
+settings as the table above (his DLSS ini, run `20261011-214144-screen-r2-dlss`); the old
+path is the same build with `stereo screenkeep 0`:
+
+| Event (window after it) | `screen_keeps_target = 0` (the old path) | `= 1` |
+|---|---|---|
+| a cutscene on the virtual screen and back (`stereo cutscene simulate 12000`), 25 s | 43, 1298 MB: the eye-size targets again (4168x2020), the window's (1280x720) | 5, 27 MB: 2048x2048 BC5 textures from the texture streamer, no render target |
+| `stereo off`, 20 s | 14, 215 MB (table above) | 1, 5 MB: one streamed BC5 texture |
+| `stereo on`, 20 s | 28-34, 1.1-1.3 GB (table above) | 0 |
+| `mode screen` (the render module's own screen mode while stereo is wanted), 15 s | not measured (by the code: stereo held with the last views for up to `hold_target_seconds`, then mono) | 0 |
+| `mode stereo`, 15 s | not measured | 0 |
+| a movie on the virtual screen (`stereo movie simulate on`), 15 s | not measured (the same switch as the cutscene) | 0 |
+| ... and off again, 15 s | not measured | 0 |
+
+Without DLSS (the template ini: eyes 3476x3364, foveation on, run
+`20261011-213700-screen-r1`) the old path's cutscene round trip created 64 large objects,
+3855 MB (the eye-size targets at 6952x3364; 267 MB of it the capture's own images), the
+screen phase only the capture's images and streamed textures in every window (cutscene,
+`stereo off`/`on`, `mode screen`/`stereo`, movie). In both runs `stereo status` showed
+`rt_size_calls=1` (the engine sizing its eye target once, at the start) through every screen
+phase; the old path's return to stereo made it 2.
+
+Frame rate and GPU time of the phase (Null backend, 72 Hz):
+
+- With DLSS (run r2): stereo 72 fps, GPU busy 70-71 %, scene 3.9 ms; screen phase 72 fps
+  (frames of 13.89 ms: the game thread is held to the refresh rate), GPU busy 66-67 %, scene
+  3.9 ms. The flat phase costs what stereo costs (DLSS evaluates both eyes as in stereo).
+- Without DLSS, foveation on (run `20261011-214828-screen-r3`, the stereo key's action
+  `controls stereo`): stereo scene 7.4 ms, screen phase scene 9.2 ms, both at 72 fps
+  (frames of 13.89 ms): foveation does not apply to the flat view, so the phase costs about
+  1.8 ms more than foveated stereo. In run r1, a build before the phase was paced, it ran
+  at 95 fps with the GPU at 100 %, hence the pacing. The old path's mono frames at the
+  1280x720 window cost far less (36-40 % busy at 119 fps), but each switch moved 1.3-3.6 GB.
+
+The upload check (`[log] upload_check`, every 10 s) in the same runs, against the events:
+
+| Run | Through the screen phases | After the other events |
+|---|---|---|
+| r1, no DLSS | 12.2-12.6 GB/s through four phases (cutscene, `stereo off`/`on`, `mode screen`/`stereo`, movie) | the old path's cutscene round trip (`screenkeep 0`): mono from 21:40:49 (the eye targets released, the window's allocated), 0.86 GB/s at the check of 21:41:02, before stereo and its targets came back at 21:41:05; then 1.30 and 2.22 GB/s, and the stereo scene at 9.6 ms instead of 7.4 until the end |
+| r2, DLSS | 12.0-12.4 GB/s through five phases | the old path's round trip: 10.5-11.6 GB/s, no slow state |
+| r3, no DLSS | 11.2-12.3 GB/s through the stereo key's phase and the return | `dynres scale 0.7`: 12.5 and 11.1 GB/s; back to `1.0` at 21:51:45: 2.24 and 2.42 GB/s, the stereo scene at 9.1-9.6 ms instead of 7.4 |
+
+So no screen phase was followed by the slow state (ten phases in three runs), the old path
+was once in two runs, and a render-scale change back to 1.0 once in one try although it
+created no object of 4 MB or more (the census showed 7 small 3D textures, render target and
+unordered-access views at each scale change, probably view-sized volumes). One onset per event
+is no proof of cause, but a render scale or dynamic-resolution change is not safe from the
+state just because it creates no large object; the screen phase therefore keeps the stereo
+view rects (no reduced render scale during the phase, as was considered to save its cost).
 
 ### What the mod does about it
 
@@ -856,9 +909,10 @@ the estimate counts texels times format size.
   not shown.
 - **Fewer allocation events (11/10):** see "Allocations per event" above: no projection
   image size changes with DLSS, no eye target release for session gaps under 30 s, no new
-  foveation surface for a change of rates.
+  foveation surface for a change of rates, and no release at all for the virtual screen's
+  phases (movies, cutscenes, the stereo key, `stereo off`/`on`: `[stereo] screen_keeps_target`).
 - **Not done:** avoiding the onset. The mod's own resizes (render scale, dynamic resolution,
-  DLSS on/off, stereo on/off) are each a chance to start it; in the two headset sessions none
+  DLSS on/off; stereo on/off no longer since the screen phase) are each a chance to start it; in the two headset sessions none
   happened before the onset (stereo stayed on from the start), so there the game's own area and
   battle loads are the likely triggers. Options for later, none tried: keep the
   engine's render targets at one size across the mod's switches (`r.SceneRenderTargetResizeMethod 2`,

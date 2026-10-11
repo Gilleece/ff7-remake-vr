@@ -10,9 +10,10 @@
 // The watcher finds the MediaPlayer class and its IsPlaying function once (by name, through
 // the object array and the name pool), keeps a list of MediaPlayer objects (the object
 // array is scanned a slice per frame), and asks each one IsPlaying through ProcessEvent on
-// the game thread. While a non-menu player plays, stereo is switched off, so the engine
-// renders the normal window and the render module shows it on the virtual screen; stereo
-// comes back when no movie plays any more.
+// the game thread. While a non-menu player plays, stereo is switched off and the render
+// module shows the game on the virtual screen (with [stereo] screen_keeps_target = 1 the
+// engine keeps its eye target and renders a flat view into it, otherwise it renders the
+// normal window); stereo comes back when no movie plays any more.
 //
 // Cutscenes ([stereo] cutscene_screen, off by default): while the player module reports an
 // authored camera (a view target that is neither the pawn nor the game's EndCameraActor)

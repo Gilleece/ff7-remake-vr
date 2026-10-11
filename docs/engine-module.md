@@ -91,15 +91,62 @@ The engine renders in stereo while stereo is wanted and the host provides frames
 for which the host has no XR frame (a late frame, a hitch, the runtime reconnecting, no
 session at all) is still rendered in stereo with the last views, so the eye target is not
 released: for at least 45 frames and up to `[stereo] hold_target_seconds` (default 30 s;
-`0` = 45 frames, as before 11/10). After that, or at once when stereo is switched off (or
-held off for a movie or a cutscene), the engine renders the normal window: the separate
-target and the scene buffers at the eye size are released, and allocated again when stereo
-resumes (gigabytes at headset resolution and a hitch; such releases and resizes were
-followed by the mid-session stall in `docs/benchmarking.md`). The log says
+`0` = 45 frames, as before 11/10). After that the engine renders the normal window: the
+separate target and the scene buffers at the eye size are released, and allocated again
+when stereo resumes (gigabytes at headset resolution and a hitch; such releases and resizes
+were followed by the mid-session stall in `docs/benchmarking.md`); with
+`[stereo] screen_keeps_target = 0` switching stereo off does the same at once. The log says
 `stereo: no frames from the headset for 45 frames: rendering with the last views for up to
 30 s ...`, `stereo: frames from the headset again after N s ... the eye target was kept`
 or `... switching to mono, the eye target is released`; `stereo status` counts the holds
 (`holds`, `holds_expired`, `longest_hold`).
+
+**The screen phase** (`[stereo] screen_keeps_target = 1`, default since 11/10). Switching
+stereo off while the engine renders stereo (a movie or a cutscene on the virtual screen,
+the stereo key or pad chord, `stereo off`), or the render module's own `mode screen` while
+stereo is wanted, no longer makes the engine go mono. The device keeps `IsStereoEnabled`
+true, so the separate target and the scene buffers stay as they are, and changes what the
+eyes render and where the image goes:
+
+```
+game thread, tick_begin: stereo not wanted (or the host shows its screen) and a session runs
+    -> frame stays stereo, g_screen = true, host.set_screen_from_eyes(true)
+    CalculateStereoViewOffset   the game camera unchanged in both eyes (no head pose, no eye
+                                offset, no camera mode); its FOV is read from FMinimalViewInfo
+    GetStereoProjectionMatrix   centred, the game camera's horizontal FOV over the eye's rect
+    AdjustViewRect              unchanged (same rects as stereo: no view-size change)
+RHI thread, frame-end command (screen frames)
+    no eye_texture_ready (the host gets no stereo image)
+    desktop mirror forced to `crop`: the left eye's centre crop at the window's aspect ratio
+    fills the back buffer; the render module (screen mode) shows the back buffer on the
+    virtual screen and draws the game's UI, still redirected to its own texture, onto it
+```
+
+Because the projection is centred and has the game camera's horizontal angle, the crop at
+the window's aspect ratio is the flat game's framing. Foveation is not applied to screen
+frames (the crop shows the eye's full width), the depth layer gets nothing, the late update
+skips them, and the camera modes, snap turn and the UI panel's alignment see a mono frame
+(`device::presenting()` is false; `device::active()` stays true for the per-eye fixes), and
+the game's lens vignette stays as in the flat game. Nothing paces the game thread in screen
+mode, so the device holds it to the headset's refresh rate at the start of each screen
+frame (unpaced, the two eye views ran at 95 fps with the GPU at 100 %).
+The phase ends when stereo is wanted again (the next frame is a normal stereo frame with
+the same target) or, without a session, through the hold above (up to
+`hold_target_seconds`, then mono). Log: `stereo: screen phase N from tick T: stereo switched
+off; the eye target (WxH) is kept ...` and `stereo: screen phase N ended ... after S s:
+stereo again`; `stereo status` shows `screen=`, `screen_phases=`, `screen_frames=`,
+`screen_fov=`. `stereo screenkeep 0|1` switches it live; `0` restores the mono path.
+
+Verified headless on 11/10 (Null backend, eyes 3476x3364 at 72 Hz, with and without DLSS):
+a simulated cutscene, `stereo off`/`on`, the stereo key's action (`controls stereo`),
+`mode screen`/`stereo` and a simulated movie each entered and left the phase without a
+large allocation (`docs/benchmarking.md`, "Allocations per event"); captures of the virtual
+screen show the flat game's framing with its HUD, matching a capture of the old mono path
+in the same spot. The unit test `screen phase: the flat game's 16:9 frustum fills the centre
+crop of the eye rect` checks the projection. Not seen in a headset; a real movie (where the
+game draws its media texture was not traced: if it is a UI widget it reaches the screen with
+the UI, if it is drawn in the scene it is in the flat view) and a constrained aspect ratio
+(letterboxed cutscenes, which stereo views do not apply) were not reached headless.
 
 ## Hosts: where the eye size and views come from
 
@@ -1029,6 +1076,7 @@ movement (not rotated by design), how it feels.
 | `dynamic_resolution_min` | `0.75` | lowest scale the dynamic resolution may use (per axis; 0.75 is 56 % of the pixels) |
 | `dynamic_resolution_target` | `0.85` | GPU frame time to hold, as a share of the display's frame period (0.85 at 72 Hz: 11.8 ms) |
 | `late_update` | `0` | locate the views again on the render thread before each stereo frame's scene and rebuild the views' matrices from that newer pose (see "Late update of the head pose") |
+| `screen_keeps_target` | `1` | stereo switched off (movies and cutscenes on the virtual screen, the stereo key, `stereo off`) keeps the eye target: both eyes render the game's flat camera and the left eye's centre crop is the virtual screen's image (the screen phase, "Frame flow"); nothing is released or allocated at the switches. `0` = mono as before (the eye target is released and allocated again) |
 | `hold_target_seconds` | `30` | seconds stereo keeps rendering with the last views while the host has no frames (a runtime reconnecting, no session), before the engine goes mono and releases the eye target and the scene buffers; at least 45 frames either way, `0` = only those (see "Frame flow"). Live in the settings panel (Advanced) |
 | `vr_window` | `1280x720` | window size the game is switched to while VR renders in a fullscreen mode; `0` keeps the mode (see "Window modes") |
 | `movie_screen` | `1` | movie detection: stereo is held off while a pre-rendered movie plays, so the virtual screen shows it (below) |
@@ -1113,6 +1161,7 @@ Through the dev pipe (`[dev] pipe = 1`, `tools\dev\send-input.ps1 -Pipe "<comman
 | `dynres [on\|off]`, `dynres scale\|min\|target <value>` | render scale and dynamic resolution: state, current scale and rect, last GPU frame time and budget, number of changes |
 | `stereo movie [on\|off]`, `stereo movie menu <0\|1>`, `stereo movie simulate <on\|off>` | movie detection on/off and its state; `menu 1` counts the menu background players too (test); `simulate on` behaves as if a movie played (stereo off, the virtual screen) until `simulate off`, to measure the switch without a movie |
 | `stereo window [<w>x<h>\|0]` | window size while VR renders in a fullscreen mode, and the state |
+| `stereo screenkeep [0\|1]` | `[stereo] screen_keeps_target` live: whether switching stereo off keeps the eye target (the screen phase, see "Frame flow") or goes mono |
 | `stereo frametime <s>` | frame time window length in seconds; restarts the window (for A/B measurements) |
 | `stereo swap <0\|1>` | test: render the right eye into the left half of the target and the left eye into the right half (the eyes then come out swapped). Tells a bug that follows a view's position in the target from one that follows the view |
 | `gpu names on`, `gpu trace <prefix> [dump fullscreen \| dump <from> <to>] [scale <n>]`, `gpu status` | one-frame GPU trace (`docs/re/engine.md`, Tools); every bound pixel-shader constant buffer slot is listed, and for read-back events slots 12 and 13 (add-ons such as Luma) are dumped |
@@ -2392,7 +2441,8 @@ to the screen after 500 ms and back 313 ms after the camera returned, delay 0 sw
 once, and a movie started during a cutscene took over the switch and released it when it
 stopped; a capture while held off showed the flat game on the virtual screen. Frame-time
 windows around a switch pair: max 72 to 76 ms (the eye target's reallocation, as for
-movies). The game's opening shot after Continue is not detected: it is the game's own
+movies). Since 11/10 (`[stereo] screen_keeps_target = 1`) the switches reallocate nothing:
+the scene stays in the eye target and the screen shows the left eye's flat view ("Frame flow"). The game's opening shot after Continue is not detected: it is the game's own
 `EndCameraActor` moved by script (the view target never changed in three runs). No real
 conversation or cutscene was reached headless.
 
