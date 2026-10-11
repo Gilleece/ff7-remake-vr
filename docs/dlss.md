@@ -664,6 +664,16 @@ the region it is handed 1:1 into the eye swapchain and sets `imageRect` to that 
 exactly as the table does. The new `projection layer:` line records every such change in the
 player's log, so his next session can confirm it.
 
+Since 11/10 the frames DLSS does not evaluate are stretched to the runtime's eye size before
+they are handed over (`render_host.cpp`: `StereoSubmit::fillEyes` while `[dlss] output =
+runtime` is in effect; `xr::EyeSubmit::fill`, a bilinear blit into the whole swapchain image),
+so the projection layer's image size no longer changes between the two sources: in the two
+headset sessions that ended in the mid-session stall (10/10 22:49, 11/10 18:19) it had switched
+between 54 % and 100 % dozens of times in the minute or two before
+(`docs/benchmarking.md`, "Mid-session stall"). The picture of those frames is the same (the
+runtime scaled them up before); Virtual Desktop's overlay then shows 100 % throughout. The
+`projection layer:` line says `stretched to it` for such images.
+
 With the new log lines (commit "DLSS: account for every stereo frame in the log", built from a
 clean tree), the same reproduction at 4032x3648 (`captures/dlss/v/p1-proof-4032`): every 10-s
 window of gameplay 683 to 723 of 683 to 723 stereo frames upscaled in both eyes and handed from

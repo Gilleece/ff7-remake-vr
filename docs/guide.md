@@ -401,6 +401,13 @@ session it is `ff7vr.log` in the game's `End\Binaries\Win64` folder).
   while 3D runs). The picture controls also default to a darker, more contrasty image
   (`[picture] brightness = -0.25`, `contrast = 1.5`, `saturation = 1.2`; `0`, `1`, `1`
   give the game's image unchanged).
+- **The frame rate can drop in the middle of a session and stay low** (for example from 72
+  to 36 or 25 fps within a minute or two, with nothing changed): the graphics card's
+  transfers from system memory have slowed down, and they stay slow until the game is
+  started again. Quit, wait a minute, start again. The log's `frame budget:` warning names it
+  (`stall` or `transfer-bound`), and a `WARN upload check: the graphics card reads system
+  memory at ...` line confirms it. A restart of Windows before a long session may make it
+  rarer (seen on the development PC, not proven).
 - **Wait a minute and a half between quitting the game and starting it again**: a game
   started sooner can run at about 10 frames per second for minutes (the launcher and
   `ff7vr-start.cmd` wait by themselves; a start from Steam does not).
@@ -562,8 +569,9 @@ against 72 Hz (18.5 ms per frame, budget 13.9). GPU-bound: scene 7.8 ms, after t
 9.6 ms, of which DLSS about 8 ms (preset l at 3708x3396). Try [dlss] preset = default, or a
 lower resolution in Virtual Desktop`, and `frame budget: back within budget` when they are
 back. The causes it names: GPU-bound (the 3D scene, DLSS, or the work after the scene), the
-game's own frame (CPU or uploads; see the copy engine figure in the `video memory:` line),
-or the headset's runtime pacing the frames at a lower rate. Loading screens, movies and
+mid-session stall (below, "Known problems in full"), the game's own frame (CPU or uploads; see
+the copy engine figure in the `video memory:` line), or the headset's runtime pacing the frames
+at a lower rate. Loading screens, movies and
 the first 30 seconds after a load or a switch into 3D are left out, and there is at most
 one warning a minute. `[log] frame_budget = 0` turns it off.
 

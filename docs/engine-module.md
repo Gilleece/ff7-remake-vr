@@ -88,10 +88,18 @@ two frames ahead of that Present; the frame id and the views travel with the fra
 the render thread to the RHI thread (`docs/re/engine.md`, "Frame pipeline").
 
 The engine renders in stereo while stereo is wanted and the host provides frames. A frame
-for which the host has no XR frame (a late frame, a hitch) is still rendered in stereo with
-the last views, so the eye target is not released; after 45 such frames in a row, or when
-stereo is switched off, the engine renders the normal window (the separate target is
-released and reallocated when stereo resumes, which costs a short hitch).
+for which the host has no XR frame (a late frame, a hitch, the runtime reconnecting, no
+session at all) is still rendered in stereo with the last views, so the eye target is not
+released: for at least 45 frames and up to `[stereo] hold_target_seconds` (default 30 s;
+`0` = 45 frames, as before 11/10). After that, or at once when stereo is switched off (or
+held off for a movie or a cutscene), the engine renders the normal window: the separate
+target and the scene buffers at the eye size are released, and allocated again when stereo
+resumes (gigabytes at headset resolution and a hitch; such releases and resizes were
+followed by the mid-session stall in `docs/benchmarking.md`). The log says
+`stereo: no frames from the headset for 45 frames: rendering with the last views for up to
+30 s ...`, `stereo: frames from the headset again after N s ... the eye target was kept`
+or `... switching to mono, the eye target is released`; `stereo status` counts the holds
+(`holds`, `holds_expired`, `longest_hold`).
 
 ## Hosts: where the eye size and views come from
 
@@ -1018,6 +1026,7 @@ movement (not rotated by design), how it feels.
 | `dynamic_resolution_min` | `0.75` | lowest scale the dynamic resolution may use (per axis; 0.75 is 56 % of the pixels) |
 | `dynamic_resolution_target` | `0.85` | GPU frame time to hold, as a share of the display's frame period (0.85 at 72 Hz: 11.8 ms) |
 | `late_update` | `0` | locate the views again on the render thread before each stereo frame's scene and rebuild the views' matrices from that newer pose (see "Late update of the head pose") |
+| `hold_target_seconds` | `30` | seconds stereo keeps rendering with the last views while the host has no frames (a runtime reconnecting, no session), before the engine goes mono and releases the eye target and the scene buffers; at least 45 frames either way, `0` = only those (see "Frame flow"). Live in the settings panel (Advanced) |
 | `vr_window` | `1280x720` | window size the game is switched to while VR renders in a fullscreen mode; `0` keeps the mode (see "Window modes") |
 | `movie_screen` | `1` | movie detection: stereo is held off while a pre-rendered movie plays, so the virtual screen shows it (below) |
 | `allow_unknown_build` | `0` | try a game build other than 1.0.0.7 if every signature and layout check passes |
@@ -2273,8 +2282,9 @@ for the new rects; `docs/render.md`). What temporal anti-aliasing does with its 
 the rect changes was not examined (nothing was seen in still captures; not checked in motion).
 
 `[stereo] dynamic_resolution = 1` adjusts the scale from the GPU time of the stereo frames
-(scene start to Present, the foveation module's timestamps, so it needs foveation to be
-initialised; without it the scale stays at `render_scale`). Every 10 measured frames: if
+(scene start to Present, the render module's scene timers, which run with foveation on or
+off; before 11/10 they belonged to foveation, and without it the scale stayed at
+`render_scale`). Every 10 measured frames: if
 their median is above the budget (`dynamic_resolution_target` x the display's frame
 period), the scale drops at once to the estimate that fits (pixel count proportional, at most
 0.10 per step); if it stays below 90 % of the budget for 60 frames, it rises by at most 0.04.

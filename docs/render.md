@@ -372,6 +372,26 @@ hook, ends the session, and lets it go (up to about 1.5 s for the runtime's
 graceful stop). If the game is not presenting (minimised, loading), the
 session is ended without parking.
 
+What a session interruption does to the graphics resources:
+
+- **VISIBLE, FOCUSED and back** (the headset taken off, the runtime's menu, Virtual
+  Desktop's own disconnect and reconnect): nothing is created or released. The session, its
+  swapchains (eyes, depth, the quad layers of the UI, the virtual screen and the settings
+  panel) and the mod's own textures stay; frames keep being waited and ended. Virtual
+  Desktop's runtime never reports a lost session for a disconnect: its state machine
+  (`session.cpp`, `updateSessionState`, version 1.0.10) goes FOCUSED -> VISIBLE when the
+  headset is not mounted and back, and only sets `shouldRender` false while the headset is
+  gone; there is no LOSS_PENDING transition in it.
+- **STOPPING -> IDLE -> READY** (a runtime that stops the session without ending it):
+  `xrEndSession` and `xrBeginSession` on the same session; the swapchains stay.
+- **Session lost, exit requested, `xr-restart`, a new device:** the session is destroyed
+  and created again, and with it every swapchain: OpenXR swapchains are children of their
+  session and cannot outlive it (Virtual Desktop's `xrDestroySession` destroys all of
+  them, and its OVR session too). The stereo device keeps the engine's eye target and the
+  scene buffers for up to `[stereo] hold_target_seconds` (30 s) meanwhile
+  (`docs/engine-module.md`, "Frame flow"), so a new session within that time costs only the
+  swapchains.
+
 SteamVR names its adapter (`xrGetD3D11GraphicsRequirementsKHR` LUID) only
 once its compositor runs. A LUID of 0 is asked again for up to 2 s, then the
 session is created on the game's adapter.
@@ -975,10 +995,12 @@ timing:   runtime calls per ended frame (CPU, presenting thread): acquire+wait i
 | xr frame wait | QPC around `WaitFrame` on whatever thread calls it; with `frame_wait = thread` it does not delay the game |
 | gpu copy | D3D11 timestamp queries around each copy or blit into an XR swapchain image, summed per frame |
 | gpu submit total | timestamps around the whole submission on the immediate context: the copies plus whatever the runtime records on the context inside its calls |
+| gpu scene | D3D11 timestamps at the start and the end of each stereo frame's 3D scene (the engine module's scene markers, render.h `FoveationSceneBegin` / `FoveationSceneEnd`): the scene of both eyes up to the UI pass and the post-processing (`src/render/src/scene_timing.cpp`) |
+| gpu after the scene until Present | from the scene's end to a third timestamp at the start of the Present hook, before any of the mod's own GPU work: post-processing, DLSS, the UI pass. The three timestamps of a frame share one disjoint query and are read back a few frames later without stalling (a ring of 8 frames; a frame is skipped rather than waited for). They run with foveated rendering on or off; their sum is `render::GetGpuFrameTime`, which the dynamic resolution reads. Dev command `gputime status \| on \| off` (frames measured, skipped, disjoint). Cost: three timestamps and one disjoint query per stereo frame |
 | runtime calls | CPU time inside `xrAcquireSwapchainImage` + `xrWaitSwapchainImage`, `xrReleaseSwapchainImage`, `xrBeginFrame` and `xrEndFrame`, per ended frame |
 | video memory | not a series, one reading per report: `game X of budget Y MB` (`IDXGIAdapter3::QueryVideoMemoryInfo`, the card's segment), `card A of B MB in use by all processes` (performance counter `GPU Adapter Memory`), `game in system memory N MB` (counter `GPU Process Memory ... Shared Usage`, which includes allocations Windows moved out of the card; DXGI's own non-local figure does not). A `WARN video memory: ...` follows, at most once a minute, when the card is 94 % full, the game is at 95 % of its budget, or the game's system-memory share grew by 300 MB with the card at least 90 % full. The same reading on demand: dev command `vram`. Why it matters: `docs/benchmarking.md`, "Video memory and slow phases" |
 | upload check | not a series: `upload check: 256 KB from system memory to the card at N GB/s` (`[log] upload_check`, default `1`; `src/render/src/upload_check.cpp`). Every 10 s, in the Present hook, one `CopyResource` from a staging buffer to a buffer on the card between two timestamp queries on the game's immediate context, read back a few frames later without stalling. Normal: 9-14 GB/s (11.9-12.2 measured inside the game at 90 fps; a separate process measures only 2-3 GB/s next to a busy game). Below 0.5 GB/s in two reports in a row: one `WARN upload check: the graphics card reads system memory at ...` and the advice to start the game again (the slow PCIe state, `docs/benchmarking.md`, "Mid-session stall"); one `INFO` line when it is fast again. Dev command `upload status` (latest figure, checks, slow, lost) and `upload now` (one check at the next Present). Cost: one 256 KB copy every 10 s (about 0.02 ms of GPU time; 5-15 ms in the slow state) |
-| d3d11 objects | not a series, only with `[log] d3d11_census = 1` (default `0`; `src/render/src/d3d11_census.cpp`): `d3d11 objects created in the window: mod: ...; game: ...; other: ...; mod call sites +0x... N; process private N MB, handles N`. The device's vtable slots that create buffers, textures, views, shaders, state objects and queries are replaced at the second stereo report (after the inline hooks other modules place on device functions when stereo starts) and count each call by the module its return address lies in (this DLL, the game's executable, anything else). A creation that comes back every frame shows as a steady rate; a leak shows as private bytes or handles that keep growing. The mod's call sites are offsets into `xinput1_3.dll`, resolved with its PDB. Dev command `census status`: totals since the start and the other modules by name |
+| d3d11 objects | not a series, only with `[log] d3d11_census = 1` (default `0`; `src/render/src/d3d11_census.cpp`): `d3d11 objects created in the window: mod: ...; game: ...; other: ...; mod call sites +0x... N; process private N MB, handles N`. The device's vtable slots that create buffers, textures, views, shaders, state objects and queries are replaced at the second stereo report (after the inline hooks other modules place on device functions when stereo starts) and count each call by the module its return address lies in (this DLL, the game's executable, anything else). A creation that comes back every frame shows as a steady rate; a leak shows as private bytes or handles that keep growing. The mod's call sites are offsets into `xinput1_3.dll`, resolved with its PDB. Textures and buffers of 4 MB or more are also listed one by one, by caller, size, format, bind flags and usage with their estimated bytes (`large (4 MB or more) N (M MB): [game tex 4168x2020 f24 b28 x1 32 MB] ...`). Dev command `census status`: totals since the start and the other modules by name; `census mark <label>`: one line with everything created since the previous mark, for a single event (`docs/benchmarking.md`, "Allocations per event") |
 
 Each report covers only its own period and gives avg, p50, p95, p99 and max
 with the sample count. GPU results are read back a few frames later without
@@ -992,7 +1014,7 @@ faster than the headset).
 `src/render/src/frame_budget.cpp`, `[log] frame_budget` (default `1`). At the end of each
 timing window (the block above), before the series are summarised, the XR thread takes
 the window's medians: game frame interval, xr frame wait, GPU scene and GPU after the
-scene (foveation's timers), the frames ended with a stereo image, the runtime's name and
+scene (the scene timers above, with or without foveation), the frames ended with a stereo image, the runtime's name and
 refresh rate (`EyeSetup::refreshHz`), and from the engine (`render::SetFrameBudgetFacts`)
 the frames whose 3D scene was rendered, DLSS's timed evaluations (both eyes, running
 totals), its preset and sizes, `[stereo] ssr_fix` and the render scale.
@@ -1006,11 +1028,20 @@ two such windows in a row one `WARN frame budget: ...` names the cause:
 
 | Cause | Test (in this order) | Suggestion |
 |---|---|---|
-| GPU-bound | scene + after the scene >= 85 % of the interval; the largest part is DLSS when its two-eye time is at least half of the after-scene time and after >= scene, otherwise the scene (eye size, render scale, foveation preset) or the work after it | DLSS: `[dlss] preset = default` or a lower `input_scale`; scene: one foveation preset coarser or `render_scale = 0.9`; and a lower resolution in the runtime |
-| runtime-bound | the xr frame wait is the largest part and at least 30 % of the interval | the runtime's refresh and frame rate settings |
-| transfer-bound | checked first: the upload check's latest figure is below 0.5 GB/s (the slow PCIe state, `docs/benchmarking.md`, "Mid-session stall") | quit, wait a minute, start the game again |
+| transfer-bound | the upload check's latest figure is below 0.5 GB/s (the slow PCIe state, `docs/benchmarking.md`, "Mid-session stall") | the stall note: quit, wait a minute, start the game again |
+| GPU-bound, the stall's signature | GPU-bound (next row), and the GPU time is at least twice and at least 4 ms more than in the newest window within budget at the same settings (eye size, render scale, DLSS preset and sizes, foveation preset) with no load, mode change or skipped window since; or the upload check is below 3 GB/s (normally 9-14) | the stall note (GUIDE.md, "Known problems in full"): quit, wait a minute, start the game again |
+| GPU-bound | scene + after the scene >= 85 % of the interval, or >= 90 % of the refresh period: a runtime that does not get the frame in time waits a whole period more or halves the rate, so its frame wait is large too, but it waits for the GPU. The largest part is DLSS when its two-eye time is at least half of the after-scene time and after >= scene, otherwise the scene (eye size, render scale, foveation preset) or the work after it | DLSS: `[dlss] preset = default` or a lower `input_scale`; scene: one foveation preset coarser or `render_scale = 0.9`; and a lower resolution in the runtime. Always followed by: if the frame rate fell suddenly in the middle of a session and stays low, quit and start again (the mod does not read the card's power, which would tell the stall from a heavy scene) |
+| runtime-bound | the xr frame wait is the largest part and at least 30 % of the interval, with the GPU below the two GPU-bound limits | the runtime's refresh and frame rate settings |
 | game-thread-bound | GPU < 70 % and the wait < 30 % of the interval | the copy engine figure of the `video memory:` line; the slow state after a quick restart |
-| cause unclear | none of the above (also when the GPU is not measured: foveation off) | a lower resolution in the runtime |
+| cause unclear | none of the above | a lower resolution in the runtime |
+
+Before 11/10 the GPU times came from the foveation module's timers, so with foveation off
+there were none, and a slow GPU behind a runtime that halved the rate was named
+runtime-bound: the headset session of 11/10 18:19 (`36 fps against 72 Hz ... runtime-bound:
+VirtualDesktopXR paces the frames: the frame wait takes 24.3 ms`) was the stall, which the
+card's power reading of a separate logger showed (280 -> 183 W at 95 % utilisation, memory
+bus 25 %). The classifier is a pure function (`src/render/src/frame_budget_classify.cpp`)
+with unit tests (`ff7vr_render_tests`).
 
 `INFO frame budget: back within budget` follows at the first window within budget. At most
 one warning a minute; nothing else is logged. The reflections fix has no timer of its own,
@@ -1513,10 +1544,10 @@ feature switches itself off with one log line and nothing else changes.
   pixels, so the height is accepted within 16 pixels). Without this the mask was
   silently off whenever the scale was below 1 (scale 0.85 at 2 x 3600x3600 saved
   only 0.7 ms instead of the 1.4 ms of 0.9 with the mask).
-- **GPU frame time for others:** the scene and after-scene timestamps of each
-  stereo frame are summed and offered through `render::GetGpuFrameTime` (render.h);
-  the engine's dynamic resolution reads it. Only measured while foveation is
-  initialised (an NVIDIA GPU, `[foveation] enabled = 1`).
+- **GPU frame time for others:** the scene window's markers also drive the GPU timers of
+  each stereo frame (`scene_timing.cpp`, "Timing" above), which run with foveation off as
+  well; their sum is `render::GetGpuFrameTime` (render.h), which the engine's dynamic
+  resolution reads.
 - **Never affected:** mono frames, screen mode and the plain game (no stereo
   view family, so no scene is marked), the in-game UI pass (after the scene
   window), the post-processing chain including temporal AA, bloom and the
