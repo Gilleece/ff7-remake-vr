@@ -416,6 +416,9 @@ session it is `ff7vr.log` in the game's `End\Binaries\Win64` folder).
   (`[ui] align = 1`). Objects nearer than about 1.5 m can show them up to a degree
   apart, as the HUD panel is one flat image at `[ui] distance`. `[ui] align = 0`
   shows the old behaviour (markers off by several degrees) if something looks wrong.
+  A marker whose object is outside the panel (close below you, far to the side) stays
+  on the panel's edge in the object's direction (`[ui] align_clamp = 1`; `0` = it is
+  drawn off the panel and not seen). Objects behind you have no marker.
 - **The game window becomes 1280x720 while 3D runs** if the game was in a fullscreen
   mode, and stays that way until the game exits (switching 3D off with Insert does not
   change it back). The game does not remember it: your display setting is not changed,

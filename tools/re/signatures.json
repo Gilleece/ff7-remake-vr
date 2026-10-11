@@ -297,6 +297,17 @@
       "desc": "bool ULocalPlayer::GetProjectionData(FViewport*, EStereoscopicPass, FSceneViewProjectionData&) const. ULocalPlayer vtable slot 82. Calls AdjustViewRect, CalculateStereoViewOffset (with WorldSettings->WorldToMeters) and GetStereoProjectionMatrix on the stereo device."
     },
     {
+      "name": "FSceneView::ProjectWorldToScreen",
+      "kind": "function",
+      "pattern": "48 83 EC 28 F3 0F 10 01 0F 57 E4 F3 0F 10 49 04 4C 8B D2 F3 0F 10 51 08",
+      "resolve": {
+        "type": "match",
+        "offset": 0
+      },
+      "expect": "0x320bf70",
+      "desc": "static bool FSceneView::ProjectWorldToScreen(const FVector& WorldPosition, const FIntRect& ViewRect, const FMatrix& ViewProjectionMatrix, FVector2D& out_ScreenPos). Returns true when the point is in front of the view (W > 0), with no test against the rectangle. Called by UGameplayStatics::ProjectWorldToScreen (0x2f5a3f0, call at 0x2f5a4a9) and UWidgetLayoutLibrary (call at 0x28fc642), among ten call sites."
+    },
+    {
       "name": "ULocalPlayer::CalcSceneView",
       "kind": "function",
       "pattern": "4C 8B DC 55 56 49 8D AB 08 F8 FF FF",

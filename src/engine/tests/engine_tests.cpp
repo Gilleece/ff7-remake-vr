@@ -234,6 +234,27 @@ int main(int argc, char** argv) {
         check(near(b3.x, 1000, 0.05) && near(b3.y, 1600, 0.05) && near(b3.z, 160, 0.05), "level boom: zero pitch unchanged");
     }
 
+    // Markers outside the panel's view: onto the edge of the rectangle shrunk by the inset,
+    // along the line from the centre; inside unchanged (rectangle 0..1280 x 0..720, inset 20).
+    {
+        double x = 0, y = 0;
+        // inside: placed as FSceneView::ProjectWorldToScreen places it
+        check(!clamp_to_view(0.5, -0.5, 2.0, 0, 0, 1280, 720, 20, x, y) && near(x, 800, 1e-9) && near(y, 450, 1e-9), "clamp: a point inside is unchanged");
+        // straight below, far out: bottom edge at the centre column
+        check(clamp_to_view(0.0, -10.0, 1.0, 0, 0, 1280, 720, 20, x, y) && near(x, 640, 1e-9) && near(y, 700, 1e-9), "clamp: below the view -> bottom edge");
+        // down and to the right at 45 degrees on the screen: the side reached first (here the bottom)
+        check(clamp_to_view(2.0 * 360.0 / 640.0, -2.0, 1.0, 0, 0, 1280, 720, 20, x, y) && near(x - 640, y - 360, 1e-9) && near(y, 700, 1e-9),
+              "clamp: down-right keeps the direction on the screen");
+        // far to the left: left edge, height kept on the line from the centre
+        check(clamp_to_view(-8.0, 0.4, 1.0, 0, 0, 1280, 720, 20, x, y) && near(x, 20, 1e-9) && near(y, 360 - 0.4 * 360 * (620.0 / (8.0 * 640)), 1e-9),
+              "clamp: far left -> left edge");
+        // a point just in front of the view plane (w tiny) still lands on the edge, finite
+        check(clamp_to_view(1.0, -3.0, 1e-30, 0, 0, 1280, 720, 20, x, y) && std::isfinite(x) && std::isfinite(y) && near(y, 700, 1e-6),
+              "clamp: w close to 0 gives a finite edge point");
+        // an offset rectangle (a view that does not start at 0, 0)
+        check(clamp_to_view(0.0, 5.0, 1.0, 100, 50, 1380, 770, 20, x, y) && near(x, 740, 1e-9) && near(y, 70, 1e-9), "clamp: offset rectangle, above -> top edge");
+    }
+
     // Fight detection on the recorded session.
     {
         std::vector<std::string> reasons;

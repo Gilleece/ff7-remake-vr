@@ -2602,6 +2602,69 @@ game's other users of the full pass in battles (screen-space target checks see t
 Check: `ui align 0|1|2` live, `uihook align` (counters, camera FOV and pitch, panel extents, eye base),
 `fp call PlayerController PlayerController.ProjectWorldLocationToScreen <hex>` with `[dev] unsafe_commands = 1`.
 
+### Markers outside the panel
+
+The panel's view spans only the panel: at the default 2.0 m at 3 m, 18.4 degrees above
+and below the eye line and 30.7 degrees to each side. An object close below the player
+(an enemy at your feet, a ladder you stand at) or far to the side therefore projects
+outside the view rectangle. The game's projection does not hide it:
+`FSceneView::ProjectWorldToScreen` returns true for any point in front of the view and a
+position outside the rectangle (`docs/re/engine.md`, "Where an off-screen marker is
+lost"), so the widget is drawn off the panel and not seen, or the widget's own code
+hides it. This is the owner's report of 2026-10-11 ("the markers align but disappear
+when you get close to them").
+
+`[ui] align_clamp = 1` (default; `uihook clamp 0|1` live) hooks
+`FSceneView::ProjectWorldToScreen` (`0x320bf70`). For its two widget callers,
+`UGameplayStatics::ProjectWorldToScreen` (Square Enix's marker and icon code goes through
+it via `0x1348940`; `PlayerController.ProjectWorldLocationToScreen` too) and
+`UWidgetLayoutLibrary` (UMG), and only when the full pass the caller just asked for was
+replaced by the panel's view, a point outside the rectangle shrunk by 3 % of its height is
+moved onto that shrunk rectangle's edge, along the line from the rectangle's centre to the
+point's unclamped position (computed from the clip coordinates, so it stays finite for a
+point just in front of the head). The result stays "in front" (true). Not changed:
+
+- points inside the panel (the placement is the game's, bit for bit);
+- points behind the head (`W <= 0`, the function returns false): no marker, as before;
+- the other callers of the function, which are game logic rather than widget placement:
+  the usable-object classifier (`0x1017cb1`, it keeps its own screen test) and the seven other
+  call sites (`docs/re/engine.md`);
+- the game camera's projections (`align = 0` or `2`, the virtual screen, the
+  `align_target_test` call).
+
+Why not a wider frustum: a projection is linear, so a view wider than the panel would
+scale every marker towards the centre (at 1.5 times the panel's span a marker at 70 % of
+the half-height would be about 4 degrees off its object). Clamping after the projection
+keeps the inside exact.
+
+Measured headless (Null backend, the owner's latest save, panel 2.0 m at 3 m,
+`captures/hud/meas-clamp-tp.json` and `meas-clamp-fp.json`, the 30 points of the table
+above plus 10 outside the panel at 1 to 3 m: 25, 40, 60 and 75 degrees below, 30 above,
+45 and 60 to the side and three diagonals), through
+`PlayerController.ProjectWorldLocationToScreen`:
+
+| | inside, 30 points (degrees, mean / max) | outside, 10 points |
+|---|---|---|
+| third person, `align_clamp = 1` | 0.00 / 0.00 | all on the edge (21.6 px inset of 720), within 0.01 px of the expected point, direction from the centre exact (0.00 degrees) |
+| third person, `align_clamp = 0` | 0.00 / 0.00 | where the projection puts them, up to 4450 px outside the 1280x720 rectangle |
+| first person, `align_clamp = 1` (2.0 m; 1.57 m) | 0.95 / 2.15; 0.31 / 0.64 | all on the edge; direction 0.0 to 1.4 degrees (2.0 m), 0.0 to 6.3 degrees (1.57 m) from the expected one |
+| first person, `align_clamp = 0` (2.0 m) | 0.66 / 1.92 | off the rectangle; the unclamped points themselves 0.1 to 6.2 degrees from the expected direction |
+
+In first person the eye base follows Cloud's idle animation between the status snapshot
+and the calls (see above), so both series carry the same noise; the clamp counter rose by
+exactly 10 per series of 40 points, so none of the 30 inside points was moved. The game's
+own calls were moved as well (18 in the first seconds of gameplay, for example from
+(3672, -377) to (1258, 210), the right edge); in that save no marker was visible, so no
+eye or UI capture shows a clamped marker yet (`captures/hud/clamp2`: UI dumps with the
+clamp on and off at three headings are identical).
+
+Not verified: a real marker on the edge in a capture or a headset (the prompt over a
+usable object, a battle target, an enemy name); battles (the battle HUD's markers are
+assumed to go through `0x1348940`, not traced). A marker the game wants hidden when its
+object is off screen is now shown on the edge instead, which is the request, but the
+game's own off-screen indicators (if a widget draws an arrow for an off-screen target)
+were not seen.
+
 ### Interaction prompts
 
 The interaction prompt (the icon over a ladder, door or item the player can use; widget
@@ -2639,11 +2702,12 @@ the game camera's view puts the object at (0.53, 0.61) of the view, the panel's 
 targetprobe`); in third person the panel's view passed too (0.52, 0.71). At 3.85 m the
 panel's view still passed (y 0.96).
 
-Not verified: the prompt and its button in a headset. What remains with
-`align_target_test = 0`: the icon's placement still follows the panel, so for an object
-below the panel's lower edge the icon is drawn off the panel (not seen) although the
-object is selected and the button works; a larger or lower panel (`[ui] size`, `offset`)
-shows more of them. The prompt instance is destroyed and created again whenever the
+Not verified: the prompt and its button in a headset. With `align_target_test = 0`
+the icon's placement still follows the panel, so for an object below the panel's lower
+edge the icon would be drawn off the panel (not seen) although the object is selected
+and the button works; `[ui] align_clamp = 1` (default, "Markers outside the panel")
+places it on the panel's lower edge instead (the icon goes through
+`UGameplayStatics::ProjectWorldToScreen`; not yet seen with a real prompt). The prompt instance is destroyed and created again whenever the
 manager hides an icon (target farther than about 55 m, or another hide call) and shows
 it again: a new `FieldTarget_01_C` per appearance is normal. Why it sometimes stays away
 "until a save is reloaded" is not found; the screen test above makes first-person prompts

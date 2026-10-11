@@ -795,6 +795,42 @@ disassembly, INFERRED = from names or the stock 4.18 code):
   `UWidgetLayoutLibrary::ProjectWorldLocationToWidgetPositionWithDistance`); no Square
   Enix code calls it (VERIFIED), and the field target does not use it.
 
+### Where an off-screen marker is lost (STATIC, 2026-10-11)
+
+- `FSceneView::ProjectWorldToScreen` (`0x320bf70`, static; signature in
+  `tools/re/signatures.json`): `(const FVector& world, const FIntRect& rect, const FMatrix&
+  view_projection, FVector2D& out)`. It multiplies `(x, y, z, 1)` by the matrix's rows,
+  returns false when `W <= 0` and otherwise writes
+  `x = rect.Min.X + (0.5 + 0.5 X/W) * width`, `y = rect.Min.Y + (0.5 - 0.5 Y/W) * height`
+  and returns true: there is NO test against the rectangle (VERIFIED, disassembly). A
+  point outside the view therefore comes back "in front" with a position outside the
+  rectangle.
+- `UGameplayStatics::ProjectWorldToScreen` (`0x2f5a3f0`): `GetLocalPlayer`, then
+  `GetProjectionData(pass 0)` (`call [rax+0x290]`, return `0x2f5a483`), the view-projection
+  matrix (`0xe22c10`), `FSceneView::ProjectWorldToScreen` (call at `0x2f5a4a9`, return
+  `0x2f5a4ae`), and subtracts the rectangle's minimum when the fourth argument is true
+  (VERIFIED). `PlayerController.ProjectWorldLocationToScreen` goes through it (the
+  measurements in `docs/engine-module.md` use it).
+- Square Enix's wrapper `0x1348940` calls it with the fourth argument false, then, when it
+  returned true, converts to its own canvas space (subtracts an origin at `+0x390`, scales
+  by `+0x3a8` of a global menu object); it returns true whenever the projection did
+  (VERIFIED). It has 22 call sites, 17 of them in the menu and widget code `0x13a0000` to
+  `0x14d0000` (the field target icon `0x142b54a`, the quest icons `0x1422447`/`0x1422663`).
+  So the hiding of an off-panel marker is not in the projection: the placement code
+  either draws it outside the panel (the field target icon: collapsed only when the call
+  returned false) or applies its own bounds test (INFERRED for the others; not traced).
+- `FSceneView::ProjectWorldToScreen` has ten call sites (VERIFIED): `0x2f5a4a9`
+  (UGameplayStatics), `0x28fc642` (UWidgetLayoutLibrary, after a `GetProjectionData` call at
+  `0x28fc612`), the usable-object classifier `0x1017cb1`, two other functions that call
+  `GetProjectionData` themselves (`0x960370`, `0xe15640`; purpose not analysed) and five
+  sites in functions that do not (`0xd9a6db`, `0x10e4de2`, `0x10e4dfb`, `0x11e18f8`,
+  `0x159d6b0`).
+
+`[ui] align_clamp` uses this: the mod hooks `0x320bf70` and moves a point onto the view
+rectangle's edge only for the two widget call sites and only when the full pass the
+caller just asked for was replaced by the panel's view (`docs/engine-module.md`,
+"Markers outside the panel").
+
 ## 10. Post-processing in stereo: Square Enix's passes (LIVE, GPU trace)
 
 Recorded with the engine module's one-frame GPU trace (`gpu trace`, see [Tools](#tools)) in

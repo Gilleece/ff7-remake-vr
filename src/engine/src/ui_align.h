@@ -48,6 +48,12 @@ void set_skip(const std::string& list);
 // too; 0 (default) = it keeps the game camera's view (the prompts' placement is aligned
 // either way).
 void set_target_test_panel(bool panel);
+// [ui] align_clamp: 1 (default) = a marker whose object lies outside the panel's view (but
+// in front of the head) is placed on the panel's edge in the object's direction instead of
+// off the panel; 0 = it is placed where the projection puts it (off the panel, not seen).
+void set_clamp(bool on);
+// `uihook clamp [0|1]`: the setting live, with counters and the last moved point.
+std::string clamp_command(const std::string& args);
 
 // The last published camera, eye base and head pose, with the alignment counters (for
 // diagnostics; any thread).
