@@ -2594,6 +2594,61 @@ game's other users of the full pass in battles (screen-space target checks see t
 Check: `ui align 0|1|2` live, `uihook align` (counters, camera FOV and pitch, panel extents, eye base),
 `fp call PlayerController PlayerController.ProjectWorldLocationToScreen <hex>` with `[dev] unsafe_commands = 1`.
 
+### Interaction prompts
+
+The interaction prompt (the icon over a ladder, door or item the player can use; widget
+blueprint `FieldTarget_01_C`) is chosen and placed by Square Enix's field target code
+through the full-pass projection (`docs/re/engine.md`, "The interaction prompt"):
+
+- **Choice.** Each frame the field target manager tests the usable objects near the
+  player character with a classifier that rejects an object farther than its range (4 m
+  for the one measured), then projects it through `GetProjectionData` (pass 0) and
+  rejects it unless it lands inside the view's rectangle (or an ellipse around its
+  centre, per object). The nearest object that passes and is not hidden by a wall gets
+  the prompt and the button.
+- **Placement.** The icon is an ordinary viewport widget positioned each frame with the
+  object projected through the same full pass (`SetPositionInViewport`), not a widget
+  component; its render transform stays (0, 0), which the prompt diagnostic had shown.
+  It is collapsed when the projection fails.
+
+With `[ui] align = 1` both calls see the panel's view from the head. That is right for the
+placement (the icon lands where the line from the head to the object crosses the panel)
+but wrong for the choice: the panel spans about 18 degrees above and below the eye line
+(2 m at 3 m), so in first person an object more than 18 degrees below eye level, which
+is any object at knee height within about 3.4 m, fails the screen test and cannot be
+selected; the game camera, 4.4 m behind the head and pitched down 10 degrees, sees it near
+the centre. This is the inferred cause of the owner's report that prompts got worse with
+the alignment (2026-10-10).
+
+`[ui] align_target_test = 0` (default) leaves that one call on the game camera's view: the
+mod recognises it by its return address in the classifier (`0x1017c60`, the call site's
+bytes checked at start-up; on another build the setting has no effect and a warning is
+logged). `1` gives the panel's view as before. Measured headless (Null backend, test save,
+an object at (7190, 4308, -1155), the player 2.42 m away facing it, eye 1.15 m above it):
+the game camera's view puts the object at (0.53, 0.61) of the view, the panel's at
+(0.67, 1.26), below the rectangle; the classifier returned 2 (in range) with
+`align_target_test = 0` and 1 (out) with `1`, four times in turn (`uihook callers
+targetprobe`); in third person the panel's view passed too (0.52, 0.71). At 3.85 m the
+panel's view still passed (y 0.96).
+
+Not verified: the prompt and its button in a headset. What remains with
+`align_target_test = 0`: the icon's placement still follows the panel, so for an object
+below the panel's lower edge the icon is drawn off the panel (not seen) although the
+object is selected and the button works; a larger or lower panel (`[ui] size`, `offset`)
+shows more of them. The prompt instance is destroyed and created again whenever the
+manager hides an icon (target farther than about 55 m, or another hide call) and shows
+it again: a new `FieldTarget_01_C` per appearance is normal. Why it sometimes stays away
+"until a save is reloaded" is not found; the screen test above makes first-person prompts
+missing near low objects, which may be the same report.
+
+Dev commands: `uihook callers on|off|reset` (call chains of the full pass, exe offsets),
+`uihook callers skip <hex offsets>` (pass chains containing them through unchanged),
+`uihook callers targettest [0|1]` (the setting live, with a call count),
+`uihook callers targetprobe on|off` (logs `ui: field-target probe:` lines: each tested
+object's location, distance and range, where it lands on the game camera's and the
+panel's view, whether each passes and the classifier's result; diagnostic: the first
+`on` installs a hook on the classifier, which stays until the game exits).
+
 ## Trying the camera in the headset
 
 What to try first, in this order. Throughout: End (View/Back + left stick click) recenters

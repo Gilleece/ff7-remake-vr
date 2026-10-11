@@ -106,6 +106,7 @@ constexpr Default kDefaults[] = {
     {"ui", "battle_size", "0"},
     {"ui", "follow_head", "0"},
     {"ui", "align", "1"},
+    {"ui", "align_target_test", "0"},
     {"screen", "distance", "2.0"},
     {"screen", "width", "1.8"},
     {"picture", "brightness", "-0.25"},

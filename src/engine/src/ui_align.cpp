@@ -11,10 +11,21 @@
 #include "ff7vr/render/render.h"
 #endif
 
+#include <windows.h>
+
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <format>
+#include <intrin.h>
+#include <map>
 #include <mutex>
+#include <set>
+#include <sstream>
+#include <vector>
 
 namespace ff7vr::engine::ui_align {
 namespace {
@@ -48,7 +59,136 @@ std::mutex g_mutex;
 Base g_base;
 
 // For `uihook align`.
-std::atomic<std::uint64_t> g_full{0}, g_aligned{0}, g_skipped{0};
+std::atomic<std::uint64_t> g_full{0}, g_aligned{0}, g_skipped{0}, g_excluded{0};
+
+// Callers of the full pass (`uihook callers`): return addresses of the call, as offsets in
+// the game's exe. A chain that contains an offset of [ui] align_skip is passed through
+// unchanged (the game's own view), for callers that need it.
+constexpr int kChainFrames = 6;
+using Chain = std::array<std::uint32_t, kChainFrames>;
+std::atomic<bool> g_capture{false};
+std::atomic<bool> g_have_skip{false};
+std::mutex g_chain_mutex;
+std::map<Chain, std::uint64_t> g_chains;
+std::set<std::uint32_t> g_skip;
+std::uintptr_t g_exe_base = 0, g_exe_end = 0;
+
+// The field-target (interaction prompt) selection test of this build, 0x1017ad0: it calls
+// GetProjectionData for the full pass directly (`call [rax+0x290]` at 0x1017c5a) and keeps
+// only targets inside the view's rectangle (or an ellipse around its centre). With the
+// panel's view the test runs from the head through the panel's narrow frustum, so targets
+// low and close in front of the character fail it. [ui] align_target_test = 0 leaves this
+// one call on the game camera's view (docs/engine-module.md, "Interaction prompts").
+constexpr std::uintptr_t kTargetTestReturn = 0x1017c60;
+std::uintptr_t g_target_test_ret = 0;      // absolute return address (0: not found)
+std::atomic<bool> g_target_test_panel{false};  // [ui] align_target_test
+std::atomic<std::uint64_t> g_target_tests{0};
+
+// `uihook targetprobe on`: a probe on the field-target classifier (0x1017ad0; it returns
+// 1 = out, 2 = in range, 3 = near; its third argument is the target's location) that logs,
+// for each target it tests, where the target lands on the game camera's view and on the
+// panel's view (normalised to the view rectangle, as the classifier measures it), whether
+// that is inside the classifier's ellipse ((y-0.5)/0.37)^2 + ((x-0.5)/0.28)^2 < 1, and the
+// classifier's result. Diagnostic; off by default.
+constexpr std::uintptr_t kClassifier = 0x1017ad0;
+using ClassifierFn = std::uint64_t (*)(void*, float, const float*, std::uint64_t, std::uint8_t*, std::uint64_t, std::uint64_t,
+                                       std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t);
+hook::InlineHook g_probe_hook;
+std::atomic<bool> g_probe_on{false};
+thread_local const float* t_probe_loc = nullptr;
+struct ProbeView {
+    bool valid = false;
+    float x = 0, y = 0, w = 0;
+};
+thread_local ProbeView t_probe_game, t_probe_panel;
+std::mutex g_probe_mutex;
+std::string g_probe_last, g_probe_key;
+std::uint64_t g_probe_lines = 0;
+double g_probe_next = 0;
+
+// The point's position on the view, normalised to its rectangle (0..1, y down), as
+// FSceneView::ProjectWorldToScreen and the classifier compute it.
+ProbeView project(const std::uint8_t* data, const float* p) {
+    ProbeView r;
+    const float* o = reinterpret_cast<const float*>(data + kViewOrigin);
+    const float* rm = reinterpret_cast<const float*>(data + kViewRotation);
+    const float* pm = reinterpret_cast<const float*>(data + kProjection);
+    const double v[4] = {p[0] - o[0], p[1] - o[1], p[2] - o[2], 0.0};
+    double vr[4] = {0, 0, 0, 1};
+    for (int j = 0; j < 3; ++j) vr[j] = v[0] * rm[0 * 4 + j] + v[1] * rm[1 * 4 + j] + v[2] * rm[2 * 4 + j];
+    double c[4];
+    for (int j = 0; j < 4; ++j) c[j] = vr[0] * pm[0 * 4 + j] + vr[1] * pm[1 * 4 + j] + vr[2] * pm[2 * 4 + j] + vr[3] * pm[3 * 4 + j];
+    r.w = static_cast<float>(c[3]);
+    if (!(c[3] > 0.0)) return r;
+    r.x = static_cast<float>(c[0] / c[3] * 0.5 + 0.5);
+    r.y = static_cast<float>(0.5 - c[1] / c[3] * 0.5);
+    r.valid = true;
+    return r;
+}
+bool in_rect(const ProbeView& v) { return v.valid && v.x >= 0 && v.x <= 1 && v.y >= 0 && v.y <= 1; }
+const char* verdict(const ProbeView& v, bool ellipse);
+bool in_ellipse(const ProbeView& v) {
+    const double dx = (v.x - 0.5) / 0.28, dy = (v.y - 0.5) / 0.37;
+    return v.valid && dx * dx + dy * dy < 1.0;
+}
+
+// "on screen" / "off screen" by the rectangle test, or the ellipse test when the target uses it.
+const char* verdict(const ProbeView& v, bool ellipse) {
+    if (!v.valid) return "behind";
+    return (ellipse ? in_ellipse(v) : in_rect(v)) ? "passes" : "fails";
+}
+
+std::uint64_t classifier_detour(void* out, float d, const float* loc, std::uint64_t a4, std::uint8_t* param, std::uint64_t a6, std::uint64_t a7,
+                                std::uint64_t a8, std::uint64_t a9, std::uint64_t a10, std::uint64_t a11) {
+    t_probe_loc = loc;
+    t_probe_game = ProbeView{};
+    t_probe_panel = ProbeView{};
+    const std::uint64_t r = g_probe_hook.original<ClassifierFn>()(out, d, loc, a4, param, a6, a7, a8, a9, a10, a11);
+    t_probe_loc = nullptr;
+    if (g_probe_on.load(std::memory_order_relaxed) && loc) {
+        float l[3] = {0, 0, 0}, maxd = 0, margins[4] = {0, 0, 0, 0};
+        std::uint8_t ellipse = 0, screen = 0;
+        std::memcpy(l, loc, sizeof(l));
+        if (param) {
+            std::memcpy(&maxd, param + 0x10, sizeof(float));
+            std::memcpy(margins, param + 0x20, sizeof(margins));
+            ellipse = param[0x39];
+            screen = param[0x1d];
+        }
+        const std::string line = std::format(
+            "target ({:.0f},{:.0f},{:.0f}) d {:.0f} (max {:.0f}) screen test {} ellipse {} margins {:.2f} {:.2f} {:.2f} {:.2f} | game view ({:.2f},{:.2f}) {} | panel view ({:.2f},{:.2f}) {} | "
+            "result {} on the {} view",
+            l[0], l[1], l[2], std::sqrt(std::max(0.0f, d)), std::sqrt(std::max(0.0f, maxd)), screen, ellipse, margins[0], margins[1], margins[2], margins[3], t_probe_game.x, t_probe_game.y,
+            verdict(t_probe_game, ellipse == 1), t_probe_panel.x, t_probe_panel.y, verdict(t_probe_panel, ellipse == 1), static_cast<int>(r & 0xff),
+            g_target_test_panel.load() ? "panel's" : "game camera's");
+        const double now = GetTickCount64() / 1000.0;
+        // one line per change of the verdicts (inside/outside, result, view), at most every
+        // 0.5 s, and every 2 s otherwise
+        const std::string key = std::format("{:.0f},{:.0f} {} {} {} {}", l[0], l[1], verdict(t_probe_game, ellipse == 1),
+                                            verdict(t_probe_panel, ellipse == 1), static_cast<int>(r & 0xff),
+                                            g_target_test_panel.load() ? 1 : 0);
+        std::lock_guard lk(g_probe_mutex);
+        g_probe_last = line;
+        if (now >= g_probe_next || (key != g_probe_key && now >= g_probe_next - 1.5)) {
+            g_probe_next = now + 2.0;
+            g_probe_key = key;
+            ++g_probe_lines;
+            log::info("ui: field-target probe: {}", line);
+        }
+    }
+    return r;
+}
+
+Chain capture_chain() {
+    void* frames[kChainFrames + 1]{};
+    const USHORT n = RtlCaptureStackBackTrace(1, kChainFrames, frames, nullptr);
+    Chain c{};
+    for (USHORT i = 0; i < n && i < kChainFrames; ++i) {
+        const auto a = reinterpret_cast<std::uintptr_t>(frames[i]);
+        c[i] = a >= g_exe_base && a < g_exe_end ? static_cast<std::uint32_t>(a - g_exe_base) : 0xffffffffu;
+    }
+    return c;
+}
 struct Last {
     float l = 0, r = 0, t = 0, b = 0;  // panel tangents
     float fov = 0, pitch = 0;          // game camera
@@ -170,7 +310,35 @@ bool detour(const void* local_player, void* viewport, std::int32_t pass, std::ui
 #if FF7VR_ENGINE_WITH_RENDER
     if (ok && pass == 0 && data) {
         ++g_full;
-        align(data);
+        bool excluded = false;
+        if (g_target_test_ret && reinterpret_cast<std::uintptr_t>(_ReturnAddress()) == g_target_test_ret) {
+            ++g_target_tests;
+            if (g_probe_on.load(std::memory_order_relaxed) && t_probe_loc) {
+                float loc[3];
+                std::memcpy(loc, t_probe_loc, sizeof(loc));
+                t_probe_game = project(data, loc);
+#if FF7VR_ENGINE_WITH_RENDER
+                alignas(16) std::uint8_t copy[0x100];
+                std::memcpy(copy, data, sizeof(copy));
+                const std::uint64_t aligned = g_aligned.load();
+                align(copy);
+                if (g_aligned.load() != aligned) {
+                    --g_aligned;
+                    t_probe_panel = project(copy, loc);
+                }
+#endif
+            }
+            if (!g_target_test_panel.load(std::memory_order_relaxed)) excluded = true;
+        }
+        if (g_capture.load(std::memory_order_relaxed) || g_have_skip.load(std::memory_order_relaxed)) {
+            const Chain c = capture_chain();
+            std::lock_guard lk(g_chain_mutex);
+            if (g_capture.load(std::memory_order_relaxed) && (g_chains.size() < 512 || g_chains.contains(c))) ++g_chains[c];
+            for (const std::uint32_t r : c)
+                if (r && g_skip.contains(r)) excluded = true;
+        }
+        if (excluded) ++g_excluded;
+        else align(data);
     }
 #endif
     return ok;
@@ -178,7 +346,88 @@ bool detour(const void* local_player, void* viewport, std::int32_t pass, std::ui
 
 }  // namespace
 
+void set_skip(const std::string& list) {
+    std::string t = list;
+    std::replace(t.begin(), t.end(), ',', ' ');
+    std::istringstream in(t);
+    std::set<std::uint32_t> s;
+    for (std::string w; in >> w;) {
+        const unsigned long v = std::strtoul(w.c_str(), nullptr, 16);
+        if (v) s.insert(static_cast<std::uint32_t>(v));
+    }
+    std::lock_guard lk(g_chain_mutex);
+    g_skip = std::move(s);
+    g_have_skip = !g_skip.empty();
+}
+
+void set_target_test_panel(bool panel) { g_target_test_panel = panel; }
+
+std::string callers_command(const std::string& args) {
+    std::istringstream in(args);
+    std::string w;
+    in >> w;
+    if (w == "on" || w == "off") {
+        g_capture = w == "on";
+        return std::format("ok full-pass caller capture {}", w);
+    }
+    if (w == "targettest") {
+        std::string v;
+        in >> v;
+        if (v == "0" || v == "1") g_target_test_panel = v == "1";
+        return std::format("ok field-target test call {} ({}), {} calls; it sees the {} view", g_target_test_ret ? "found" : "not found",
+                           g_target_test_ret ? std::format("+0x{:x}", kTargetTestReturn) : std::string("unknown build"), g_target_tests.load(),
+                           g_target_test_panel.load() ? "panel's" : "game camera's");
+    }
+    if (w == "targetprobe") {
+        std::string v;
+        in >> v;
+        if (v == "on" && !g_probe_hook.installed()) {
+            const auto* f = reinterpret_cast<const std::uint8_t*>(g_exe_base + kClassifier);
+            static const std::uint8_t kPrologue[] = {0x48, 0x8B, 0xC4, 0x48, 0x89, 0x58, 0x08, 0x48, 0x89, 0x70, 0x10};
+            if (!g_target_test_ret || std::memcmp(f, kPrologue, sizeof(kPrologue)) != 0) return "err the field-target classifier is not at its known place";
+            if (!g_probe_hook.create(reinterpret_cast<void*>(g_exe_base + kClassifier), &classifier_detour)) return "err probe hook failed";
+        }
+        if (v == "on" || v == "off") g_probe_on = v == "on";
+        std::lock_guard lk(g_probe_mutex);
+        return std::format("ok field-target probe {} ({} lines) | last: {}", g_probe_on.load() ? "on" : "off", g_probe_lines, g_probe_last);
+    }
+    if (w == "reset") {
+        std::lock_guard lk(g_chain_mutex);
+        g_chains.clear();
+        return "ok full-pass callers cleared";
+    }
+    if (w == "skip") {
+        std::string rest, x;
+        while (in >> x) rest += x + " ";
+        set_skip(rest);
+        std::lock_guard lk(g_chain_mutex);
+        std::string r;
+        for (const auto v : g_skip) r += std::format(" {:x}", v);
+        return "ok full-pass callers passed through unchanged:" + (r.empty() ? std::string(" none") : r);
+    }
+    // list: the chains by count, return addresses as exe offsets (innermost first)
+    std::vector<std::pair<std::uint64_t, Chain>> v;
+    {
+        std::lock_guard lk(g_chain_mutex);
+        for (const auto& [c, n] : g_chains) v.push_back({n, c});
+    }
+    std::sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+    std::string r = std::format("ok capture {} chains {} full {} aligned {} excluded {} |", g_capture.load() ? "on" : "off", v.size(), g_full.load(),
+                                g_aligned.load(), g_excluded.load());
+    for (const auto& [n, c] : v) {
+        r += std::format(" {}x", n);
+        for (const auto a : c) r += a == 0xffffffffu ? " -" : a ? std::format(" {:x}", a) : "";
+        r += " |";
+    }
+    return r;
+}
+
 void start(std::uintptr_t base, bool known) {
+    g_exe_base = base;
+    if (const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base); dos && dos->e_magic == IMAGE_DOS_SIGNATURE) {
+        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+        g_exe_end = base + nt->OptionalHeader.SizeOfImage;
+    }
     const auto r = pattern::scan_module(base, kPattern, pattern::Sections::Executable, 2);
     if (!r.unique()) {
         log::warn("ui: ULocalPlayer::GetProjectionData: {} matches; UI markers are not aligned with the panel ([ui] align)", r.matches.size());
@@ -189,6 +438,16 @@ void start(std::uintptr_t base, bool known) {
         log::warn("ui: ULocalPlayer::GetProjectionData at +0x{:x}, expected +0x{:x} for this build; UI markers are not aligned", rva, kExpectRva);
         return;
     }
+    // The field-target test's call site, checked byte for byte: `xor r8d, r8d` (pass 0)
+    // 0x16 bytes before the return address and `call qword ptr [rax+0x290]` right before it.
+    if (known && g_exe_end > base + kTargetTestReturn) {
+        static const std::uint8_t kCall[] = {0xFF, 0x90, 0x90, 0x02, 0x00, 0x00};
+        static const std::uint8_t kPass0[] = {0x45, 0x33, 0xC0};
+        const auto* ret = reinterpret_cast<const std::uint8_t*>(base + kTargetTestReturn);
+        if (std::memcmp(ret - 6, kCall, sizeof(kCall)) == 0 && std::memcmp(ret - 0x16, kPass0, sizeof(kPass0)) == 0)
+            g_target_test_ret = base + kTargetTestReturn;
+    }
+    if (!g_target_test_ret) log::warn("ui: field-target test call not found; [ui] align_target_test has no effect");
     if (!g_hook.create(reinterpret_cast<void*>(r.first()), &detour)) {
         log::warn("ui: GetProjectionData hook could not be installed; UI markers are not aligned");
         return;
@@ -238,11 +497,12 @@ std::string status() {
     std::lock_guard lk(g_mutex);
     const double k = 180.0 / 3.14159265358979323846;
     const Base& b = g_base;
-    return std::format("ok marker alignment hook {}; full-pass projections {} aligned {} passed through {}; game camera FOV {:.2f} deg pitch {:.2f} "
+    return std::format("ok marker alignment hook {}; full-pass projections {} aligned {} passed through {} (field-target test calls {}, on the {} view); game camera FOV {:.2f} deg pitch {:.2f} "
                        "deg; last panel {:.2f} to {:.2f} deg wide, {:.2f} to {:.2f} deg high, origin {:.1f} cm from the game camera; "
                        "camera rot {:.4f} {:.4f} {:.4f} loc {:.2f} {:.2f} {:.2f}; eye base rot {:.4f} {:.4f} {:.4f} loc {:.2f} {:.2f} {:.2f}; "
                        "head pos {:.4f} {:.4f} {:.4f} quat {:.4f} {:.4f} {:.4f} {:.4f}; units per metre {:.1f}",
-                       g_ready.load() ? "installed" : "off", g_full.load(), g_aligned.load(), g_skipped.load(), b.game_fov, b.game_rot.Pitch,
+                       g_ready.load() ? "installed" : "off", g_full.load(), g_aligned.load(), g_skipped.load(), g_target_tests.load(),
+                       g_target_test_panel.load() ? "panel's" : "game camera's", b.game_fov, b.game_rot.Pitch,
                        std::atan(g_last.l) * k, std::atan(g_last.r) * k, std::atan(g_last.b) * k, std::atan(g_last.t) * k, g_last.offset_cm,
                        b.game_rot.Pitch, b.game_rot.Yaw, b.game_rot.Roll, b.game_loc.X, b.game_loc.Y, b.game_loc.Z, b.base_level.Pitch,
                        b.base_level.Yaw, b.base_level.Roll, b.base_loc.X, b.base_loc.Y, b.base_loc.Z, b.head.position.x, b.head.position.y,

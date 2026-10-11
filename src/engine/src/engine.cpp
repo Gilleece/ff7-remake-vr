@@ -23,6 +23,7 @@
 #include "scene_depth.h"
 #include "stereo_device.h"
 #include "texture_streaming.h"
+#include "ui_align.h"
 
 #if FF7VR_ENGINE_WITH_RENDER
 #include "render_host.h"
@@ -310,6 +311,7 @@ bool start(const StartupContext& ctx) {
         audio_listener::set_enabled(cfg.get_bool("first_person", "audio_listener", true));
         diag::set_battle_log(cfg.get_bool("first_person", "battle_log", false));
         diag::set_prompt_log(cfg.get_bool("first_person", "prompt_log", false));
+        ui_align::set_target_test_panel(cfg.get_bool("ui", "align_target_test", false));
         g_opt.bloom_fix = cfg.get_bool("stereo", "bloom_fix", true);
         g_opt.ao_fix = cfg.get_bool("stereo", "ao_fix", true);
         g_opt.distortion_fix = cfg.get_bool("stereo", "distortion_fix", true);

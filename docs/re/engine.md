@@ -727,6 +727,74 @@ else separates them: the game camera's pitch (with decoupled pitch the eye views
 the markers do not), head position, and the parallax between the quad's distance and the
 object's. See `docs/render.md`, "UI layer", for the numbers at the default placement.
 
+### The interaction prompt (field target icon) and the full pass (STATIC + LIVE, 2026-10-11)
+
+The field target icon (widget blueprint `FieldTarget_01_C`, the marker over a ladder, door
+or item the player can use) is placed and chosen through the full-pass projection, so the
+mod's `[ui] align` affects both. Static analysis of 1.0.0.7 (RVAs; VERIFIED = read in the
+disassembly, INFERRED = from names or the stock 4.18 code):
+
+- `ULocalPlayer::GetProjectionData` (`0x3019240`) is slot 82 (+0x290) of the
+  `ULocalPlayer` vtable (`0x4e6d668`); it has no direct calls, only `call [reg+0x290]`
+  (VERIFIED).
+- Creation: Square Enix's menu API, not a widget component. `ShowFieldTargetIcon`
+  (`0x1429770`) creates the icon widget from a class in the menu settings, sets
+  visibility 3 (HitTestInvisible), adds it to the screen and places it with `0x142b500`
+  (VERIFIED). `0x142b500` projects the target's world location with `0x1348940` (Square
+  Enix's wrapper of `UGameplayStatics::ProjectWorldToScreen`, `0x2f5a3f0`, which calls
+  `GetProjectionData` for pass 0), divides by the viewport scale, subtracts half the
+  widget's size and writes the widget's viewport offsets (an inlined
+  `SetPositionInViewport`), then sets visibility 3 when the projection succeeded and 1
+  (Collapsed) when not (VERIFIED). `0x142b740` re-places every icon each frame from the
+  menu tick `0x13ae310` (VERIFIED). This is why the prompt diagnostic always read a render
+  transform of (0, 0): the position is in the viewport slot, not the transform.
+- Selection: the field target manager update `0x101c140` (called each frame from
+  `0x16bbd20`) asks `0x1017350` for each candidate, which calls the classifier `0x1017ad0`
+  and starts line traces (channels `Terrain`, `GameCameraWall`). The classifier (VERIFIED,
+  arguments: rcx out, xmm1 squared distance to the player character, r8 the target's
+  location, 5th a parameter block, 9th a flag "screen test", 10th a bool out, 11th a flag)
+  returns 1 (out) when the squared distance exceeds `param+0x10`, otherwise 2 or 3 after a
+  facing test (`0x1017fd0`, `param+0x14/+0x18`); with the screen test on
+  (`param+0x1d == 1`) it calls `GetProjectionData(pass 0)` itself (`call [rax+0x290]` at
+  `0x1017c5a`, return address `0x1017c60`, `xor r8d, r8d` at `0x1017c4a`), builds the
+  view-projection matrix (`0xe22c10`), projects with `FSceneView::ProjectWorldToScreen`
+  (`0x320bf70`), normalises to the view rectangle and requires 0..1 on both axes and, when
+  `param+0x39 == 1`, `((y-0.5)/0.37)^2 + ((x-0.5)/0.28)^2 < 1` (constants 7.3046 and
+  12.755 at `0x4f9232c`/`0x4f92394`); otherwise a margin rectangle from `param+0x20..0x2c`.
+  The manager keeps the nearest candidate that passes and is not occluded (VERIFIED).
+- Destroy and recreate: `HideFieldTargetIcon` (`0x1429eb0`) removes the icon (and a
+  companion widget) from its parent and drops its map entry; `0x101b7d0` calls
+  `ShowFieldTargetIcon` again (a new widget) when a candidate's entry has no widget and its
+  state is not 0. The manager hides icons whose target is more than about 54.8 m away
+  (squared distance 3.0e7, after a 3 s timer). Other callers of Hide were not analysed
+  (`0x101dca0`, `0xe2a620`, `0x1098820`, a block near `0xf86080`). A new instance per
+  appearance is therefore normal; the instances seen destroyed in play (`vis=-1`) are this.
+- The full-pass call chains in gameplay, captured live with `uihook callers` (return
+  addresses, innermost first): the quest icons `0x2f5a483 < 0x1348951 < 0x142244c` (and
+  `0x1422668`) `< 0x1423d94 < 0x13ae471 < 0x16bbfe6` (`0x1422f00`, the field quest icon
+  canvas), the game layer manager `0x3018901 < 0x3265e92 < 0x3265160` (only the view
+  rectangle is used), and near usable objects the classifier
+  `0x1017c60 < 0x1017581 < 0x101ca2c < 0x16bbde3` (LIVE: about 90 calls per second while
+  the player stood near one in the test save, none elsewhere). The icon's own placement
+  would add `0x2f5a483 < 0x1348951 < 0x142b54f < 0x142b92f < 0x13ae339` (from the static
+  call graph; the chains were not captured while an icon was shown).
+- The classifier measured live (`uihook callers targetprobe`, a hook on `0x1017ad0` that
+  reads its third argument, the target's location, and the parameter block): an object at
+  (7190, 4308, -1155) in the test save has range 4 m (`param+0x10` = 160000, squared),
+  screen test on, ellipse off, margins 0. With the player 2.42 m away facing it in first
+  person (eye 1.15 m above it), the game camera's view puts it at (0.53, 0.61) of the view
+  rectangle and the panel's view at (0.67, 1.26): result 2 with the game camera's view, 1
+  with the panel's, four times in turn; the icon (`FieldTarget_01_C`, outer the game
+  instance, no widget component) was created with result 2. The normalised positions the
+  probe computes from `FSceneViewProjectionData` (view origin, rotation matrix,
+  projection; `x = 0.5 + 0.5 cx/cw`, `y = 0.5 - 0.5 cy/cw`) agree with the geometry (1.15 m
+  below at 3.85 m = 16.6 degrees below the eye line, y 0.96 on a panel spanning 18.4
+  degrees).
+- UMG's screen-space widget components (`SWorldWidgetScreenLayer::Tick`, INFERRED
+  `0x28edfe0`) project through `0x28fc590` (INFERRED
+  `UWidgetLayoutLibrary::ProjectWorldLocationToWidgetPositionWithDistance`); no Square
+  Enix code calls it (VERIFIED), and the field target does not use it.
+
 ## 10. Post-processing in stereo: Square Enix's passes (LIVE, GPU trace)
 
 Recorded with the engine module's one-frame GPU trace (`gpu trace`, see [Tools](#tools)) in
@@ -1183,6 +1251,55 @@ start area of the test save, out of battle (Null backend). Not yet compared with
   No property naming a lock-on target was found on either class chain.
 - Camera manager `EndPlayerCameraManager`: `MainCameraActor` = `EndCameraActor`; the view
   target is `EndCameraActor` (class `CameraActor`) in normal play.
+
+### Fights in a recorded session (LIVE, a play session with `battle_log = 1`, 2026-10-10)
+
+A 35-minute session with three fights in one battle area, read from the battle
+diagnostic's lines (`battle diag:`; times in seconds since the mod started). The fight
+detection built on it is described in `docs/engine-module.md` ("Combat").
+
+- `EndBattleAPI.GetBattleSceneID`: `None` after loading the save (-1 -> 0 at 10 s), a scene
+  ID from the first fight's start (567.4 s), and **never `None` again** for the remaining
+  25 minutes (two more fights, walks, a shop, menus). It names the battle area the player
+  is in, not a fight in progress. The area actors (`EndBattleAreaActor`, x20, e.g.
+  `BattleSceneID = btsc_plat4`) are in the object array from the level's load.
+- `BattleTarget_New_C` (the battle HUD's target marker, a widget blueprint): no instance
+  before the first fight; one instance from 569.9 s (2.5 s after the signal, one scan pass
+  of the diagnostic) that stays for the rest of the session. `Widget.IsVisible()` on it:
+  1 during each fight (569.9-627.0, 885.0-960.9, 1004.1-1029.7 s), 0 between fights,
+  including walks, the shop and the menus; mid-fight gaps of 0.2 to 2.3 s while the target
+  changes (575.6-576.7, 599.6-601.6, 607.9-610.2, 617.8-619.2 s) and during a battle
+  sequence (931.1-931.3 s). The owner switched back to first person by hand at 632.6 s,
+  5.6 s after the marker went at the end of the first fight.
+- Classes that appear with fights but do not follow their end: `ATBEffect_Cell_C`
+  (from 575.5 s, 8 s into the first fight, when an ATB bar first fills; gone at 671.0,
+  989.7, 1050.0 s), `EndBattleDamageSourceComponent{Bullet,Stay,Homing,Drive,Laser}` (as
+  enemies attack; a `Homing` instance from 1051.9 s to 1110.4 s, outside any fight),
+  `Burst_In_C`, `SkillName_Party_C`, `SkillName_Enemy_C`. Their removals cluster at about
+  60 s intervals (929.7, 989.7, 1050.0, 1110.4 s): INFERRED, the engine's garbage
+  collection, which removes destroyed objects from the object array about once a minute.
+  A destroyed object keeps its slot until then, flagged in its `FUObjectItem`.
+- `FUObjectItem` (0x18 bytes in `FUObjectArray::Objects`): `Object` +0, `Flags` +8
+  (`EInternalObjectFlags`: `Unreachable` `1 << 28`, `PendingKill` `1 << 29`, `RootSet`
+  `1 << 30`), `ClusterRootIndex` +0xC, `SerialNumber` +0x10. INFERRED from the 4.18 layout
+  (the item size 0x18 matches); used by `uobj::pending_kill` to leave destroyed objects out.
+- The HUD instances the diagnostic polled (the first two per class of `ATBGauge_C`,
+  `EnemyStatus_C` x16, `Command_*`) never changed visibility, in or out of fights. They
+  are templates: each widget blueprint class keeps a design copy of its widget tree, and
+  the diagnostic picked those (LIVE, outer chains logged 2026-10-11:
+  `FieldAction_Command(FieldAction_Command_C) < WidgetTree < Command_C
+  (WidgetBlueprintGeneratedClass) < /Game/GameContents/Menu/Resident/Battle/Command`,
+  `Icon_Btn < WidgetTree < MiniGame_Com_Guide_C (WidgetBlueprintGeneratedClass)`, and the
+  same under `WidgetArchetype`). Live widgets have a `WidgetTree` inside a live
+  `UserWidget` as outer. `uobj::is_template` leaves templates out: the object or one of its
+  outers has `UObject::ObjectFlags` (+8) `RF_ClassDefaultObject` (0x10) or
+  `RF_ArchetypeObject` (0x20), or an outer's class is `Class`, `BlueprintGeneratedClass`,
+  `WidgetBlueprintGeneratedClass` or `AnimBlueprintGeneratedClass`. The live
+  `BattleTarget_New_C` of the recorded session was not a template (no instance before the
+  first fight). `Command_C` turns hidden (enum 1) whenever the player has no pawn
+  (cutscenes, the shop).
+- After a fight, the game's camera stays `EndCameraActor`; `EndBattleCameraActor` and
+  `EndBattleLevelSequenceActor` appear for battle sequences (929.8 s).
 
 ## 12. Temporal anti-aliasing in stereo (LIVE, GPU trace)
 
