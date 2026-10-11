@@ -25,7 +25,7 @@ constexpr int kCreateBufferSlot = 3;  // ID3D11Device::CreateBuffer (d3d11.h ord
 using CreateBufferFn = HRESULT(STDMETHODCALLTYPE*)(ID3D11Device*, const D3D11_BUFFER_DESC*, const D3D11_SUBRESOURCE_DATA*, ID3D11Buffer**);
 
 struct State {
-    std::atomic<bool> enabled{true};
+    std::atomic<bool> enabled{false};
     std::atomic<bool> paused{false};  // `bufpool off`: hand out new buffers again (the hook stays)
     std::atomic<bool> installed{false};
     std::atomic<ID3D11Device*> device{nullptr};
@@ -101,8 +101,7 @@ void Install(ID3D11Device* device) {
 }  // namespace
 
 void Configure(const Config& cfg) {
-    g->enabled = cfg.get_bool("stereo", "light_volume_pool", true);
-    if (!g->enabled) log::info("buffer pool: off ([stereo] light_volume_pool = 0)");
+    g->enabled = cfg.get_bool("stereo", "light_volume_pool", false);
 }
 
 void NoteDevice(ID3D11Device* device) {

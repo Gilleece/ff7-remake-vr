@@ -25,7 +25,7 @@ class Config;
 
 namespace ff7vr::render::buffer_pool {
 
-// [stereo] light_volume_pool (1 = on, the default; 0 = off). Registers the `bufpool` dev command.
+// [stereo] light_volume_pool (0 = off, the default; 1 = on). Registers the `bufpool` dev command.
 void Configure(const Config& cfg);
 
 // Any thread: the game's device, seen at a Present.
