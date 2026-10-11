@@ -1,9 +1,15 @@
 // Unit tests for the engine module's camera and projection math. Exit code 0 = pass.
 
+#include "battle_state.h"
 #include "ue_math.h"
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <string>
+#include <vector>
 
 using namespace ff7vr::engine;
 using namespace ff7vr::engine::math;
@@ -26,6 +32,63 @@ bool near_rot(const ue::FRotator& a, const ue::FRotator& b, double eps = 1e-2) {
     return ang(a.Pitch, b.Pitch) <= eps && ang(a.Yaw, b.Yaw) <= eps && ang(a.Roll, b.Roll) <= eps;
 }
 constexpr double kDeg = 3.14159265358979323846 / 180.0;
+
+// Fight detection replayed on a timeline of (time, battle signal, target marker shown) as
+// the battle diagnostic logged it (the value holds until the next entry), polled every
+// 100 ms as in the game. Returns the fights as [start, end) pairs.
+struct Sample {
+    double t;
+    int signal;
+    int marker;  // -1 no marker instance yet, 0 hidden, 1 shown
+};
+std::vector<std::pair<double, double>> replay(const std::vector<Sample>& tl, const battle::Config& cfg, std::vector<std::string>* reasons = nullptr) {
+    std::vector<std::pair<double, double>> fights;
+    if (tl.empty()) return fights;
+    battle::Decider d;
+    std::size_t i = 0;
+    const double end = tl.back().t + 10.0;
+    for (int k = 0;; ++k) {
+        const double t = tl.front().t + k * 0.1;
+        if (t > end) break;
+        while (i + 1 < tl.size() && tl[i + 1].t <= t) ++i;
+        const battle::Change c = d.update(cfg, battle::Input{t, tl[i].signal, tl[i].marker < 0 ? 0 : tl[i].marker});
+        if (!c.changed) continue;
+        if (reasons) reasons->push_back(std::to_string(t) + (c.fight ? " on: " : " off: ") + c.reason);
+        if (c.fight) fights.push_back({t, -1.0});
+        else if (!fights.empty()) fights.back().second = t;
+    }
+    return fights;
+}
+
+// The owner's session of 2026-10-10 (three fights in one battle area; the battle signal
+// stayed on from the first fight to the end of the session). He switched back to first
+// person by hand at 632.6 s, after the first fight.
+const std::vector<Sample> kRecorded = {
+    {10.705, 0, -1},  {567.414, 1, -1}, {569.857, 1, 1},  {575.634, 1, 0},  {576.747, 1, 1},  {598.976, 1, 0},
+    {599.198, 1, 1},  {599.641, 1, 0},  {601.627, 1, 1},  {607.949, 1, 0},  {610.236, 1, 1},  {617.767, 1, 0},
+    {619.213, 1, 1},  {626.990, 1, 0},  {884.992, 1, 1},  {885.326, 1, 0},  {885.993, 1, 1},  {931.078, 1, 0},
+    {931.289, 1, 1},  {960.854, 1, 0},  {1004.122, 1, 1}, {1028.610, 1, 0}, {1028.944, 1, 1}, {1029.721, 1, 0},
+    {1500.0, 1, 0},
+};
+
+// Reads the battle diagnostic lines of a log (`battle diag: t=<ms> ... signal=<v> ...
+// w:BattleTarget_New_C(BattleTarget_New_C)=<visible>/...`).
+std::vector<Sample> read_log(const char* path) {
+    std::vector<Sample> tl;
+    std::ifstream in(path);
+    const std::string key = "w:BattleTarget_New_C(BattleTarget_New_C)=";
+    for (std::string line; std::getline(in, line);) {
+        const auto p = line.find("battle diag: t=");
+        if (p == std::string::npos) continue;
+        const auto sp = line.find(" signal=", p);
+        if (sp == std::string::npos) continue;
+        Sample s{std::atof(line.c_str() + p + 15) / 1000.0, std::atoi(line.c_str() + sp + 8), -1};
+        const auto mp = line.find(key, p);
+        if (mp != std::string::npos) s.marker = std::atoi(line.c_str() + mp + key.size());
+        tl.push_back(s);
+    }
+    return tl;
+}
 HostQuat xr_yaw(double deg) {  // rotation about +Y (OpenXR up): positive turns the view to the left
     return HostQuat{0.0f, static_cast<float>(std::sin(deg * kDeg / 2)), 0.0f, static_cast<float>(std::cos(deg * kDeg / 2))};
 }
@@ -34,7 +97,17 @@ HostQuat xr_pitch(double deg) {  // rotation about +X (OpenXR right): positive l
 }
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 3 && std::strcmp(argv[1], "--replay") == 0) {
+        // ff7vr_engine_tests --replay <ff7vr.log>: the fights the detection finds in a log
+        // recorded with [first_person] battle_log = 1.
+        const std::vector<Sample> tl = read_log(argv[2]);
+        std::vector<std::string> reasons;
+        const auto fights = replay(tl, battle::Config{}, &reasons);
+        std::printf("%zu battle diag samples, %zu fight(s)\n", tl.size(), fights.size());
+        for (const auto& r : reasons) std::printf("  %s\n", r.c_str());
+        return 0;
+    }
     // FRotator <-> FQuat round trips (UE 4.18 formulas).
     const ue::FRotator rots[] = {{0, 0, 0}, {10, 20, 30}, {-45, 170, -10}, {80, -90, 5}, {0, 180, 0}, {-30, 45, 0}};
     bool rt_ok = true;
@@ -155,6 +228,43 @@ int main() {
         check(near(b2.x, 1050, 0.05) && near(b2.y, 1600, 0.05) && near(b2.z, 160, 0.05), "level boom keeps the sideways offset");
         const Vec b3 = level_boom(ue::FRotator{0, 90, 0}, ue::FVector{1000, 1600, 160}, pivot);
         check(near(b3.x, 1000, 0.05) && near(b3.y, 1600, 0.05) && near(b3.z, 160, 0.05), "level boom: zero pitch unchanged");
+    }
+
+    // Fight detection on the recorded session.
+    {
+        std::vector<std::string> reasons;
+        const auto f = replay(kRecorded, battle::Config{}, &reasons);
+        for (const auto& line : reasons) std::printf("      %s\n", line.c_str());
+        check(f.size() == 3, "recorded session: three fights");
+        if (f.size() == 3) {
+            check(near(f[0].first, 567.4, 0.11), "fight 1 starts with the battle signal (567.4 s)");
+            check(f[0].second > 629.0 && f[0].second < 631.0, "fight 1 ends about 3 s after the marker went (627.0 s), before the manual switch at 632.6 s");
+            check(f[1].first > 884.9 && f[1].first < 885.3, "fight 2 starts with the marker (885.0 s)");
+            check(f[1].second > 963.0 && f[1].second < 965.0, "fight 2 ends about 3 s after the marker went (960.9 s)");
+            check(f[2].first > 1004.1 && f[2].first < 1004.4 && f[2].second > 1032.0 && f[2].second < 1034.0, "fight 3: 1004.1 to about 1032.7 s");
+        }
+        // 1.5 s and 2 s are too short: the marker hides for 1.4, 2.0 and 2.3 s mid-fight while the target changes.
+        battle::Config short_exit;
+        short_exit.exit_seconds = 1.5;
+        check(replay(kRecorded, short_exit).size() == 6, "exit after 1.5 s would split fight 1 into four");
+        short_exit.exit_seconds = 2.0;
+        check(replay(kRecorded, short_exit).size() == 5, "exit after 2 s would split fight 1 into three");
+        // The signal alone (battle_objects = 0): one fight from 567 s to the end.
+        battle::Config signal_only;
+        signal_only.objects = false;
+        const auto so = replay(kRecorded, signal_only);
+        check(so.size() == 1 && so[0].second < 0, "signal alone: one fight that never ends (the old behaviour)");
+        // A start by the signal without any marker ends after the grace period.
+        const auto g = replay({{0.0, 0, -1}, {10.0, 1, -1}, {40.0, 1, -1}}, battle::Config{});
+        check(g.size() == 1 && near(g[0].first, 10.0, 0.11) && near(g[0].second, 18.0, 0.11), "signal on without a marker: fight for the 8 s grace");
+        // The signal off ends a fight at once; a signal that is on from the start (a save loaded in
+        // a battle area) does not start one by itself.
+        const auto o = replay({{0.0, 0, 0}, {5.0, 1, 1}, {9.0, 0, 1}, {20.0, 0, 0}}, battle::Config{});
+        check(o.size() == 1 && near(o[0].second, 9.0, 0.11), "signal off ends the fight at once");
+        const auto loaded = replay({{0.0, 1, 0}, {30.0, 1, 0}}, battle::Config{});
+        check(loaded.empty(), "signal on from the start without a marker: no fight");
+        const auto loaded2 = replay({{0.0, -1, -1}, {1.0, 1, 0}, {5.0, 1, 1}, {9.0, 1, 0}, {20.0, 1, 0}}, battle::Config{});
+        check(loaded2.size() == 1 && near(loaded2[0].first, 5.1, 0.11) && near(loaded2[0].second, 11.9, 0.11), "signal on from the start: the marker starts and ends the fight");
     }
 
     std::printf("%s (%d failure%s)\n", g_failures ? "RESULT: FAIL" : "RESULT: PASS", g_failures, g_failures == 1 ? "" : "s");

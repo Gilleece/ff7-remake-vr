@@ -38,6 +38,17 @@ void publish(const ue::FRotator& game_rot, const ue::FVector& game_loc, float ga
 // `uihook align`: state, counters and the last placement.
 std::string status();
 
+// `uihook callers on|off|reset|skip <offsets>|list`: the call chains of the full-pass
+// projections (return addresses as offsets in the game's exe, innermost first), and the
+// chains to leave out of the alignment ([ui] align_skip: hexadecimal exe offsets; a call
+// whose chain contains one keeps the game camera's view).
+std::string callers_command(const std::string& args);
+void set_skip(const std::string& list);
+// [ui] align_target_test: 1 = the game's field-target selection test sees the panel's view
+// too; 0 (default) = it keeps the game camera's view (the prompts' placement is aligned
+// either way).
+void set_target_test_panel(bool panel);
+
 // The last published camera, eye base and head pose, with the alignment counters (for
 // diagnostics; any thread).
 struct Snapshot {

@@ -250,6 +250,8 @@ void register_all(const Config& cfg) {
         player::set_battle_signal(v);
         return std::string();
     });
+    live_settings::add(on_off("first_person.battle_objects", "Battle ends with its target marker", kView + 16, "first_person", "battle_objects",
+                              p.battle_objects));
     live_settings::add(named_bool("camera.boom", "Third person height", kView + 20, "camera", "boom", p.level_boom, {"Game camera", "Shoulder level"},
                                   {"game", "level"}));
     live_settings::add(named_bool("camera.combat", "Battle camera", kView + 21, "camera", "combat", p.combat_level, {"Game's shots", "Behind the character"},

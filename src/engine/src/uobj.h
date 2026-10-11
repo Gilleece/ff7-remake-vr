@@ -29,6 +29,16 @@ std::string path_of(void* obj);
 std::int32_t index_of(void* obj);
 // The object is still the live object at its index of the object array.
 bool alive(void* obj);
+// FUObjectItem::Flags of the object array's slot (EInternalObjectFlags; 0 when unreadable).
+std::int32_t item_flags(int index);
+// Destroyed and waiting for the next garbage collection (PendingKill or Unreachable): it
+// still sits in the object array, often for up to a minute.
+bool pending_kill(void* obj);
+// A template, not a live object: a class default object, or an object inside a class (the
+// widget tree a widget blueprint class keeps for its design, "WidgetArchetype") or inside a
+// class default object. Widget blueprints hold a full copy of their widgets this way; only
+// the instances created at run time (outer: a WidgetTree of a live UserWidget) are shown.
+bool is_template(void* obj);
 // The object's class is `cls` or derives from it.
 bool is_a(void* obj, void* cls);
 // The object's class is named `name`.

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <unordered_map>
 
 namespace ff7vr::engine::uobj {
 namespace {
@@ -11,7 +12,9 @@ namespace {
 // Layouts (docs/re/engine.md section 2 and section 11).
 constexpr std::size_t kObjects = 0x10;        // FUObjectArray: FUObjectItem* Objects
 constexpr std::size_t kNumElements = 0x1c;    // int32
-constexpr std::size_t kItemSize = 0x18;       // FUObjectItem {UObject* Object; ...}
+constexpr std::size_t kItemSize = 0x18;       // FUObjectItem {UObject* Object; int32 Flags; int32 ClusterRootIndex; int32 SerialNumber}
+constexpr std::size_t kItemFlags = 0x08;      // FUObjectItem::Flags (EInternalObjectFlags)
+constexpr std::int32_t kUnreachable = 1 << 28, kPendingKill = 1 << 29;
 constexpr std::size_t kClass = 0x10;          // UObject::ClassPrivate
 constexpr std::size_t kName = 0x18;           // UObject::NamePrivate (FName: ComparisonIndex, Number)
 constexpr std::size_t kOuter = 0x20;          // UObject::OuterPrivate
@@ -133,6 +136,40 @@ bool alive(void* o) {
     if (!o) return false;
     const std::int32_t idx = index_of(o);
     return idx >= 0 && idx < num_objects() && object_at(idx) == o;
+}
+
+std::int32_t item_flags(int i) {
+    std::uint8_t* items = nullptr;
+    if (!g_objects || i < 0 || !read(g_objects + kObjects, items) || !items) return 0;
+    std::int32_t f = 0;
+    read(items + static_cast<std::size_t>(i) * kItemSize + kItemFlags, f);
+    return f;
+}
+
+bool pending_kill(void* o) {
+    if (!alive(o)) return true;
+    return (item_flags(index_of(o)) & (kUnreachable | kPendingKill)) != 0;
+}
+
+bool is_template(void* o) {
+    // UObject::ObjectFlags (+8): RF_ClassDefaultObject 0x10, RF_ArchetypeObject 0x20. The
+    // classes of class objects are cached by pointer (this runs on many objects per scan).
+    static std::unordered_map<void*, bool> class_class;
+    for (int depth = 0; o && depth < 12; ++depth, o = outer_of(o)) {
+        std::int32_t flags = 0;
+        read(static_cast<std::uint8_t*>(o) + 0x08, flags);
+        if (flags & 0x30) return true;
+        if (depth == 0) continue;
+        void* c = class_of(o);
+        auto it = class_class.find(c);
+        if (it == class_class.end()) {
+            const std::string n = object_name(c);
+            it = class_class.emplace(c, n == "Class" || n == "BlueprintGeneratedClass" || n == "WidgetBlueprintGeneratedClass" ||
+                                            n == "AnimBlueprintGeneratedClass").first;
+        }
+        if (it->second) return true;
+    }
+    return false;
 }
 
 bool is_a(void* o, void* cls) {

@@ -169,6 +169,7 @@ All keys are optional. `ff7vr.ini` sits next to the DLL.
 | `[ui] layer_width` | `1920` | width of the quad's image in pixels; a larger game UI texture is scaled down when copied in. `0` = the game's UI texture width |
 | `[ui] mirror` | `1` | also draw the UI over the desktop window in stereo (the window shows an eye image, which no longer has the UI) |
 | `[ui] align` | `1` | world-anchored elements (markers, names, prompts) over their objects at any panel size; `2` = the panel takes the game camera's angle; `0` = neither (see [World-anchored elements](#world-anchored-elements)) |
+| `[ui] align_target_test` | `0` | the game's choice of the usable object (the interaction prompt) keeps the game camera's view; `1` = it sees the panel's view as well, which rejects objects more than about 18 degrees below eye level in first person (`docs/engine-module.md`, "Interaction prompts") |
 | `[ui] battle_size` | `0` | panel height in metres during a battle, `0` = unchanged |
 | `[ui] once_per_frame` | `1` | engine side: draw the UI for the first eye only (`0`: the game draws it for both eyes, as without the mod) |
 | `[foveation] ...` | on, `quality` | foveated rendering in stereo; keys in [Foveated rendering](#foveated-rendering) |
@@ -1395,8 +1396,10 @@ What remains with `align = 1`:
   before the frame's views are built), applied to the current game camera, so the
   game camera's own motion is not late; head motion is one frame late;
 - other game code that projects through the full pass (screen-space checks such as
-  whether a target is on screen) sees the panel's view as well. Nothing changed in the
-  start room; not checked in battles.
+  whether a target is on screen) sees the panel's view as well. One such check is the
+  game's choice of the usable object for the interaction prompt; it keeps the game
+  camera's view (`[ui] align_target_test = 0`, `docs/engine-module.md`, "Interaction
+  prompts"). Not checked in battles.
 
 ### Measured cost
 

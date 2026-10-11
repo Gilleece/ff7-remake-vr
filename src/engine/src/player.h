@@ -44,6 +44,8 @@ struct Settings {
     std::atomic<bool> fp_available{true};    // [first_person] enabled
     std::atomic<bool> fp_default{true};      // [first_person] default: first person outside battles
     std::atomic<bool> auto_combat{true};     // [first_person] auto_combat
+    std::atomic<bool> battle_objects{true};  // [first_person] battle_objects: a fight needs the battle HUD's target marker too
+    std::atomic<float> battle_exit_seconds{3.0f};  // [first_person] battle_exit_seconds: no marker this long ends a fight
     std::atomic<float> eye_forward{10.0f}, eye_right{0.0f}, eye_up{75.0f};  // [first_person] eye_offset (cm, from the pawn's location; fallback)
     std::atomic<bool> eye_head{true};        // [first_person] eye = head (the head bone) | offset
     std::atomic<float> head_forward{2.0f}, head_right{0.0f}, head_up{0.0f};  // [first_person] head_offset (cm, from the eye bones or the head bone)
@@ -85,7 +87,8 @@ void request_mode(bool first_person);
 bool first_person_selected();
 // The gamepad combination for the toggle was pressed (any thread; controls.cpp).
 void request_pad_toggle();
-// Test: pretend a battle is in progress (-1 = use the real signal).
+// Test: 1 / 0 pretend a fight is or is not on, 2 forces the battle signal on and leaves the
+// decision to the live battle objects, -1 = the real signals.
 void set_combat_override(int v);
 
 std::string status();

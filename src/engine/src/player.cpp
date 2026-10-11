@@ -1,6 +1,8 @@
 #include "player.h"
 
 #include "audio_listener.h"
+#include "battle_objects.h"
+#include "battle_state.h"
 #include "diag.h"
 #include "controls.h"
 
@@ -175,6 +177,11 @@ struct State {
     int battle_scan = 0;
     int battle_raw = -1;          // last value read (-1 none)
     std::uint64_t battle_reads = 0, battle_changes = 0;
+    // fight detection (battle_state.h): the signal as a gate and the live battle objects
+    battle::Decider fight;
+    battle::ObjectsState objects{};
+    std::string battle_reason = "none yet";  // the condition of the last change of the verdict
+    bool verdict = false;                    // the verdict incl. the test override
     bool key_down = false;
     std::uint64_t toggles = 0, auto_switches = 0, calls = 0, call_failures = 0;
     // hidden meshes
@@ -852,6 +859,15 @@ int read_battle() {
     return v != 0 ? 1 : 0;
 }
 
+double seconds_now() {
+    static const auto start = std::chrono::steady_clock::now();
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+}
+
+// A fight is on: the battle signal (a gate: on from the first fight of a battle area until
+// the player leaves it) and, with [first_person] battle_objects, the battle HUD's target
+// marker shown (battle_state.h, battle_objects.h). Test override: 1 / 0 force the verdict,
+// 2 (`fp combat area`) forces the signal on and leaves the decision to the objects.
 bool combat_now() {
     const int v = read_battle();
     if (v != g.battle_raw) {
@@ -860,8 +876,24 @@ bool combat_now() {
         g.battle_raw = v;
     }
     const int o = g_combat_override.load();
-    if (o >= 0) return o != 0;
-    return v == 1;
+    const Settings& s = g_settings;
+    battle::Config cfg;
+    cfg.objects = s.battle_objects.load();
+    cfg.exit_seconds = s.battle_exit_seconds.load();
+    bool polled = false;
+    if (cfg.objects) g.objects = battle::poll(seconds_now(), polled);
+    else polled = true;  // the signal alone: every frame
+    if (polled) {
+        const battle::Change c = g.fight.update(cfg, battle::Input{seconds_now(), o == 2 ? 1 : v, cfg.objects ? g.objects.shown : -1});
+        if (c.changed) {
+            g.battle_reason = o == 2 ? c.reason + ", signal forced on by the test override" : c.reason;
+            if (o == 0 || o == 1) log::info("player: fight {} ({}; the test override holds the verdict at {})", c.fight ? "on" : "off", c.reason, o);
+        }
+    }
+    const bool verdict = (o == 0 || o == 1) ? o == 1 : g.fight.fight();
+    if (verdict != g.verdict && (o == 0 || o == 1)) g.battle_reason = "test override";
+    g.verdict = verdict;
+    return verdict;
 }
 
 void run_work() {
@@ -1048,7 +1080,7 @@ void tick(bool stereo, float delta_seconds) {
         g.combat = combat;
         ++g.auto_switches;
         g.first_person = combat ? false : s.fp_default.load();
-        log::info("player: battle {}: {} person", combat ? "started" : "ended", g.first_person ? "first" : "third");
+        log::info("player: battle {} ({}): {} person", combat ? "started" : "ended", g.battle_reason, g.first_person ? "first" : "third");
     }
     g_fp_selected.store(g.first_person, std::memory_order_relaxed);
 
@@ -1316,8 +1348,28 @@ std::string command(const std::string& args) {
         controls::filter_pad(0, &b);
         return std::format("ok buttons after filter {:#06x}", b);
     }
+    if (a[0] == "combat" && a.size() >= 2 && a[1] == "status")
+        return on_game_thread([] {
+            return std::format("ok fight {} ({}), signal raw {}, override {}, objects {} (seen {:.1f} s ago), exit after {:.1f} s | {}",
+                               g.verdict ? 1 : 0, g.battle_reason, g.battle_raw, g_combat_override.load(), g_settings.battle_objects.load() ? "on" : "off",
+                               g.fight.since_shown(seconds_now()), g_settings.battle_exit_seconds.load(), battle::status());
+        });
+    if (a[0] == "combat" && a.size() == 3 && a[1] == "objects") {
+        s.battle_objects = a[2] == "1";
+        return std::format("ok battle objects {}", s.battle_objects.load() ? 1 : 0);
+    }
+    if (a[0] == "combat" && a.size() == 3 && a[1] == "exit") {
+        s.battle_exit_seconds = std::clamp(static_cast<float>(std::atof(a[2].c_str())), 0.1f, 60.0f);
+        return std::format("ok battle exit after {:.1f} s without objects", s.battle_exit_seconds.load());
+    }
+    if (a[0] == "combat" && a.size() >= 3 && a[1] == "classes") {
+        std::string list;
+        for (std::size_t i = 2; i < a.size(); ++i) list += (list.empty() ? "" : " ") + a[i];
+        battle::set_classes(list);
+        return "ok battle object classes " + battle::classes();
+    }
     if (a[0] == "combat" && a.size() == 2) {
-        set_combat_override(a[1] == "auto" ? -1 : std::atoi(a[1].c_str()));
+        set_combat_override(a[1] == "auto" ? -1 : a[1] == "area" ? 2 : std::atoi(a[1].c_str()));
         return "ok combat override " + a[1];
     }
     if (a[0] == "offset" && a.size() == 4) {
@@ -1568,7 +1620,7 @@ std::string command(const std::string& args) {
         for (int d = 0; c && d < 16; ++d, c = uobj::super_of(c)) r += " " + uobj::object_name(c);
         return r;
     }
-    return "err fp status|toggle|first|third|available <0|1>|combat <0|1|auto>|offset <fwd> <right> <up>|hide <none|meshes|head|bones|pass>|"
+    return "err fp status|toggle|first|third|available <0|1>|combat <0|1|auto|area|status>|combat objects <0|1>|combat exit <s>|combat classes <names>|offset <fwd> <right> <up>|hide <none|meshes|head|bones|pass>|"
            "bob <0|1>|steady <s>|trace <frames> <csv path>|headbone <name|auto>|eye <head|offset>|headoffset <fwd> <right> <up>|boom <level|game>|pivot <cm>|blend <s>|camblend <s>|collision <0|1> [margin] [channel]|combatcam <level|game>|aim <cm>|miss <s>|find <name> [outer] [class]|"
            "classes <text>|chain <hex address>|funcs <text> [class text]|props <text> [class text]|call <obj|class> <Class.Function> [hex]|"
            "bones [text]";
