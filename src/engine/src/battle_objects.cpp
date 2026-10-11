@@ -53,10 +53,8 @@ int kind_of(void* cls, const std::vector<std::string>& names) {
 }
 
 bool counted(void* o) {
-    if (!o || uobj::pending_kill(o)) return false;
-    const std::string n = uobj::object_name(o);
     // class default objects and the templates inside widget blueprint classes are never shown
-    return n.rfind("Default__", 0) != 0 && n != "WidgetArchetype";
+    return o && !uobj::pending_kill(o) && !uobj::is_template(o);
 }
 
 }  // namespace

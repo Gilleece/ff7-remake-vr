@@ -572,8 +572,12 @@ captures after the toggles (`h05_third_toggled`, `h08_third_after_toggles`,
   `ATBEffect_Cell_C` appears only when an ATB bar first fills (8 s into the first fight).
   `BattleTarget_New_C` is created at the first fight (2.5 s after the signal) and kept;
   its visibility followed all three fights. The HUD instances the diagnostic polled before
-  (two per class: `ATBGauge_C`, `EnemyStatus_C`, `Command_*`) never changed: they belong
-  to other widget trees than the live HUD (the battle diagnostic now also counts the
+  (two per class: `ATBGauge_C`, `EnemyStatus_C`, `Command_*`) never changed: they were the
+  design templates a widget blueprint class keeps in its own widget tree (outer chain
+  `FieldAction_Command < WidgetTree < Command_C (WidgetBlueprintGeneratedClass)`), not
+  live widgets. Both scans now leave templates out (`uobj::is_template`: the object or an
+  outer has `RF_ClassDefaultObject`/`RF_ArchetypeObject`, or an outer is a class), so the
+  next log shows the live HUD (the battle diagnostic now also counts the
   visible instances of every listed HUD class, `n:<class>=<visible>/<instances>`, and the
   fight detection's poll, `objects=<shown>:<visible>/<instances>`).
 

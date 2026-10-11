@@ -1,5 +1,6 @@
 #include "diag.h"
 
+#include "battle_objects.h"
 #include "ue_math.h"
 #include "ui_align.h"
 #include "uobj.h"
@@ -227,6 +228,7 @@ struct Scan {
     int pos = 0;
     std::vector<WidgetRef> battle_widgets, prompt_widgets;
     std::vector<void*> state_objects;
+    std::vector<WidgetRef> hud;  // every instance of the listed battle HUD classes
     void* cam_mgr = nullptr;
     std::map<std::string, int> wbp_classes;     // widget blueprint class -> live instances
     std::map<std::string, int> battle_classes;  // non-widget classes with Battle in the name -> instances
@@ -258,7 +260,8 @@ void scan_object(void* o) {
     if (!ci.widget && !ci.battle_cls && !ci.cam_mgr) return;
     const std::string name = uobj::object_name(o);
     // class default objects and the templates inside widget blueprint classes are not shown
-    if (name.rfind("Default__", 0) == 0 || name == "WidgetArchetype") return;
+    // (a widget blueprint class keeps a whole widget tree of its own for its design)
+    if (name.rfind("Default__", 0) == 0 || name == "WidgetArchetype" || uobj::is_template(o)) return;
     if (ci.cam_mgr && !g_next.cam_mgr) g_next.cam_mgr = o;
     if (ci.widget) {
         if (ci.wbp) ++g_next.wbp_classes[ci.name];
@@ -266,6 +269,7 @@ void scan_object(void* o) {
         const bool battle = ci.battle_rank || ci.battle_kw || has_any(ln, {"battle", "command", "atb", "gauge"});
         const bool prompt = ci.prompt_rank || ci.prompt_kw || has_any(ln, {"interact", "prompt", "talk", "pick"});
         if (battle) add_widget(g_next.battle_widgets, WidgetRef{o, name, std::format("{}({})", name, ci.name), ci.user_widget, cls, ci.battle_rank});
+        if (ci.battle_rank && g_next.hud.size() < 256) g_next.hud.push_back(WidgetRef{o, name, ci.name, ci.user_widget, cls, ci.battle_rank});
         if (prompt) add_widget(g_next.prompt_widgets, WidgetRef{o, name, std::format("{}({})", name, ci.name), ci.user_widget, cls, ci.prompt_rank});
         return;
     }
@@ -474,6 +478,21 @@ void poll_battle(const Frame& f, double t) {
     vals.emplace_back("verdict", f.in_battle ? "battle" : "none");
     vals.emplace_back("mode", f.first_person ? "first" : "third");
     vals.emplace_back("signal", std::to_string(f.battle_raw));
+    {
+        // the fight detection's battle objects (battle_objects.h) and, per listed battle HUD
+        // class, how many of its live instances are visible: "visible/instances"
+        const battle::ObjectsState o = battle::last();
+        vals.emplace_back("objects", std::format("{}:{}/{}", o.shown, o.visible, o.instances));
+        std::map<std::string, std::pair<int, int>> per;
+        for (const auto& w : g_cur.hud) {
+            if (uobj::pending_kill(w.obj)) continue;
+            bool b = false;
+            auto& c = per[w.label];
+            ++c.second;
+            if (call_bool(kIsVisible, w.obj, b) && b) ++c.first;
+        }
+        for (const auto& [k, c] : per) vals.emplace_back("n:" + k, std::format("{}/{}", c.first, c.second));
+    }
     std::map<std::string, int> seen;
     for (const auto& w : g_cur.battle_widgets) {
         const WidgetState s = widget_state(w);
@@ -558,6 +577,47 @@ void poll_battle(const Frame& f, double t) {
     ++g_battle_lines;
 }
 
+// "name(class) < outer(class) < ...": where a widget lives (a widget tree, a widget
+// component of an actor, the game instance).
+std::string outer_chain(void* o) {
+    std::string r;
+    for (int depth = 0; o && depth < 10; ++depth, o = uobj::outer_of(o))
+        r += std::format("{}{}({})", r.empty() ? "" : " < ", uobj::object_name(o), uobj::object_name(uobj::class_of(o)));
+    return r;
+}
+
+// The widget component (if any) that holds `widget`: its owner, EWidgetSpace (0 world, 1
+// screen) and its location. One pass over the object array (a few tens of ms; once per new
+// prompt instance).
+std::string holder_of(void* widget) {
+    std::unordered_map<void*, void*> wc_class;  // class -> its WidgetComponent super (or nullptr)
+    Prop widget_prop, space_prop;
+    bool props = false;
+    int components = 0;
+    const int n = uobj::num_objects();
+    for (int i = 0; i < n; ++i) {
+        void* o = uobj::object_at(i);
+        if (!o) continue;
+        void* cls = uobj::class_of(o);
+        auto it = wc_class.find(cls);
+        if (it == wc_class.end()) it = wc_class.emplace(cls, class_in_chain(cls, "WidgetComponent")).first;
+        if (!it->second) continue;
+        if (uobj::object_name(o).rfind("Default__", 0) == 0) continue;
+        ++components;
+        if (!props) {
+            props = true;
+            find_prop(it->second, "Widget", widget_prop);
+            find_prop(it->second, "Space", space_prop);
+        }
+        void* w = nullptr;
+        if (widget_prop.offset <= 0 || !uobj::read(static_cast<std::uint8_t*>(o) + widget_prop.offset, w) || w != widget) continue;
+        std::uint8_t space = 0xff;
+        if (space_prop.offset > 0) uobj::read(static_cast<std::uint8_t*>(o) + space_prop.offset, space);
+        return std::format("held by widget component {} space {} (of {} components)", outer_chain(o), space, components);
+    }
+    return std::format("not held by a widget component ({} components, Widget property @{})", components, widget_prop.offset);
+}
+
 void poll_prompt(const Frame& f, double t) {
     if (t >= g_prompt_second + 1.0) {
         g_prompt_second = t;
@@ -568,6 +628,8 @@ void poll_prompt(const Frame& f, double t) {
         const WidgetState s = widget_state(w);
         auto it = g_prompt_last.find(w.obj);
         const bool fresh = it == g_prompt_last.end();
+        if (fresh && uobj::alive(w.obj))
+            log::info("prompt diag: instance {} at index {}: {}; {}", w.label, uobj::index_of(w.obj), outer_chain(w.obj), w.rank > 0 ? holder_of(w.obj) : std::string("-"));
         const bool vis_change = fresh || it->second.visible != s.visible || it->second.in_viewport != s.in_viewport || it->second.vis_enum != s.vis_enum;
         const bool moved = !fresh && (std::abs(it->second.tx - s.tx) > 2.0f || std::abs(it->second.ty - s.ty) > 2.0f || it->second.slot != s.slot ||
                                       std::abs(it->second.sx - s.sx) > 2.0f || std::abs(it->second.sy - s.sy) > 2.0f);

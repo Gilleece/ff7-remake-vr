@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <unordered_map>
 
 namespace ff7vr::engine::uobj {
 namespace {
@@ -148,6 +149,27 @@ std::int32_t item_flags(int i) {
 bool pending_kill(void* o) {
     if (!alive(o)) return true;
     return (item_flags(index_of(o)) & (kUnreachable | kPendingKill)) != 0;
+}
+
+bool is_template(void* o) {
+    // UObject::ObjectFlags (+8): RF_ClassDefaultObject 0x10, RF_ArchetypeObject 0x20. The
+    // classes of class objects are cached by pointer (this runs on many objects per scan).
+    static std::unordered_map<void*, bool> class_class;
+    for (int depth = 0; o && depth < 12; ++depth, o = outer_of(o)) {
+        std::int32_t flags = 0;
+        read(static_cast<std::uint8_t*>(o) + 0x08, flags);
+        if (flags & 0x30) return true;
+        if (depth == 0) continue;
+        void* c = class_of(o);
+        auto it = class_class.find(c);
+        if (it == class_class.end()) {
+            const std::string n = object_name(c);
+            it = class_class.emplace(c, n == "Class" || n == "BlueprintGeneratedClass" || n == "WidgetBlueprintGeneratedClass" ||
+                                            n == "AnimBlueprintGeneratedClass").first;
+        }
+        if (it->second) return true;
+    }
+    return false;
 }
 
 bool is_a(void* o, void* cls) {
