@@ -8,6 +8,7 @@
 #include "foveation.h"
 #include "frame_budget.h"
 #include "menu.h"
+#include "scene_timing.h"
 #include "ui_battle.h"
 #include "upload_check.h"
 #include "video_memory.h"
@@ -471,7 +472,7 @@ void XrController::LogStats() {
     bw.frames = frames;
     bw.intervalMs = t.frameInterval.Median(nullptr, &bw.intervalMaxMs);
     bw.waitMs = t.wait.Median(&bw.waitSamples);
-    foveation::PeekGpuMedians(&bw.sceneMs, &bw.sceneSamples, &bw.afterMs, &bw.afterSamples);
+    scene_timing::PeekMedians(&bw.sceneMs, &bw.sceneSamples, &bw.afterMs, &bw.afterSamples);
     bw.stereoMode = mode_.load() == Mode::Stereo && ready_.load();
     {
         const uint64_t stereo = submittedStereo_.load();
@@ -492,6 +493,7 @@ void XrController::LogStats() {
         const std::string line = s->TakeSummary();
         if (!line.empty()) log::info("timing:   {}", line);
     }
+    for (const std::string& line : scene_timing::TakeTimingLines()) log::info("timing:   {}", line);
     for (const std::string& line : foveation::TakeTimingLines()) log::info("timing:   {}", line);
     // The gamepad path (the loader's XInput proxy and the engine's pad filter), when present.
     for (const char* cmd : {"xinput timing", "controls timing"}) {

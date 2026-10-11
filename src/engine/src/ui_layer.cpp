@@ -322,6 +322,7 @@ void __fastcall end_detour(void* sceneTargets, void* cmdList) {
 #if FF7VR_ENGINE_WITH_RENDER
 struct MarkCommand : rhi::Command {
     bool begin = false;
+    bool haveEyes = false;  // the eyes for foveated rendering; without them the scene is only timed
     render::FoveationEye eyes[2]{};
 };
 constexpr int kMarkRing = 32;
@@ -332,7 +333,7 @@ void execute_mark(void*, rhi::Command* self) {
     // Presenting thread (RHI thread), in the frame's command order.
     auto* c = static_cast<MarkCommand*>(self);
     if (c->begin)
-        render::FoveationSceneBegin(c->eyes);
+        render::FoveationSceneBegin(c->haveEyes ? c->eyes : nullptr);
     else
         render::FoveationSceneEnd();
 }
@@ -342,6 +343,7 @@ bool append_mark(void* cmdList, bool begin, const render::FoveationEye* eyes) {
     g_markNext = (g_markNext + 1) % kMarkRing;
     c.execute = &execute_mark;
     c.begin = begin;
+    c.haveEyes = eyes != nullptr;
     if (eyes) std::copy(eyes, eyes + 2, c.eyes);
     return rhi::enqueue(cmdList, &c);
 }
@@ -406,15 +408,22 @@ void find_view_layout(const std::uint8_t* left, const std::uint8_t* right) {
               g_layoutFailures ? std::format(", found after {} failed search(es)", g_layoutFailures) : std::string());
 }
 
-// Both eyes of a stereo view family, or false.
-bool stereo_eyes(void* renderer, render::FoveationEye out[2]) {
+// The renderer draws a stereo view family (two views, left and right stereo passes).
+bool stereo_family(void* renderer) {
     auto* r = static_cast<std::uint8_t*>(renderer);
     auto* views = *reinterpret_cast<std::uint8_t**>(r + g_mark.views);
     const std::int32_t num = *reinterpret_cast<std::int32_t*>(r + g_mark.views + 8);
     if (!views || num != 2) return false;
+    return *reinterpret_cast<const std::int32_t*>(views + g_mark.stereoPass) == 1 &&
+           *reinterpret_cast<const std::int32_t*>(views + g_mark.viewStride + g_mark.stereoPass) == 2;
+}
+
+// Both eyes of a stereo view family, or false.
+bool stereo_eyes(void* renderer, render::FoveationEye out[2]) {
+    if (!stereo_family(renderer)) return false;
+    auto* r = static_cast<std::uint8_t*>(renderer);
+    auto* views = *reinterpret_cast<std::uint8_t**>(r + g_mark.views);
     const std::uint8_t* v[2] = {views, views + g_mark.viewStride};
-    if (*reinterpret_cast<const std::int32_t*>(v[0] + g_mark.stereoPass) != 1 || *reinterpret_cast<const std::int32_t*>(v[1] + g_mark.stereoPass) != 2)
-        return false;
     if (!g_layoutFound) find_view_layout(v[0], v[1]);
     if (!g_layoutFound) return false;
     for (int e = 0; e < 2; ++e) {
@@ -449,10 +458,15 @@ void __fastcall render_detour(void* renderer, void* cmdList) {
             late_update::before_scene(views, views + g_mark.viewStride, g_mark.viewStride);
     }
     if (g_sceneOpen) close_scene(cmdList);
+    // The scene window: for foveated rendering (with both eyes' layout) and for the GPU timers
+    // of each stereo frame, which run with foveation off as well (only timed then).
     render::FoveationEye eyes[2];
-    if (g_marksReady.load(std::memory_order_relaxed) && render::FoveationWanted() && stereo_eyes(renderer, eyes) && append_mark(cmdList, true, eyes)) {
-        g_sceneOpen = true;
-        ++g_marksBegun;
+    if (g_marksReady.load(std::memory_order_relaxed) && render::SceneMarksWanted() && stereo_family(renderer)) {
+        const bool foveated = render::FoveationWanted() && stereo_eyes(renderer, eyes);
+        if (append_mark(cmdList, true, foveated ? eyes : nullptr)) {
+            g_sceneOpen = true;
+            ++g_marksBegun;
+        }
     }
     g_renderHook.original<RenderFn>()(renderer, cmdList);
     if (g_sceneOpen) close_scene(cmdList);  // no UI pass and no post-processing ran
@@ -541,8 +555,8 @@ bool start_ui_layer(const StartupContext& ctx) {
     const std::uintptr_t base = ctx.game_base ? ctx.game_base : module::main_module().base;
     const bool known = ctx.game_size == ue::rva_1_0_0_7::SizeOfImage && module::timestamp(base) == ue::rva_1_0_0_7::TimeDateStamp;
     const auto t0 = GetTickCount64();
-    // Independent of the UI layer: foveated rendering needs only the scene markers. They
-    // pass straight through while it is off ([foveation] enabled, `fov on|off`).
+    // Independent of the UI layer: foveated rendering and the GPU timers of each stereo frame
+    // (render module, scene_timing) need only the scene markers.
     g_layoutForceFail = static_cast<int>(ctx.config->get_int("dev", "foveation_layout_fail", 0));
     start_scene_marks(base, known);
     ui_align::start(base, known);  // markers on the panel ([ui] align), independent of the hooks below

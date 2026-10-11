@@ -40,6 +40,8 @@ add_library(ff7vr_render STATIC
     src/d3d11_census.cpp
     src/frame_budget.h
     src/frame_budget.cpp
+    src/frame_budget_classify.h
+    src/frame_budget_classify.cpp
     src/upload_check.h
     src/upload_check.cpp
     src/menu.h
@@ -48,6 +50,8 @@ add_library(ff7vr_render STATIC
     src/menu_canvas.cpp
     src/pause_on_remove.h
     src/pause_on_remove.cpp
+    src/scene_timing.h
+    src/scene_timing.cpp
     src/timing.h
     src/timing.cpp
     src/ui_battle.h
@@ -64,3 +68,9 @@ target_link_libraries(ff7vr_render PUBLIC ff7vr_core ff7vr_xr PRIVATE d3d11 dxgi
 FetchContent_GetProperties(stb)
 target_include_directories(ff7vr_render SYSTEM PRIVATE "${stb_SOURCE_DIR}")
 ff7vr_set_warnings(ff7vr_render)
+
+# Unit tests for the pure parts (no game or GPU needed):
+#   build/<name>/src/render/ff7vr_render_tests.exe   (exit 0 = pass)
+add_executable(ff7vr_render_tests tests/render_tests.cpp src/frame_budget_classify.cpp)
+target_include_directories(ff7vr_render_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+ff7vr_set_warnings(ff7vr_render_tests)

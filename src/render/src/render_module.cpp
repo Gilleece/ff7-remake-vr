@@ -12,6 +12,7 @@
 #include "ui_battle.h"
 #include "xr_controller.h"
 #include "pause_on_remove.h"
+#include "scene_timing.h"
 #include "upload_check.h"
 
 #include "ff7vr/core/dev_commands.h"
@@ -124,7 +125,8 @@ RenderConfig LoadConfig(const StartupContext& ctx) {
 }
 
 void OnPresentCb(const PresentInfo& p) {
-    foveation::OnPresent(p);  // first: switches variable rate shading off before any of our own work
+    scene_timing::OnPresent(p);  // first: the frame's last timestamp, before any of our own GPU work
+    foveation::OnPresent(p);     // switches variable rate shading off before any of our own work
     XrController::Get().OnPresent(p);
 }
 void OnResizeCb(IDXGISwapChain* sc) { XrController::Get().OnResize(sc); }
@@ -183,6 +185,8 @@ void RegisterCommands() {
                           if (a.size() >= 2 && a.front() == '"' && a.back() == '"') a = a.substr(1, a.size() - 2);
                           return XrController::Get().Capture(a, timeout);
                       });
+    dev_commands::add("gputime", "gputime status | on | off: the GPU timestamps of each stereo frame (scene start, scene end, Present)",
+                      [](std::string_view a) { return scene_timing::Command(std::string(a)); });
     dev_commands::add("budget", "budget status | on | off: the frame budget warning (frame interval against the headset's refresh period)",
                       [](std::string_view args) { return frame_budget::Command(std::string(args)); });
     dev_commands::add("bufpool", "bufpool status | on | off: the ring for the game's light volume vertex buffers ([stereo] light_volume_pool)",
@@ -311,7 +315,14 @@ void SetGameFov(float degrees) {
     if (g_started.load(std::memory_order_relaxed)) XrController::Get().SetGameFov(degrees);
 }
 bool FoveationWanted() { return g_started.load(std::memory_order_relaxed) && foveation::Wanted(); }
-void FoveationSceneBegin(const FoveationEye eyes[2]) { foveation::SceneBegin(eyes); }
-void FoveationSceneEnd() { foveation::SceneEnd(); }
+bool SceneMarksWanted() { return g_started.load(std::memory_order_relaxed) && (scene_timing::Enabled() || foveation::Wanted()); }
+void FoveationSceneBegin(const FoveationEye eyes[2]) {
+    scene_timing::SceneBegin();
+    if (eyes) foveation::SceneBegin(eyes);
+}
+void FoveationSceneEnd() {
+    scene_timing::SceneEnd();
+    foveation::SceneEnd();
+}
 
 }  // namespace ff7vr::render

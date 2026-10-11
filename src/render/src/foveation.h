@@ -33,8 +33,7 @@ void Configure(const Config& config);
 
 // Presenting thread, at the start of the Present hook (before this module's own
 // D3D11 work): notes the game's device (NVAPI and the context hooks are set up
-// at the first stereo scene), switches variable rate shading off, reads back GPU
-// timings.
+// at the first stereo scene), switches variable rate shading off.
 void OnPresent(const PresentInfo& p);
 
 // Any thread.
@@ -57,14 +56,8 @@ std::string PresetName();
 // One line for the status command.
 std::string Status();
 
-// Medians of the GPU scene and after-the-scene series of the current timing period (not
-// reset) and their sample counts; both counts 0 while foveation does not measure.
-void PeekGpuMedians(double* sceneMs, size_t* sceneSamples, double* afterMs, size_t* afterSamples);
-
-// Summaries of the foveation timing series for the periodic timing block (resets them).
+// Summary of the context hooks' CPU time for the periodic timing block (resets it). The GPU
+// times of the scene window are measured by scene_timing.h, with or without foveation.
 std::vector<std::string> TakeTimingLines();
-// Any thread: the most recent GPU times of the stereo scene and of what follows it until
-// Present (the two series of TakeTimingLines); false while none was measured.
-bool LastGpuTimes(double* sceneMs, double* afterMs);
 
 }  // namespace ff7vr::render::foveation

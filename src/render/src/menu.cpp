@@ -3,6 +3,7 @@
 #include "comfort.h"
 #include "foveation.h"
 #include "menu_canvas.h"
+#include "scene_timing.h"
 #include "timing.h"
 #include "video_memory.h"
 #include "xr_controller.h"
@@ -383,7 +384,7 @@ void UpdatePerformance() {
     line = g_fpsAvg > 0 ? std::format("{:.0f} fps", g_fpsAvg) : std::string("- fps");
     if (haveEye) line += std::format(" of {:.0f} Hz", eye.refreshHz);
     double scene = 0, after = 0;
-    if (foveation::LastGpuTimes(&scene, &after)) line += std::format("  |  GPU scene {:.1f} + after {:.1f} ms", scene, after);
+    if (scene_timing::LastTimes(&scene, &after)) line += std::format("  |  GPU scene {:.1f} + after {:.1f} ms", scene, after);
     ComPtr<ID3D11Device> dev;
     {
         std::lock_guard lk(g_devMutex);

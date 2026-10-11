@@ -284,7 +284,7 @@ struct State {
     } gaze;
     // Per frame.
     bool open = false;      // inside the scene window, mask allowed
-    bool timing = false;    // inside the scene window, scene timer running
+    bool inScene = false;   // between SceneBegin and SceneEnd (or the Present)
     bool vrsOn = false;     // variable rate shading currently enabled on the context
     bool viewBound = false; // our surface is bound on the context
     bool sawLights = false;   // this frame's scene window has bound the screen shadow mask (lights running)
@@ -293,8 +293,6 @@ struct State {
     uint64_t frames = 0, bindings = 0, matched = 0;
     uint64_t bindingsThisFrame = 0, matchedThisFrame = 0;
     int64_t cpuTicksThisFrame = 0;
-    GpuTimer sceneTimer, afterTimer;
-    bool afterRunning = false;
     // Trace of one frame.
     struct TraceEvent {
         uint32_t w = 0, h = 0;
@@ -326,10 +324,6 @@ std::string g_dumpPath, g_dumpResult;  // under g_dumpMutex
 bool g_dumpRequested = false, g_dumpDone = false;
 
 Series g_cpuSeries{"foveation context hooks (CPU per frame)"};
-std::atomic<float> g_gpuFrameMs{0.0f};
-std::atomic<uint64_t> g_gpuFrameSamples{0};
-Series g_sceneSeries{"gpu scene (foveation window)"};
-Series g_afterSeries{"gpu after the scene until Present"};
 
 // ---------------------------------------------------------------- hooks
 using OMSetRenderTargetsFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, ID3D11RenderTargetView* const*, ID3D11DepthStencilView*);
@@ -1226,15 +1220,8 @@ void OnPresent(const PresentInfo& p) {
     if (g.init != State::Init::Ok || ctx != g_ctx.load()) return;  // off, or another device: leave it alone
     // Nothing after the scene of a stereo frame, and nothing of this module, is shaded coarsely.
     g.open = false;
-    if (g.timing) {
-        g.sceneTimer.End(ctx);
-        g.timing = false;
-    }
+    g.inScene = false;
     SwitchOff(ctx);
-    if (g.afterRunning) {
-        g.afterTimer.End(ctx);
-        g.afterRunning = false;
-    }
     if (g.tracing) FinishTrace(ctx);
     if (g.traceReadPending) ReadTrace(ctx);
     {
@@ -1253,20 +1240,6 @@ void OnPresent(const PresentInfo& p) {
     }
     for (auto& r : g.retired) ++r.presents;
     std::erase_if(g.retired, [](const State::Retired& r) { return r.presents > 8; });
-    g.sceneTimer.Collect(ctx, g_sceneSeries);
-    g.afterTimer.Collect(ctx, g_afterSeries);
-    {
-        // The newest stereo frame's GPU time (scene plus everything after it until Present),
-        // for the engine's resolution control (render.h, GetGpuFrameTime).
-        uint64_t nScene = 0, nAfter = 0;
-        const double scene = g_sceneSeries.Last(&nScene), after = g_afterSeries.Last(&nAfter);
-        static uint64_t lastScene = 0;
-        if (nScene != lastScene && nAfter > 0) {
-            lastScene = nScene;
-            g_gpuFrameMs.store(static_cast<float>(scene + after), std::memory_order_relaxed);
-            g_gpuFrameSamples.fetch_add(1, std::memory_order_release);
-        }
-    }
     if (g.cpuTicksThisFrame || g.bindingsThisFrame) {
         g_cpuSeries.Add(QpcToMs(g.cpuTicksThisFrame));
         g.bindings += g.bindingsThisFrame;
@@ -1283,12 +1256,7 @@ void SceneBegin(const FoveationEye eyes[2]) {
     if (g.init != State::Init::Ok || g_unsupported.load()) return;
     ID3D11DeviceContext* ctx = g_ctx.load();
     TakeSettings();
-    if (g.afterRunning) {
-        g.afterTimer.End(ctx);
-        g.afterRunning = false;
-    }
-    g.timing = true;
-    g.sceneTimer.Begin(g.device, ctx);
+    g.inScene = true;
     if (!g.settings.enabled) {
         SwitchOff(ctx);
         return;
@@ -1334,12 +1302,9 @@ void SceneBegin(const FoveationEye eyes[2]) {
 }
 
 void SceneEnd() {
-    if (g.init != State::Init::Ok || !g.timing) return;
+    if (g.init != State::Init::Ok || !g.inScene) return;
     ID3D11DeviceContext* ctx = g_ctx.load();
-    g.timing = false;
-    g.sceneTimer.End(ctx);
-    g.afterTimer.Begin(g.device, ctx);
-    g.afterRunning = true;
+    g.inScene = false;
     if (g.tracing) {
         State::TraceEvent e;
         e.note = "scene end";
@@ -1544,7 +1509,7 @@ std::string Command(const std::string& argsIn) {
     }
     if (a[0] == "timing") {
         std::string out = "ok";
-        for (Series* s : {&g_sceneSeries, &g_afterSeries, &g_cpuSeries}) {
+        for (Series* s : {&g_cpuSeries}) {
             const std::string l = s->TakeSummary();
             if (!l.empty()) {
                 log::info("timing:   {}", l);
@@ -1559,23 +1524,9 @@ std::string Command(const std::string& argsIn) {
 
 bool EyeTrackingRequested() { return g_eyeTrackingRequested.load(); }
 
-void PeekGpuMedians(double* sceneMs, size_t* sceneSamples, double* afterMs, size_t* afterSamples) {
-    *sceneMs = g_sceneSeries.Median(sceneSamples);
-    *afterMs = g_afterSeries.Median(afterSamples);
-}
-
-bool LastGpuTimes(double* sceneMs, double* afterMs) {
-    uint64_t n = 0;
-    const double scene = g_sceneSeries.Last(&n);
-    if (n == 0) return false;
-    if (sceneMs) *sceneMs = scene;
-    if (afterMs) *afterMs = g_afterSeries.Last();
-    return true;
-}
-
 std::vector<std::string> TakeTimingLines() {
     std::vector<std::string> out;
-    for (Series* s : {&g_sceneSeries, &g_afterSeries, &g_cpuSeries}) {
+    for (Series* s : {&g_cpuSeries}) {
         std::string l = s->TakeSummary();
         if (!l.empty()) out.push_back(std::move(l));
     }
@@ -1585,13 +1536,6 @@ std::vector<std::string> TakeTimingLines() {
 }  // namespace ff7vr::render::foveation
 
 namespace ff7vr::render {
-
-bool GetGpuFrameTime(float* ms, uint64_t* samples) {
-    const uint64_t n = foveation::g_gpuFrameSamples.load(std::memory_order_acquire);
-    if (samples) *samples = n;
-    if (ms) *ms = foveation::g_gpuFrameMs.load(std::memory_order_relaxed);
-    return n > 0;
-}
 
 void FoveationSetUpscaling(bool upscaled, float inputShare) {
     using namespace foveation;

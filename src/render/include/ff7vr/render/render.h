@@ -135,9 +135,8 @@ bool DepthLayerWanted();
 bool RelocateViews(uint64_t frameId, xr::View views[2]);
 
 // Any thread. GPU time of the most recently measured stereo frame (from the start of
-// its scene to its Present, timestamp queries; measured by the foveation module, so
-// only while foveated rendering is initialised) and the number of frames measured
-// so far. False while nothing has been measured.
+// its scene to its Present, timestamp queries; with or without foveated rendering)
+// and the number of frames measured so far. False while nothing has been measured.
 bool GetGpuFrameTime(float* ms, uint64_t* samples);
 
 // ============================ UI LAYER =====================================
@@ -207,7 +206,11 @@ struct FoveationEye {
 };
 // Any thread. True while foveated rendering is switched on and not known to be unsupported.
 bool FoveationWanted();
-// Presenting thread (inside the frame's command stream).
+// Any thread. True while the scene window is wanted at all: by foveated rendering or by the
+// GPU timers that measure each stereo frame (they run with foveation off too).
+bool SceneMarksWanted();
+// Presenting thread (inside the frame's command stream). `eyes` may be null when foveated
+// rendering is not wanted (or the eyes' layout is unknown): the scene is then only timed.
 void FoveationSceneBegin(const FoveationEye eyes[2]);
 void FoveationSceneEnd();
 // Presenting thread, at the end of each stereo frame, from an upscaler (DLSS): whether it
