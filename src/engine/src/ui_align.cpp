@@ -84,6 +84,38 @@ std::uintptr_t g_target_test_ret = 0;      // absolute return address (0: not fo
 std::atomic<bool> g_target_test_panel{false};  // [ui] align_target_test
 std::atomic<std::uint64_t> g_target_tests{0};
 
+// Markers outside the panel ([ui] align_clamp). The panel's view spans only the panel
+// (about 18 degrees above and below the eye line), so an object close to the player lies
+// outside it and projects outside the view rectangle: the game then places its marker off
+// the panel or hides it. FSceneView::ProjectWorldToScreen (0x320bf70, static: world
+// location, view rectangle, view-projection matrix, screen position out; true when the
+// point is in front of the view, with no test against the rectangle) is hooked, and for
+// the two callers that place widgets, UGameplayStatics::ProjectWorldToScreen (return
+// address 0x2f5a4ae; Square Enix's widget code calls it through 0x1348940) and UMG's
+// UWidgetLayoutLibrary::ProjectWorldLocationToWidgetPositionWithDistance (0x28fc647), a
+// point projected with the panel's view (the full pass that call just asked for was
+// aligned) that lands outside the rectangle is moved onto its edge, inset by
+// kClampInset of its height, along the line from the rectangle's centre. Points behind the
+// head (the function returns false) stay hidden. Other callers (game logic such as the
+// usable-object test) keep the unclamped result.
+constexpr const char* kProjectPattern = "48 83 EC 28 F3 0F 10 01 0F 57 E4 F3 0F 10 49 04 4C 8B D2 F3 0F 10 51 08";
+constexpr std::uintptr_t kProjectRva = 0x320bf70;
+constexpr std::uintptr_t kStaticsReturn = 0x2f5a4ae;       // UGameplayStatics::ProjectWorldToScreen
+constexpr std::uintptr_t kWidgetLayoutReturn = 0x28fc647;  // UWidgetLayoutLibrary
+constexpr double kClampInset = 0.03;
+using ProjectFn = bool (*)(const float*, const std::int32_t*, const float*, float*);
+hook::InlineHook g_project_hook;
+std::uintptr_t g_ret_statics = 0, g_ret_layout = 0;
+std::atomic<bool> g_clamp{true};  // [ui] align_clamp
+std::atomic<std::uint64_t> g_marker_calls{0}, g_clamped{0}, g_behind{0};
+// The last full-pass projection on this thread was replaced with the panel's view.
+thread_local bool t_panel_view = false;
+struct LastClamp {
+    float in_x = 0, in_y = 0, out_x = 0, out_y = 0;
+    std::int32_t rect[4]{};
+};
+LastClamp g_last_clamp;
+
 // `uihook targetprobe on`: a probe on the field-target classifier (0x1017ad0; it returns
 // 1 = out, 2 = in range, 3 = near; its third argument is the target's location) that logs,
 // for each target it tests, where the target lands on the game camera's view and on the
@@ -206,11 +238,11 @@ math::Vec axis_combo(const math::Vec& a, const math::Vec& fwd, const math::Vec& 
 
 #if FF7VR_ENGINE_WITH_RENDER
 // Replaces the full pass's view with the panel's (see the header).
-void align(std::uint8_t* data) {
+bool align(std::uint8_t* data) {
     render::UiPanelPlacement p;
     if (!render::UiPanel(&p) || p.align != 1 || !device::active()) {
         ++g_skipped;
-        return;
+        return false;
     }
     Base b;
     {
@@ -219,7 +251,7 @@ void align(std::uint8_t* data) {
     }
     if (!b.valid || !(p.distance > 0.0f) || !(p.width > 0.0f) || !(p.height > 0.0f)) {
         ++g_skipped;
-        return;
+        return false;
     }
     // The projection's frame in the world at the last stereo frame: its origin is the head
     // (the midpoint of the eyes) mapped through the eye base as the eyes are
@@ -255,13 +287,13 @@ void align(std::uint8_t* data) {
     for (const double v : {pf.x, pf.y, pf.z, pr.x, pr.y, pr.z, pu.x, pu.y, pu.z, po.x, po.y, po.z})
         if (!std::isfinite(v)) {
             ++g_skipped;
-            return;
+            return false;
         }
     // The panel's edges as tangents from the head (left and down negative).
     const double dist = p.distance + hz;  // the panel's plane is at z = -distance
     if (!(dist > 0.05)) {
         ++g_skipped;
-        return;
+        return false;
     }
     const double l = (p.offsetX - p.width * 0.5 - hx) / dist, r = (p.offsetX + p.width * 0.5 - hx) / dist;
     const double t = (p.offsetY + p.height * 0.5 - hy) / dist, bt = (p.offsetY - p.height * 0.5 - hy) / dist;
@@ -302,11 +334,13 @@ void align(std::uint8_t* data) {
         g_last.offset_cm = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
         g_last.mode = p.align;
     }
+    return true;
 }
 #endif
 
 bool detour(const void* local_player, void* viewport, std::int32_t pass, std::uint8_t* data) {
     const bool ok = g_hook.original<GetProjectionDataFn>()(local_player, viewport, pass, data);
+    t_panel_view = false;
 #if FF7VR_ENGINE_WITH_RENDER
     if (ok && pass == 0 && data) {
         ++g_full;
@@ -338,9 +372,37 @@ bool detour(const void* local_player, void* viewport, std::int32_t pass, std::ui
                 if (r && g_skip.contains(r)) excluded = true;
         }
         if (excluded) ++g_excluded;
-        else align(data);
+        else t_panel_view = align(data);
     }
 #endif
+    return ok;
+}
+
+bool project_detour(const float* world, const std::int32_t* rect, const float* vp, float* out) {
+    const bool ok = g_project_hook.original<ProjectFn>()(world, rect, vp, out);
+    if (!t_panel_view || !g_clamp.load(std::memory_order_relaxed) || !world || !rect || !vp || !out) return ok;
+    const auto ret = reinterpret_cast<std::uintptr_t>(_ReturnAddress());
+    if (ret != g_ret_statics && ret != g_ret_layout) return ok;
+    ++g_marker_calls;
+    if (!ok) {
+        ++g_behind;
+        return ok;
+    }
+    // The point in clip space, as the function computes it (row vector times the matrix).
+    double c[4];
+    for (int j = 0; j < 4; ++j)
+        c[j] = static_cast<double>(world[0]) * vp[0 * 4 + j] + static_cast<double>(world[1]) * vp[1 * 4 + j] +
+               static_cast<double>(world[2]) * vp[2 * 4 + j] + vp[3 * 4 + j];
+    const double inset = kClampInset * (rect[3] - rect[1]);
+    double x = 0, y = 0;
+    if (math::clamp_to_view(c[0], c[1], c[3], rect[0], rect[1], rect[2], rect[3], inset, x, y) && std::isfinite(x) && std::isfinite(y)) {
+        const float in_x = out[0], in_y = out[1];
+        out[0] = static_cast<float>(x);
+        out[1] = static_cast<float>(y);
+        ++g_clamped;
+        std::lock_guard lk(g_mutex);
+        g_last_clamp = LastClamp{in_x, in_y, out[0], out[1], {rect[0], rect[1], rect[2], rect[3]}};
+    }
     return ok;
 }
 
@@ -361,6 +423,21 @@ void set_skip(const std::string& list) {
 }
 
 void set_target_test_panel(bool panel) { g_target_test_panel = panel; }
+
+void set_clamp(bool on) { g_clamp = on; }
+
+std::string clamp_command(const std::string& args) {
+    std::istringstream in(args);
+    std::string v;
+    in >> v;
+    if (v == "0" || v == "1") g_clamp = v == "1";
+    std::lock_guard lk(g_mutex);
+    const LastClamp& l = g_last_clamp;
+    return std::format("ok marker clamp {} (hook {}): marker projections with the panel's view {}, moved onto the edge {}, behind the head {}; "
+                       "last moved ({:.1f}, {:.1f}) -> ({:.1f}, {:.1f}) in {} {} {} {}",
+                       g_clamp.load() ? "on" : "off", g_project_hook.installed() ? "installed" : "not installed", g_marker_calls.load(),
+                       g_clamped.load(), g_behind.load(), l.in_x, l.in_y, l.out_x, l.out_y, l.rect[0], l.rect[1], l.rect[2], l.rect[3]);
+}
 
 std::string callers_command(const std::string& args) {
     std::istringstream in(args);
@@ -454,6 +531,35 @@ void start(std::uintptr_t base, bool known) {
     }
     g_ready = true;
     log::info("ui: marker alignment hook installed (ULocalPlayer::GetProjectionData +0x{:x})", rva);
+
+    // Markers outside the panel ([ui] align_clamp): FSceneView::ProjectWorldToScreen and the
+    // return addresses of its two widget callers, each checked at its call instruction
+    // (`call rel32` to the function right before the return address).
+    const auto pr = pattern::scan_module(base, kProjectPattern, pattern::Sections::Executable, 2);
+    if (!pr.unique() || (known && pr.first() - base != kProjectRva)) {
+        log::warn("ui: FSceneView::ProjectWorldToScreen not found ({} matches); markers outside the panel are not kept on it ([ui] align_clamp)",
+                  pr.matches.size());
+        return;
+    }
+    const auto calls_project = [&](std::uintptr_t ret) {
+        if (!known || g_exe_end <= base + ret) return false;
+        const auto* p = reinterpret_cast<const std::uint8_t*>(base + ret);
+        std::int32_t rel = 0;
+        std::memcpy(&rel, p - 4, sizeof(rel));
+        return p[-5] == 0xE8 && base + ret + static_cast<std::intptr_t>(rel) == pr.first();
+    };
+    if (calls_project(kStaticsReturn)) g_ret_statics = base + kStaticsReturn;
+    if (calls_project(kWidgetLayoutReturn)) g_ret_layout = base + kWidgetLayoutReturn;
+    if (!g_ret_statics && !g_ret_layout) {
+        log::warn("ui: the widget callers of FSceneView::ProjectWorldToScreen are not at their known places; [ui] align_clamp has no effect");
+        return;
+    }
+    if (!g_project_hook.create(reinterpret_cast<void*>(pr.first()), &project_detour)) {
+        log::warn("ui: FSceneView::ProjectWorldToScreen hook could not be installed; [ui] align_clamp has no effect");
+        return;
+    }
+    log::info("ui: marker clamp hook installed (FSceneView::ProjectWorldToScreen +0x{:x}, callers{}{})", pr.first() - base,
+              g_ret_statics ? " UGameplayStatics" : "", g_ret_layout ? " UWidgetLayoutLibrary" : "");
 }
 
 void publish(const FRotator& game_rot, const FVector& game_loc, float game_fov_deg, const FRotator& base_level, const FVector& base_loc,

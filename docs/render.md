@@ -170,6 +170,7 @@ All keys are optional. `ff7vr.ini` sits next to the DLL.
 | `[ui] mirror` | `1` | also draw the UI over the desktop window in stereo (the window shows an eye image, which no longer has the UI) |
 | `[ui] align` | `1` | world-anchored elements (markers, names, prompts) over their objects at any panel size; `2` = the panel takes the game camera's angle; `0` = neither (see [World-anchored elements](#world-anchored-elements)) |
 | `[ui] align_target_test` | `0` | the game's choice of the usable object (the interaction prompt) keeps the game camera's view; `1` = it sees the panel's view as well, which rejects objects more than about 18 degrees below eye level in first person (`docs/engine-module.md`, "Interaction prompts") |
+| `[ui] align_clamp` | `1` | with `align = 1`: a marker whose object is outside the panel's view (but in front of the head) is placed on the panel's edge in the object's direction; `0` = where the projection puts it, off the panel (`docs/engine-module.md`, "Markers outside the panel") |
 | `[ui] battle_size` | `0` | panel height in metres during a battle, `0` = unchanged |
 | `[ui] once_per_frame` | `1` | engine side: draw the UI for the first eye only (`0`: the game draws it for both eyes, as without the mod) |
 | `[foveation] ...` | on, `quality` | foveated rendering in stereo; keys in [Foveated rendering](#foveated-rendering) |
@@ -1448,7 +1449,14 @@ What remains with `align = 1`:
   whether a target is on screen) sees the panel's view as well. One such check is the
   game's choice of the usable object for the interaction prompt; it keeps the game
   camera's view (`[ui] align_target_test = 0`, `docs/engine-module.md`, "Interaction
-  prompts"). Not checked in battles.
+  prompts"). Not checked in battles;
+- the panel's view spans only the panel (about 18 degrees above and below the eye line
+  at the default size), so an object close below the player or far to the side projects
+  outside it and its marker would be drawn off the panel. `[ui] align_clamp = 1`
+  (default) moves such a marker onto the panel's edge (3 % of its height inside),
+  along the line from the panel's centre towards where the object is; objects behind
+  the head keep no marker. Only the game's widget placement is changed, not its
+  screen-space checks (`docs/engine-module.md`, "Markers outside the panel").
 
 ### Measured cost
 

@@ -1,5 +1,6 @@
 #include "ue_math.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace ff7vr::engine::math {
@@ -132,6 +133,25 @@ Vec level_boom(const ue::FRotator& camera_rotation, const ue::FVector& camera_lo
     const Quat q_yaw = quat_from_rotator(ue::FRotator{0.0f, camera_rotation.Yaw, 0.0f});
     const Vec v{camera_location.X - pivot.x, camera_location.Y - pivot.y, camera_location.Z - pivot.z};
     return add(pivot, rotate(q_yaw, rotate(conjugate(q_cam), v)));
+}
+
+bool clamp_to_view(double cx, double cy, double w, double x0, double y0, double x1, double y1, double inset, double& out_x,
+                   double& out_y) {
+    const double hw = (x1 - x0) * 0.5, hh = (y1 - y0) * 0.5;
+    const double mx = x0 + hw, my = y0 + hh;
+    // The point's offset from the centre in pixels, times w (the same direction, w > 0).
+    const double dx = cx * hw, dy = -cy * hh;
+    const double lx = hw - inset, ly = hh - inset;
+    // How far out the point is, in units of w: inside the shrunk rectangle when s <= w.
+    const double s = lx > 0.0 && ly > 0.0 ? std::max(std::fabs(dx) / lx, std::fabs(dy) / ly) : 0.0;
+    if (!(w > 0.0) || !(s > w)) {
+        out_x = w > 0.0 ? mx + dx / w : mx;
+        out_y = w > 0.0 ? my + dy / w : my;
+        return false;
+    }
+    out_x = mx + dx / s;
+    out_y = my + dy / s;
+    return true;
 }
 
 }  // namespace ff7vr::engine::math

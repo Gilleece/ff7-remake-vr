@@ -552,13 +552,16 @@ captures after the toggles (`h05_third_toggled`, `h08_third_after_toggles`,
   it then holds 8 s while the scan finds the marker of the new fight), or when the marker is
   shown for two polls in a row while the signal is on (the later fights of the area). It
   ends when the signal turns off, or when the marker has not been shown for
-  `battle_exit_seconds` (3 s). Shorter values flicker: the marker hides for 1.4, 2.0 and
-  2.3 s mid-fight while the target changes (recorded session; with 1.5 s the first fight
-  splits into four). `battle_objects = 0` gives the old behaviour (the signal alone).
+  `battle_exit_seconds` (5 s). Shorter values flicker: the marker hides for 1.4, 2.0 and
+  2.3 s mid-fight while the target changes (session of 2026-10-10; with 1.5 s the first fight
+  splits into four), and for 4.5 and 5.0 s (session of 2026-10-11, a target change and a
+  change of the controlled character with the ATB gauges still shown; 3 and 4 s split
+  those fights in two, 5 s keeps them whole and still separates the fights 20 s apart).
+  `ff7vr_engine_tests --replay <log> <seconds>` replays a log with another value. `battle_objects = 0` gives the old behaviour (the signal alone).
 
   Every change is logged with the condition that caused it, for example
   `player: battle started (battle signal on): third person`,
-  `player: battle ended (no battle objects shown for 3.0 s): first person`,
+  `player: battle ended (no battle objects shown for 5.0 s): first person`,
   `player: battle started (battle objects shown): third person`; changes of the signal
   itself as `player: battle signal 0 -> 1`. Test overrides: `fp combat 1|0` force the
   verdict, `fp combat area` forces the signal on and leaves the decision to the objects
@@ -567,9 +570,9 @@ captures after the toggles (`h05_third_toggled`, `h08_third_after_toggles`,
   verdict, the last reason, the signal and the object poll; `fp combat objects 0|1`,
   `fp combat exit <s>` and `fp combat classes <names>` change the settings live.
   `ff7vr_engine_tests` replays the recorded session (three fights found, at 567.5 to
-  629.9 s, 885.1 to 963.8 s and 1004.3 to 1032.7 s; the owner switched back to first person
-  by hand at 632.6 s after the first) and `ff7vr_engine_tests --replay <ff7vr.log>` replays
-  any log recorded with `battle_log = 1`.
+  631.9 s, 885.1 to 965.8 s and 1004.3 to 1034.7 s; the owner switched back to first person
+  by hand at 632.6 s after the first) and `ff7vr_engine_tests --replay <ff7vr.log> [seconds]`
+  replays any log recorded with `battle_log = 1`.
 
   Why the target marker: in the recorded session the other battle classes did not follow
   the fights closely. The damage-source components (`EndBattleDamageSourceComponent*`)
@@ -1063,7 +1066,7 @@ movement (not rotated by design), how it feels.
 | `head_offset` | `2 0 0` | forward, right, up in cm from the eye bones (or head bone), turned with the camera's yaw |
 | `eye_offset` | `10 0 75` | forward, right, up in cm from the pawn's location (capsule centre), turned with the camera's yaw; used with `eye = offset` and whenever the head bone cannot be read |
 | `battle_objects` | `1` | a fight also needs the battle HUD's target marker shown; it ends `battle_exit_seconds` after the marker goes (see "Combat"); `0` = the signal alone |
-| `battle_exit_seconds` | `3` | seconds without the target marker before a fight ends |
+| `battle_exit_seconds` | `5` | seconds without the target marker before a fight ends |
 | `battle_object_classes` | `BattleTarget_New_C` | the classes whose live instances count as battle objects (widgets: when visible; other classes: while alive); comma separated |
 | `battle_signal` | `EndBattleAPI.GetBattleSceneID result=0:4` | `Class.Function [world] [result=<offset>:<size>]`: a reflected function read every frame on a live object of that class (or its class default object for a static function); a non-zero result means a battle; empty = no automatic switch (see "Combat") |
 | `hide` | `pass` | `pass`: the character's own meshes are left out of the main pass (shadow and footsteps kept) and the mesh components of other actors attached to them (the sword) are hidden, while in first person; `meshes`: hide all of them (footsteps go silent); `none`: hide nothing; `bones`, `head`: experimental |
@@ -2609,6 +2612,69 @@ game's other users of the full pass in battles (screen-space target checks see t
 Check: `ui align 0|1|2` live, `uihook align` (counters, camera FOV and pitch, panel extents, eye base),
 `fp call PlayerController PlayerController.ProjectWorldLocationToScreen <hex>` with `[dev] unsafe_commands = 1`.
 
+### Markers outside the panel
+
+The panel's view spans only the panel: at the default 2.0 m at 3 m, 18.4 degrees above
+and below the eye line and 30.7 degrees to each side. An object close below the player
+(an enemy at your feet, a ladder you stand at) or far to the side therefore projects
+outside the view rectangle. The game's projection does not hide it:
+`FSceneView::ProjectWorldToScreen` returns true for any point in front of the view and a
+position outside the rectangle (`docs/re/engine.md`, "Where an off-screen marker is
+lost"), so the widget is drawn off the panel and not seen, or the widget's own code
+hides it. This is the owner's report of 2026-10-11 ("the markers align but disappear
+when you get close to them").
+
+`[ui] align_clamp = 1` (default; `uihook clamp 0|1` live) hooks
+`FSceneView::ProjectWorldToScreen` (`0x320bf70`). For its two widget callers,
+`UGameplayStatics::ProjectWorldToScreen` (Square Enix's marker and icon code goes through
+it via `0x1348940`; `PlayerController.ProjectWorldLocationToScreen` too) and
+`UWidgetLayoutLibrary` (UMG), and only when the full pass the caller just asked for was
+replaced by the panel's view, a point outside the rectangle shrunk by 3 % of its height is
+moved onto that shrunk rectangle's edge, along the line from the rectangle's centre to the
+point's unclamped position (computed from the clip coordinates, so it stays finite for a
+point just in front of the head). The result stays "in front" (true). Not changed:
+
+- points inside the panel (the placement is the game's, bit for bit);
+- points behind the head (`W <= 0`, the function returns false): no marker, as before;
+- the other callers of the function, which are game logic rather than widget placement:
+  the usable-object classifier (`0x1017cb1`, it keeps its own screen test) and the seven other
+  call sites (`docs/re/engine.md`);
+- the game camera's projections (`align = 0` or `2`, the virtual screen, the
+  `align_target_test` call).
+
+Why not a wider frustum: a projection is linear, so a view wider than the panel would
+scale every marker towards the centre (at 1.5 times the panel's span a marker at 70 % of
+the half-height would be about 4 degrees off its object). Clamping after the projection
+keeps the inside exact.
+
+Measured headless (Null backend, the owner's latest save, panel 2.0 m at 3 m,
+`captures/hud/meas-clamp-tp.json` and `meas-clamp-fp.json`, the 30 points of the table
+above plus 10 outside the panel at 1 to 3 m: 25, 40, 60 and 75 degrees below, 30 above,
+45 and 60 to the side and three diagonals), through
+`PlayerController.ProjectWorldLocationToScreen`:
+
+| | inside, 30 points (degrees, mean / max) | outside, 10 points |
+|---|---|---|
+| third person, `align_clamp = 1` | 0.00 / 0.00 | all on the edge (21.6 px inset of 720), within 0.01 px of the expected point, direction from the centre exact (0.00 degrees) |
+| third person, `align_clamp = 0` | 0.00 / 0.00 | where the projection puts them, up to 4450 px outside the 1280x720 rectangle |
+| first person, `align_clamp = 1` (2.0 m; 1.57 m) | 0.95 / 2.15; 0.31 / 0.64 | all on the edge; direction 0.0 to 1.4 degrees (2.0 m), 0.0 to 6.3 degrees (1.57 m) from the expected one |
+| first person, `align_clamp = 0` (2.0 m) | 0.66 / 1.92 | off the rectangle; the unclamped points themselves 0.1 to 6.2 degrees from the expected direction |
+
+In first person the eye base follows Cloud's idle animation between the status snapshot
+and the calls (see above), so both series carry the same noise; the clamp counter rose by
+exactly 10 per series of 40 points, so none of the 30 inside points was moved. The game's
+own calls were moved as well (18 in the first seconds of gameplay, for example from
+(3672, -377) to (1258, 210), the right edge); in that save no marker was visible, so no
+eye or UI capture shows a clamped marker yet (`captures/hud/clamp2`: UI dumps with the
+clamp on and off at three headings are identical).
+
+Not verified: a real marker on the edge in a capture or a headset (the prompt over a
+usable object, a battle target, an enemy name); battles (the battle HUD's markers are
+assumed to go through `0x1348940`, not traced). A marker the game wants hidden when its
+object is off screen is now shown on the edge instead, which is the request, but the
+game's own off-screen indicators (if a widget draws an arrow for an off-screen target)
+were not seen.
+
 ### Interaction prompts
 
 The interaction prompt (the icon over a ladder, door or item the player can use; widget
@@ -2646,11 +2712,12 @@ the game camera's view puts the object at (0.53, 0.61) of the view, the panel's 
 targetprobe`); in third person the panel's view passed too (0.52, 0.71). At 3.85 m the
 panel's view still passed (y 0.96).
 
-Not verified: the prompt and its button in a headset. What remains with
-`align_target_test = 0`: the icon's placement still follows the panel, so for an object
-below the panel's lower edge the icon is drawn off the panel (not seen) although the
-object is selected and the button works; a larger or lower panel (`[ui] size`, `offset`)
-shows more of them. The prompt instance is destroyed and created again whenever the
+Not verified: the prompt and its button in a headset. With `align_target_test = 0`
+the icon's placement still follows the panel, so for an object below the panel's lower
+edge the icon would be drawn off the panel (not seen) although the object is selected
+and the button works; `[ui] align_clamp = 1` (default, "Markers outside the panel")
+places it on the panel's lower edge instead (the icon goes through
+`UGameplayStatics::ProjectWorldToScreen`; not yet seen with a real prompt). The prompt instance is destroyed and created again whenever the
 manager hides an icon (target farther than about 55 m, or another hide call) and shows
 it again: a new `FieldTarget_01_C` per appearance is normal. Why it sometimes stays away
 "until a save is reloaded" is not found; the screen test above makes first-person prompts

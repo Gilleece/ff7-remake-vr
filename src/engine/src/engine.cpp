@@ -312,6 +312,7 @@ bool start(const StartupContext& ctx) {
         diag::set_battle_log(cfg.get_bool("first_person", "battle_log", false));
         diag::set_prompt_log(cfg.get_bool("first_person", "prompt_log", false));
         ui_align::set_target_test_panel(cfg.get_bool("ui", "align_target_test", false));
+        ui_align::set_clamp(cfg.get_bool("ui", "align_clamp", true));
         g_opt.bloom_fix = cfg.get_bool("stereo", "bloom_fix", true);
         g_opt.ao_fix = cfg.get_bool("stereo", "ao_fix", true);
         g_opt.distortion_fix = cfg.get_bool("stereo", "distortion_fix", true);

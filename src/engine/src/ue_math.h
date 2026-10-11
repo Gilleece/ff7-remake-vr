@@ -65,4 +65,13 @@ void compose_eye(const EyeCameraInput& in, ue::FRotator& out_rotation, ue::FVect
 // the camera pitches is brought back to the pivot's height.
 Vec level_boom(const ue::FRotator& camera_rotation, const ue::FVector& camera_location, const Vec& pivot);
 
+// A point in front of a view, projected to clip space (cx, cy, w with w > 0), placed on a
+// view rectangle (x0, y0)-(x1, y1) in pixels, y down. A point outside the rectangle shrunk by
+// `inset` pixels on every side is moved onto that shrunk rectangle's edge along the line
+// from the rectangle's centre (the direction of the point on the screen); a point inside
+// is placed as FSceneView::ProjectWorldToScreen places it. Works for any w > 0, however
+// small (no division by w for points far outside). Returns true when the point was moved.
+bool clamp_to_view(double cx, double cy, double w, double x0, double y0, double x1, double y1, double inset, double& out_x,
+                   double& out_y);
+
 }  // namespace ff7vr::engine::math

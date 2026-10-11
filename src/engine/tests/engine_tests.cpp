@@ -98,12 +98,16 @@ HostQuat xr_pitch(double deg) {  // rotation about +X (OpenXR right): positive l
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc == 3 && std::strcmp(argv[1], "--replay") == 0) {
-        // ff7vr_engine_tests --replay <ff7vr.log>: the fights the detection finds in a log
-        // recorded with [first_person] battle_log = 1.
+    if ((argc == 3 || argc == 4) && std::strcmp(argv[1], "--replay") == 0) {
+        // ff7vr_engine_tests --replay <ff7vr.log> [exit seconds]: the fights the detection
+        // finds in a log recorded with [first_person] battle_log = 1, with the default
+        // battle_exit_seconds or the one given.
         const std::vector<Sample> tl = read_log(argv[2]);
         std::vector<std::string> reasons;
-        const auto fights = replay(tl, battle::Config{}, &reasons);
+        battle::Config cfg;
+        if (argc == 4) cfg.exit_seconds = std::atof(argv[3]);
+        std::printf("battle_exit_seconds %.1f\n", cfg.exit_seconds);
+        const auto fights = replay(tl, cfg, &reasons);
         std::printf("%zu battle diag samples, %zu fight(s)\n", tl.size(), fights.size());
         for (const auto& r : reasons) std::printf("  %s\n", r.c_str());
         return 0;
@@ -230,6 +234,27 @@ int main(int argc, char** argv) {
         check(near(b3.x, 1000, 0.05) && near(b3.y, 1600, 0.05) && near(b3.z, 160, 0.05), "level boom: zero pitch unchanged");
     }
 
+    // Markers outside the panel's view: onto the edge of the rectangle shrunk by the inset,
+    // along the line from the centre; inside unchanged (rectangle 0..1280 x 0..720, inset 20).
+    {
+        double x = 0, y = 0;
+        // inside: placed as FSceneView::ProjectWorldToScreen places it
+        check(!clamp_to_view(0.5, -0.5, 2.0, 0, 0, 1280, 720, 20, x, y) && near(x, 800, 1e-9) && near(y, 450, 1e-9), "clamp: a point inside is unchanged");
+        // straight below, far out: bottom edge at the centre column
+        check(clamp_to_view(0.0, -10.0, 1.0, 0, 0, 1280, 720, 20, x, y) && near(x, 640, 1e-9) && near(y, 700, 1e-9), "clamp: below the view -> bottom edge");
+        // down and to the right at 45 degrees on the screen: the side reached first (here the bottom)
+        check(clamp_to_view(2.0 * 360.0 / 640.0, -2.0, 1.0, 0, 0, 1280, 720, 20, x, y) && near(x - 640, y - 360, 1e-9) && near(y, 700, 1e-9),
+              "clamp: down-right keeps the direction on the screen");
+        // far to the left: left edge, height kept on the line from the centre
+        check(clamp_to_view(-8.0, 0.4, 1.0, 0, 0, 1280, 720, 20, x, y) && near(x, 20, 1e-9) && near(y, 360 - 0.4 * 360 * (620.0 / (8.0 * 640)), 1e-9),
+              "clamp: far left -> left edge");
+        // a point just in front of the view plane (w tiny) still lands on the edge, finite
+        check(clamp_to_view(1.0, -3.0, 1e-30, 0, 0, 1280, 720, 20, x, y) && std::isfinite(x) && std::isfinite(y) && near(y, 700, 1e-6),
+              "clamp: w close to 0 gives a finite edge point");
+        // an offset rectangle (a view that does not start at 0, 0)
+        check(clamp_to_view(0.0, 5.0, 1.0, 100, 50, 1380, 770, 20, x, y) && near(x, 740, 1e-9) && near(y, 70, 1e-9), "clamp: offset rectangle, above -> top edge");
+    }
+
     // Fight detection on the recorded session.
     {
         std::vector<std::string> reasons;
@@ -238,10 +263,10 @@ int main(int argc, char** argv) {
         check(f.size() == 3, "recorded session: three fights");
         if (f.size() == 3) {
             check(near(f[0].first, 567.4, 0.11), "fight 1 starts with the battle signal (567.4 s)");
-            check(f[0].second > 629.0 && f[0].second < 631.0, "fight 1 ends about 3 s after the marker went (627.0 s), before the manual switch at 632.6 s");
+            check(f[0].second > 631.0 && f[0].second < 632.6, "fight 1 ends about 5 s after the marker went (627.0 s), before the manual switch at 632.6 s");
             check(f[1].first > 884.9 && f[1].first < 885.3, "fight 2 starts with the marker (885.0 s)");
-            check(f[1].second > 963.0 && f[1].second < 965.0, "fight 2 ends about 3 s after the marker went (960.9 s)");
-            check(f[2].first > 1004.1 && f[2].first < 1004.4 && f[2].second > 1032.0 && f[2].second < 1034.0, "fight 3: 1004.1 to about 1032.7 s");
+            check(f[1].second > 965.0 && f[1].second < 967.0, "fight 2 ends about 5 s after the marker went (960.9 s)");
+            check(f[2].first > 1004.1 && f[2].first < 1004.4 && f[2].second > 1034.0 && f[2].second < 1036.0, "fight 3: 1004.1 to about 1034.7 s");
         }
         // 1.5 s and 2 s are too short: the marker hides for 1.4, 2.0 and 2.3 s mid-fight while the target changes.
         battle::Config short_exit;
@@ -249,6 +274,12 @@ int main(int argc, char** argv) {
         check(replay(kRecorded, short_exit).size() == 6, "exit after 1.5 s would split fight 1 into four");
         short_exit.exit_seconds = 2.0;
         check(replay(kRecorded, short_exit).size() == 5, "exit after 2 s would split fight 1 into three");
+        // The session of 2026-10-11: the marker hid for 4.5 s and 5.0 s mid-fight (target and
+        // controlled character changes); 3 s split those fights in two, 5 s keeps them whole.
+        const std::vector<Sample> gap = {{0.0, 0, -1}, {1.0, 1, 1}, {20.0, 1, 0}, {24.5, 1, 1}, {40.0, 1, 0}, {80.0, 1, 0}};
+        short_exit.exit_seconds = 3.0;
+        check(replay(gap, short_exit).size() == 2, "exit after 3 s splits a fight at a 4.5 s gap");
+        check(replay(gap, battle::Config{}).size() == 1, "exit after 5 s (default) keeps a fight with a 4.5 s gap whole");
         // The signal alone (battle_objects = 0): one fight from 567 s to the end.
         battle::Config signal_only;
         signal_only.objects = false;
@@ -264,7 +295,7 @@ int main(int argc, char** argv) {
         const auto loaded = replay({{0.0, 1, 0}, {30.0, 1, 0}}, battle::Config{});
         check(loaded.empty(), "signal on from the start without a marker: no fight");
         const auto loaded2 = replay({{0.0, -1, -1}, {1.0, 1, 0}, {5.0, 1, 1}, {9.0, 1, 0}, {20.0, 1, 0}}, battle::Config{});
-        check(loaded2.size() == 1 && near(loaded2[0].first, 5.1, 0.11) && near(loaded2[0].second, 11.9, 0.11), "signal on from the start: the marker starts and ends the fight");
+        check(loaded2.size() == 1 && near(loaded2[0].first, 5.1, 0.11) && near(loaded2[0].second, 13.9, 0.11), "signal on from the start: the marker starts and ends the fight");
     }
 
     std::printf("%s (%d failure%s)\n", g_failures ? "RESULT: FAIL" : "RESULT: PASS", g_failures, g_failures == 1 ? "" : "s");
