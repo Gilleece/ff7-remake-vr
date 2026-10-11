@@ -1043,6 +1043,18 @@ card's power reading of a separate logger showed (280 -> 183 W at 95 % utilisati
 bus 25 %). The classifier is a pure function (`src/render/src/frame_budget_classify.cpp`)
 with unit tests (`ff7vr_render_tests`).
 
+Replayed over the timing blocks of the headset sessions (window medians as logged, the skip
+rules simplified to "not stereo, a frame of 500 ms, 30 s after either"): in the 10/10 21:26
+session (foveation on, so GPU figures exist) the stall at 21:53:45 is `GPU-bound, the stall's
+signature` from its second over-budget window (GPU 22.2 ms against 10.6 ms in the last window
+within budget) to the end, where the old text advised `render_scale = 0.9`; the session's
+other over-budget windows (65 fps at 14.7 ms GPU from the start, a 72-fps stretch with a 22-ms
+median interval and 11.7 ms GPU) keep their causes (GPU-bound with the settings advice,
+runtime-bound). The 10/10 22:49 stall began during a load, so every window until the session
+ended was skipped, as before. The 11/10 18:10 session had no GPU figures (foveation off) and
+cannot be replayed; with the new timers its 18:19 windows (interval 26.4 ms, frame wait
+24.3 ms) are GPU-bound if the GPU took 12.5 ms or more.
+
 `INFO frame budget: back within budget` follows at the first window within budget. At most
 one warning a minute; nothing else is logged. The reflections fix has no timer of its own,
 so its share is not named. `render::frame_budget_summary()` gives one short line for the
