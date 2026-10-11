@@ -677,6 +677,8 @@ before the start; C started in the state, which ended 17 s after gameplay, 80 s 
 command), and was driven by `tools\bench\stall-run.ps1`; the onset is the first
 sample under 1 GB/s of its 3-s probe loop (or the first slow upload check, every 10 s).
 
+Runs H to Q (from 01:38 on) came after a restart of Windows at 01:34 (see below).
+
 | Run (11/10) | Build and settings | What was done (seconds after gameplay) | Onset of the state |
 |---|---|---|---|
 | first reproduction (10/10) | DLSS on at 0.60 (engine eye target 3960x2120) | 60 `dlss off` (target 6604x3533), 100 `dynres scale 0.6`, then `xr-sim pace 2` / `pace 1` | about 35 s after `dynres` (frame times only, no probe) |
@@ -693,6 +695,7 @@ sample under 1 GB/s of its 3-s probe loop (or the first slow upload check, every
 | N | standard build, as E, `light_fix = 1` with **`light_volume_pool = 1`** (no per-frame light volume buffers) | 60 `dynres scale 0.6`, then 4 minutes | partial, as L and M |
 | O | standard build, as E (`light_fix = 1`, no pool): the control for N | the same | partial, as L to N (two slow upload checks, one warning) |
 | P | as O, and **no census** (`[log] d3d11_census = 0`) | the same | partial, as L to O |
+| Q | DLSS build, the first reproduction's exact sequence (as r1b and C) | 60 `dlss off`, 100 `dynres scale 0.6`, 135 `xr-sim pace 2`, 165 `pace 1` | partial: the scene 7.4-7.5 ms instead of 5.4 after the change, steady at 89 fps for 3 minutes; the upload check 0.4-2 / 10-11 GB/s |
 | I | DLSS at the headset player's settings: eyes 3476x3396, DLSS 0.60 (engine target 4168x2038), foveation `performance` | render scale 0.9, 0.95, 0.9, 1.0, 0.9 every 30-60 s (as he did from the settings panel); each change moved the game's resident memory by 1.4-1.5 GB | none in 4 minutes (single 3-s dips to 0.8 GB/s) |
 | H | **the game without the mod**, flat | the window resized 10 times between 2560x1440 and 1265x682 (the largest the game allows on this 2560x1440 monitor), every 30 s | none in 6 minutes (probe loop 4-14 GB/s throughout and after the exit) |
 
@@ -711,19 +714,23 @@ What the runs show:
   E, G: onset before any). Not tested for lack of time: the depth layer, `ssr_fix`, the UI layer,
   the settings panel's keyboard hook and `game_vignette` each switched off (none of them
   allocates anything when the size changes; the census shows no per-frame allocation from them).
-- **From about 02:00 the same trigger no longer produced it.** Five deep onsets in five
-  comparable runs between 00:43 and 01:27 (C, D, E, F, G); from 02:03 on six runs with the same
-  kind of trigger (J, L, M, N, O, P) all stopped at a milder, steady state: reads of system memory
-  alternating between about 0.5 and 4-10 GB/s, the GPU 40-60 % busy at the same 139 W where the
-  deep state shows 95-99 %, the scene 40 % slower than before the change but stable at 90 fps for
-  4-5 minutes. That held with the light fix off (L, M), with the light volume pool (N) and without
-  either (O, P, the controls), and without the census (P). So none of those decides it; what
-  changed in the machine between 01:30 and 02:00 is not known (the card's PCIe replay counter did
-  not move, the link stayed at gen 4 x8).
+- **After a restart of Windows the same trigger no longer produced it.** Five deep onsets in
+  five comparable runs between 00:43 and 01:27 (C, D, E, F, G), 31 hours after the previous boot.
+  Windows was restarted at 01:34 (after the PC's Wi-Fi adapter, another PCIe device, had failed
+  with internal errors at 01:21; it had done so once before tonight, at 00:56, during run D's
+  deep state). After it no run reached the deep state (H to Q); every run with the same kind of
+  trigger (J, L, M, N, O, P, Q) stopped at a milder, steady state: reads of system memory
+  alternating between about 0.5 and 4-10 GB/s, the GPU 40-60 % busy at the same 139 W where the deep state shows 95-99 %, the scene
+  40 % slower than before the change but stable at 90 fps for 4-5 minutes. That held with the light
+  fix off (L, M), with the light volume pool (N) and without either (O, P, the controls), without
+  the census (P) and with the first reproduction's exact sequence (Q). The card's PCIe replay
+  counter, 8,167 before the restart, began again from zero (193 at 02:57); the link stayed at
+  gen 4 x8. The headset sessions with the stall (10/10 21:53 and 22:49) came 28-29 hours after
+  a boot as well.
 - **At the headset player's own settings** (I: engine target 4168x2038 with DLSS at 0.60) five
   render-scale changes did not start it in 4 minutes, against one change each in C to G with the
-  6604x3533 target; but I ran at 01:52, close to the change above, so it does not show that the
-  smaller size is safe.
+  6604x3533 target; but I ran after the restart, when no setting reached the deep state, so it
+  says nothing about the size.
 
 The headset sessions it was first seen in had no such change before the onset: at 21:53:45 on
 10/10 (a battle; the last render-scale change was 20 minutes earlier) and at 22:49:30 (an area
@@ -794,7 +801,8 @@ of system memory rather than one pass doing more work.
   a row). The frame budget warning names the cause `transfer-bound` when the latest check is
   below 0.5 GB/s (E, G), before its other tests.
 - **The remedy for the player:** quit and start the game again; the next start ended the state
-  every time (seven of seven tonight).
+  every time (seven of seven tonight). Untested but suggested by the restart at 01:34: restart
+  Windows before a long headset session.
 - **The light volume pool** (above): built and working, off by default, its effect on the state
   not shown.
 - **Not done:** avoiding the onset. The mod's own resizes (render scale, dynamic resolution,
@@ -810,6 +818,10 @@ of system memory rather than one pass doing more work.
   times, why it deepens over a minute or two, why it outlasts the process and what in a game
   start ends it (a separate process creating devices, allocating 6 GB or uploading 768 MB does
   not).
+- Whether the machine's uptime or an earlier fault (the Wi-Fi adapter's failures, the PCIe
+  replays) is what makes the deep state possible: tonight it reproduced at will before a restart
+  of Windows and not at all after it (nine runs, H to Q). A reboot before a long headset session is
+  the cheapest thing to try.
 - Whether other PCs get it the same way. This card trains PCIe gen 4 x8 in an x16 slot, its
   replay counter stood at 8,167 tonight (it did not move at any onset or end), and MSI
   Afterburner applies a memory offset and a voltage curve; stock clocks, another driver and a
