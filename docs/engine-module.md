@@ -544,13 +544,16 @@ captures after the toggles (`h05_third_toggled`, `h08_third_after_toggles`,
   it then holds 8 s while the scan finds the marker of the new fight), or when the marker is
   shown for two polls in a row while the signal is on (the later fights of the area). It
   ends when the signal turns off, or when the marker has not been shown for
-  `battle_exit_seconds` (3 s). Shorter values flicker: the marker hides for 1.4, 2.0 and
-  2.3 s mid-fight while the target changes (recorded session; with 1.5 s the first fight
-  splits into four). `battle_objects = 0` gives the old behaviour (the signal alone).
+  `battle_exit_seconds` (5 s). Shorter values flicker: the marker hides for 1.4, 2.0 and
+  2.3 s mid-fight while the target changes (session of 2026-10-10; with 1.5 s the first fight
+  splits into four), and for 4.5 and 5.0 s (session of 2026-10-11, a target change and a
+  change of the controlled character with the ATB gauges still shown; 3 and 4 s split
+  those fights in two, 5 s keeps them whole and still separates the fights 20 s apart).
+  `ff7vr_engine_tests --replay <log> <seconds>` replays a log with another value. `battle_objects = 0` gives the old behaviour (the signal alone).
 
   Every change is logged with the condition that caused it, for example
   `player: battle started (battle signal on): third person`,
-  `player: battle ended (no battle objects shown for 3.0 s): first person`,
+  `player: battle ended (no battle objects shown for 5.0 s): first person`,
   `player: battle started (battle objects shown): third person`; changes of the signal
   itself as `player: battle signal 0 -> 1`. Test overrides: `fp combat 1|0` force the
   verdict, `fp combat area` forces the signal on and leaves the decision to the objects
@@ -559,9 +562,9 @@ captures after the toggles (`h05_third_toggled`, `h08_third_after_toggles`,
   verdict, the last reason, the signal and the object poll; `fp combat objects 0|1`,
   `fp combat exit <s>` and `fp combat classes <names>` change the settings live.
   `ff7vr_engine_tests` replays the recorded session (three fights found, at 567.5 to
-  629.9 s, 885.1 to 963.8 s and 1004.3 to 1032.7 s; the owner switched back to first person
-  by hand at 632.6 s after the first) and `ff7vr_engine_tests --replay <ff7vr.log>` replays
-  any log recorded with `battle_log = 1`.
+  631.9 s, 885.1 to 965.8 s and 1004.3 to 1034.7 s; the owner switched back to first person
+  by hand at 632.6 s after the first) and `ff7vr_engine_tests --replay <ff7vr.log> [seconds]`
+  replays any log recorded with `battle_log = 1`.
 
   Why the target marker: in the recorded session the other battle classes did not follow
   the fights closely. The damage-source components (`EndBattleDamageSourceComponent*`)
@@ -1054,7 +1057,7 @@ movement (not rotated by design), how it feels.
 | `head_offset` | `2 0 0` | forward, right, up in cm from the eye bones (or head bone), turned with the camera's yaw |
 | `eye_offset` | `10 0 75` | forward, right, up in cm from the pawn's location (capsule centre), turned with the camera's yaw; used with `eye = offset` and whenever the head bone cannot be read |
 | `battle_objects` | `1` | a fight also needs the battle HUD's target marker shown; it ends `battle_exit_seconds` after the marker goes (see "Combat"); `0` = the signal alone |
-| `battle_exit_seconds` | `3` | seconds without the target marker before a fight ends |
+| `battle_exit_seconds` | `5` | seconds without the target marker before a fight ends |
 | `battle_object_classes` | `BattleTarget_New_C` | the classes whose live instances count as battle objects (widgets: when visible; other classes: while alive); comma separated |
 | `battle_signal` | `EndBattleAPI.GetBattleSceneID result=0:4` | `Class.Function [world] [result=<offset>:<size>]`: a reflected function read every frame on a live object of that class (or its class default object for a static function); a non-zero result means a battle; empty = no automatic switch (see "Combat") |
 | `hide` | `pass` | `pass`: the character's own meshes are left out of the main pass (shadow and footsteps kept) and the mesh components of other actors attached to them (the sword) are hidden, while in first person; `meshes`: hide all of them (footsteps go silent); `none`: hide nothing; `bones`, `head`: experimental |

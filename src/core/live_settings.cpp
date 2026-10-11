@@ -69,7 +69,7 @@ constexpr Default kDefaults[] = {
     {"first_person", "auto_combat", "1"},
     {"first_person", "battle_signal", "EndBattleAPI.GetBattleSceneID result=0:4"},
     {"first_person", "battle_objects", "1"},
-    {"first_person", "battle_exit_seconds", "3"},
+    {"first_person", "battle_exit_seconds", "5"},
     {"first_person", "toggle_key", "36"},
     {"first_person", "pad_toggle", "1"},
     {"first_person", "blend_seconds", "0.35"},

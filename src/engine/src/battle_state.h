@@ -25,7 +25,7 @@ namespace ff7vr::engine::battle {
 struct Config {
     bool objects = true;              // [first_person] battle_objects: 0 = the signal alone decides
     int enter_polls = 2;              // consecutive polls with objects shown before a fight starts
-    double exit_seconds = 3.0;        // [first_person] battle_exit_seconds: no objects this long ends a fight
+    double exit_seconds = 5.0;        // [first_person] battle_exit_seconds: no objects this long ends a fight
     double rise_grace_seconds = 8.0;  // after a start by the signal, how long a fight holds without objects
 };
 

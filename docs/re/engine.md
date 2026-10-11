@@ -1289,6 +1289,13 @@ detection built on it is described in `docs/engine-module.md` ("Combat").
   changes (575.6-576.7, 599.6-601.6, 607.9-610.2, 617.8-619.2 s) and during a battle
   sequence (931.1-931.3 s). The owner switched back to first person by hand at 632.6 s,
   5.6 s after the marker went at the end of the first fight.
+- A second session (2026-10-11, `battle_log = 1`, about 6 minutes of fights in one area)
+  has longer mid-fight gaps of the marker: 4.5 s (221.3-225.8 s of that log's diagnostic
+  clock) and 5.0 s (319.3-324.2 s, while the controlled character changed from Tifa to
+  Barret); in both, `ATBGauge_C` (3 of 3) and `Command_C` stayed shown. Fights separated
+  by exploration were 20 s or more apart. Replayed with `ff7vr_engine_tests --replay`:
+  3 and 4 s give five fights, 5 to 8 s three; the 2026-10-10 session gives three at every
+  value from 3 to 8 s. Hence `battle_exit_seconds = 5`.
 - Classes that appear with fights but do not follow their end: `ATBEffect_Cell_C`
   (from 575.5 s, 8 s into the first fight, when an ATB bar first fills; gone at 671.0,
   989.7, 1050.0 s), `EndBattleDamageSourceComponent{Bullet,Stay,Homing,Drive,Laser}` (as

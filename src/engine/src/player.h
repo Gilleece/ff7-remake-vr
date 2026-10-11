@@ -45,7 +45,7 @@ struct Settings {
     std::atomic<bool> fp_default{true};      // [first_person] default: first person outside battles
     std::atomic<bool> auto_combat{true};     // [first_person] auto_combat
     std::atomic<bool> battle_objects{true};  // [first_person] battle_objects: a fight needs the battle HUD's target marker too
-    std::atomic<float> battle_exit_seconds{3.0f};  // [first_person] battle_exit_seconds: no marker this long ends a fight
+    std::atomic<float> battle_exit_seconds{5.0f};  // [first_person] battle_exit_seconds: no marker this long ends a fight
     std::atomic<float> eye_forward{10.0f}, eye_right{0.0f}, eye_up{75.0f};  // [first_person] eye_offset (cm, from the pawn's location; fallback)
     std::atomic<bool> eye_head{true};        // [first_person] eye = head (the head bone) | offset
     std::atomic<float> head_forward{2.0f}, head_right{0.0f}, head_up{0.0f};  // [first_person] head_offset (cm, from the eye bones or the head bone)
