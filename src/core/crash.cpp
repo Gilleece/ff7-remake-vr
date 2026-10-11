@@ -223,8 +223,27 @@ void hand_off(EXCEPTION_POINTERS* ep, bool first_chance) {
     ReleaseSRWLockExclusive(&g_serial);
 }
 
+// The mod probes game memory under __try in a few places (object names, bone tables,
+// console variables); a fault raised by one of those is caught by its own handler and
+// is not a crash. A first-chance report for it would write a dump and stall the thread
+// for seconds, which happened on a Game Over reload. So faults raised inside this DLL
+// are counted and left to the unhandled-exception filter; faults in the game's own code
+// (the ones a bad hook or patch would cause) are still reported first-chance.
+module::Info g_self;
+std::atomic<unsigned> g_own_faults{0};
+
 LONG CALLBACK vectored_handler(EXCEPTION_POINTERS* ep) {
-    if (is_fatal_code(ep->ExceptionRecord->ExceptionCode)) hand_off(ep, true);
+    if (!is_fatal_code(ep->ExceptionRecord->ExceptionCode)) return EXCEPTION_CONTINUE_SEARCH;
+    const auto ip = reinterpret_cast<std::uintptr_t>(ep->ExceptionRecord->ExceptionAddress);
+    if (g_self.size && g_self.contains(ip)) {
+        const unsigned n = g_own_faults.fetch_add(1) + 1;
+        if (n <= 3 || (n % 100) == 0)
+            log::write(log::Level::Debug, std::format("crash: fault {} at {}+{:#x} inside the mod, left to its own handler ({} so far)",
+                                                     code_name(ep->ExceptionRecord->ExceptionCode), log::narrow(g_self.path.filename().wstring()),
+                                                     ip - g_self.base, n));
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    hand_off(ep, true);
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
@@ -252,6 +271,7 @@ bool install(const Options& options) {
         return false;
     }
     SetThreadDescription(g_worker, L"ff7vr crash reporter");
+    g_self = module::self();
     if (g_opts.first_chance) g_veh = AddVectoredExceptionHandler(1, vectored_handler);
     g_prev_filter = SetUnhandledExceptionFilter(unhandled_filter);
     log::info("crash: handler installed (first_chance={}, max_reports={}, max_dumps={}, dumps in {})",

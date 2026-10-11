@@ -223,7 +223,11 @@ FATAL   minidump written: ...\End\Binaries\Win64\ff7vr-crash-20261005-123631-193
 During normal runs (title screen, menus, loading, gameplay) no first-chance
 report was produced. A first-chance report of an exception that the game
 handles itself is possible in principle; it is marked "first-chance" and
-capped. Set `[crash] first_chance = 0` if that ever becomes noisy.
+capped. Set `[crash] first_chance = 0` if that ever becomes noisy. A fault raised inside
+the mod's own code is not reported first-chance: the mod probes game memory under its
+own handlers in a few places, and such a caught fault is not a crash (a Game Over reload
+once produced two dumps and a stall from exactly that). Those are counted in a debug
+line; a real crash inside the mod still reaches the unhandled-exception filter.
 
 ## How the game is launched, and why
 
