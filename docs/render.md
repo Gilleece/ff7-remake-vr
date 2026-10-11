@@ -495,6 +495,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev\send-input.ps1 -Pi
 | `xr-sim yawrate <deg/s>` | Null backend: the head turns at a constant rate with the wall clock, so every location (the frame wait's and a late one) sees the yaw of its own moment (`0` = off) |
 | `xr-sim pace <n>` | Null backend: the frame wait releases one frame every n refresh periods (a runtime that halves its rate) while the reported refresh rate stays the same; `pace 1` = normal (test of the frame budget's runtime-bound case) |
 | `budget status`, `budget on`, `budget off` | the frame budget warning ([Frame budget](#frame-budget)): the summary line, the last window's figures, warnings written and held back, the last disturbance |
+| `upload status`, `upload now` | the upload check ([Timing](#timing)): the latest copy rate from system memory to the card, checks, slow ones, lost ones; `now` times one copy at the next Present |
+| `census status` | with `[log] d3d11_census = 1`: D3D11 objects created on the game's device since the start, by this mod (with its busiest call sites), the game (with its busiest buffer call sites, buffer kinds and dynamic vertex buffer call stacks) and other modules |
+| `bufpool status`, `bufpool on`, `bufpool off` | with `[stereo] light_volume_pool = 1`: the ring for the light volumes' vertex buffers (`docs/benchmarking.md`, "Mid-session stall"): installed, served, ring buffers created, other buffers passed on; `off` / `on` pause and resume it |
 | `xr-sim late-yaw <deg>` | Null backend: an extra yaw that only late locations (`RelocateViews`) see, a deterministic test of the late update (`docs/engine-module.md`, "Late update of the head pose") |
 | `xr-sim depth` | Null backend: depth images written, frames with a depth layer, the last nearZ / farZ |
 | `xr-sim head <yaw deg> [pitch deg] [x y z m]` | Null backend: sets the emulated head pose (on top of `[xr] null_motion`) |
