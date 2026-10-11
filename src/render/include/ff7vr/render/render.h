@@ -108,6 +108,9 @@ struct StereoSubmit {
     DXGI_FORMAT viewFormat = DXGI_FORMAT_UNKNOWN;  // required for typeless textures (B8G8R8A8_UNORM for the engine's target)
     xr::ColorEncoding encoding = xr::ColorEncoding::Srgb;
     xr::Rect eyeRects[2]{};                        // width/height 0 = left / right half
+    // Stretch each eye's rect to the whole swapchain image, so the projection layer's image
+    // size does not change when the rects do (xr::EyeSubmit::fill).
+    bool fillEyes = false;
     bool haveRenderedViews = false;                // true: renderedViews are what the image was rendered with
     xr::View renderedViews[2]{};                   // (default: the views BeginGameFrame returned)
     // Scene depth for the depth layer (XR_KHR_composition_layer_depth), only while

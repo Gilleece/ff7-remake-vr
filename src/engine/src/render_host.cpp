@@ -43,6 +43,7 @@ HostPose to_host(const xr::Pose& p) {
 struct Handover {
     bool valid = false;
     bool from_dlss = false;
+    bool fill = false;  // stretched to the runtime's eye size
     std::uint32_t w[2]{}, h[2]{};
     std::uint64_t frames = 0;
     std::chrono::steady_clock::time_point since{};
@@ -50,21 +51,22 @@ struct Handover {
 };
 Handover g_handover;  // the presenting thread only
 
-std::string handover_text(const std::uint32_t w[2], const std::uint32_t h[2], bool from_dlss) {
+std::string handover_text(const std::uint32_t w[2], const std::uint32_t h[2], bool from_dlss, bool fill) {
     std::string share;
     render::EyeSetup es;
     if (render::GetEyeSetup(&es) && es.eyeWidth && es.eyeHeight) {
         auto pct = [&](std::uint32_t v, std::uint32_t full) { return 100.0 * std::min(v, full) / full; };
-        share = std::format(" ({:.0f} % x {:.0f} % and {:.0f} % x {:.0f} % of the runtime's eye {}x{})", pct(w[0], es.eyeWidth), pct(h[0], es.eyeHeight),
-                            pct(w[1], es.eyeWidth), pct(h[1], es.eyeHeight), es.eyeWidth, es.eyeHeight);
+        share = std::format(" ({:.0f} % x {:.0f} % and {:.0f} % x {:.0f} % of the runtime's eye {}x{}{})", pct(w[0], es.eyeWidth), pct(h[0], es.eyeHeight),
+                            pct(w[1], es.eyeWidth), pct(h[1], es.eyeHeight), es.eyeWidth, es.eyeHeight,
+                            fill && (w[0] != es.eyeWidth || h[0] != es.eyeHeight) ? ", stretched to it" : "");
     }
     return std::format("eye images {}x{} and {}x{}{} from {}", w[0], h[0], w[1], h[1], share, from_dlss ? "DLSS's texture" : "the engine's eye target");
 }
 
-void note_handover(const EyeRect rects[2], bool from_dlss) {
+void note_handover(const EyeRect rects[2], bool from_dlss, bool fill) {
     Handover& H = g_handover;
     const std::uint32_t w[2] = {rects[0].width, rects[1].width}, h[2] = {rects[0].height, rects[1].height};
-    if (H.valid && H.from_dlss == from_dlss && H.w[0] == w[0] && H.w[1] == w[1] && H.h[0] == h[0] && H.h[1] == h[1]) {
+    if (H.valid && H.from_dlss == from_dlss && H.fill == fill && H.w[0] == w[0] && H.w[1] == w[1] && H.h[0] == h[0] && H.h[1] == h[1]) {
         ++H.frames;
         return;
     }
@@ -73,16 +75,17 @@ void note_handover(const EyeRect rects[2], bool from_dlss) {
     if (H.changes <= 50 || (H.changes & (H.changes - 1)) == 0) {
         try {
             const std::string before =
-                H.valid ? std::format("; before: {} for {} frames ({:.1f} s)", handover_text(H.w, H.h, H.from_dlss), H.frames,
+                H.valid ? std::format("; before: {} for {} frames ({:.1f} s)", handover_text(H.w, H.h, H.from_dlss, H.fill), H.frames,
                                       std::chrono::duration<double>(now - H.since).count())
                         : std::string("; the first stereo image of this session");
-            log::info("projection layer: {}{} (change {}{})", handover_text(w, h, from_dlss), before, H.changes,
+            log::info("projection layer: {}{} (change {}{})", handover_text(w, h, from_dlss, fill), before, H.changes,
                       H.changes == 50 ? "; from now on only every power of two of these changes is logged" : "");
         } catch (...) {
         }
     }
     H.valid = true;
     H.from_dlss = from_dlss;
+    H.fill = fill;
     for (int e = 0; e < 2; ++e) {
         H.w[e] = w[e];
         H.h[e] = h[e];
@@ -138,9 +141,13 @@ public:
         EyeRect rects[2] = {eyes.eyes[0], eyes.eyes[1]};
 #if FF7VR_ENGINE_WITH_DLSS
         dlss::output_rects(rects);  // DLSS upscaling writes the whole half of each eye
-        note_handover(rects, dlss::is_output_texture(eyes.texture));
+        // With DLSS writing the runtime's eye size, the frames it does not evaluate (loading
+        // screens, cuts) come from the smaller engine target: stretched to the same size, so the
+        // runtime always gets one image size, whichever texture the image comes from.
+        s.fillEyes = dlss::runtime_size_output();
+        note_handover(rects, dlss::is_output_texture(eyes.texture), s.fillEyes);
 #else
-        note_handover(rects, false);
+        note_handover(rects, false, false);
 #endif
         for (int e = 0; e < 2; ++e) {
             s.eyeRects[e].x = rects[e].x;

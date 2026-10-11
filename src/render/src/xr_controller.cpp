@@ -752,6 +752,7 @@ void XrController::SubmitOne(const PresentInfo& p, const Waited& w, const Pendin
         d.encoding = s.encoding;
         for (int e = 0; e < 2; ++e) {
             d.eyes[e].rect = s.eyeRects[e];
+            d.eyes[e].fill = s.fillEyes;
             if (s.haveRenderedViews) d.eyes[e].viewOverride = &s.renderedViews[e];
         }
         if (depthTex && depthOn_.load(std::memory_order_relaxed)) {

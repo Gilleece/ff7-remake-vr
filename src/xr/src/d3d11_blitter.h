@@ -85,6 +85,9 @@ struct BlitSource {
     float black = 0.0f;
     // Unsharp mask on luminance for an opaque transfer (0: none).
     float sharpen = 0.0f;
+    // Transfer: stretch the region to the whole destination (width x height) instead of
+    // copying it 1:1 when it is smaller (or scaling it down with its aspect when larger).
+    bool fill = false;
 };
 
 struct BlitDest {

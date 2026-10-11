@@ -3829,6 +3829,8 @@ void output_texture(EyeTexture& eyes) {
 
 bool is_output_texture(ID3D11Texture2D* t) { return t && g_up_out && t == g_up_out.Get(); }
 
+bool runtime_size_output() { return runtime_output(); }
+
 BudgetFacts budget_facts() {
     BudgetFacts b;
     b.on = g_set.enabled.load(std::memory_order_relaxed);

@@ -392,6 +392,11 @@ struct EyeSubmit {
     // scaled down to fit (aspect preserved); otherwise it is copied 1:1 and the
     // layer's imageRect is the region's size.
     Rect rect{};
+    // true: the region is stretched to the whole swapchain image (the layer's imageRect is
+    // then the swapchain's size whatever the region's size). For a source whose size changes
+    // between frames while it always shows the eye's whole field of view, so the runtime gets
+    // the same image size every frame.
+    bool fill = false;
     // false: alternate-eye mode. The eye keeps showing its last submitted image,
     // re-projected by the runtime with the pose it was rendered with. If the eye
     // was never submitted, it is updated anyway.

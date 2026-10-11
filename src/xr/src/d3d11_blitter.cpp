@@ -443,13 +443,14 @@ bool Blitter::Transfer(ID3D11DeviceContext* ctx, const BlitSource& src, const Re
     const uint32_t dstW = dst.width ? std::min(dst.width, dd.Width) : dd.Width;
     const uint32_t dstH = dst.height ? std::min(dst.height, dd.Height) : dd.Height;
     const bool fits = rect.width <= dstW && rect.height <= dstH;
+    const bool stretch = src.fill && (rect.width != dstW || rect.height != dstH);
 
     // A copy keeps the source's alpha bits: right for opaque and premultiplied sources only.
     const bool alphaAsIs = src.alpha == BlitAlpha::Opaque || src.alpha == BlitAlpha::Premultiplied;
     const bool picture = WantsPicture(src) && curveSrv_;
     const bool vignette = WantsVignette(src);
     const bool sharpen = src.alpha == BlitAlpha::Opaque && src.sharpen > 0.0f;
-    const bool canCopy = fits && alphaAsIs && !picture && !vignette && !sharpen && sd.SampleDesc.Count == 1 && dd.SampleDesc.Count == 1 &&
+    const bool canCopy = fits && !stretch && alphaAsIs && !picture && !vignette && !sharpen && sd.SampleDesc.Count == 1 && dd.SampleDesc.Count == 1 &&
                          TypelessFamily(sd.Format) == TypelessFamily(dd.Format) && srcBitsSrgb == dstBitsSrgb &&
                          TypelessFamily(srcFmt) == TypelessFamily(dstFmt);
     if (canCopy) {
@@ -508,7 +509,10 @@ bool Blitter::Transfer(ID3D11DeviceContext* ctx, const BlitSource& src, const Re
     if (!srv || !rtv) return false;
 
     uint32_t w = rect.width, h = rect.height;
-    if (!fits) {
+    if (stretch) {
+        w = dstW;
+        h = dstH;
+    } else if (!fits) {
         const double s = std::min(double(dstW) / rect.width, double(dstH) / rect.height);
         w = std::max(1u, static_cast<uint32_t>(std::floor(rect.width * s)));
         h = std::max(1u, static_cast<uint32_t>(std::floor(rect.height * s)));

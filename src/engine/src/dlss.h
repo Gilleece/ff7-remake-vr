@@ -69,6 +69,12 @@ void output_texture(EyeTexture& eyes);
 // image handed to the runtime comes from DLSS and not from the engine's eye target.
 bool is_output_texture(ID3D11Texture2D* t);
 
+// Any thread: DLSS is on and writes the runtime's eye size into a texture of its own
+// ([dlss] output = runtime). Every eye image handed to the runtime is then stretched to that
+// size, also on the frames without an evaluation (loading screens, cuts), so the projection
+// layer's image size never changes between the two sources.
+bool runtime_size_output();
+
 // Any one thread, once per frame-time window (the game thread's "frame time" line): what DLSS
 // did with the stereo frames since the previous call: frames upscaled in both eyes, the eyes
 // not upscaled by reason, what went to the runtime, GPU time per eye, history resets, feature
