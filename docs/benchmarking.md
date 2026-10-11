@@ -790,6 +790,55 @@ carries the extra time, it is spread over the draws, dispatches (0.66 -> 1.48 ms
 (0.06 -> 0.21 ms) although the views were smaller. That fits every command waiting on its reads
 of system memory rather than one pass doing more work.
 
+### Allocations per event
+
+Which events release and create large graphics resources, before and after the changes of
+11/10 (constant projection image size with DLSS, `[stereo] hold_target_seconds`, foveation
+surface refilled in place, GPU timers without foveation). Null backend at the headset
+player's settings (his DLSS package ini: eyes 3476x3364 at 72 Hz, DLSS preset m at 0.60,
+`output = runtime`, render scale 0.9, foveation off), standing in the latest save,
+`[log] d3d11_census = 1`, one `census mark` before and after each event
+(`tools\bench\event-run.ps1`; the same sequence for both builds; captures\events\
+20261011-205510-before and 20261011-210313-after). "Large" = a texture or buffer of 4 MB or
+more created on the game's device, by anyone (the game, the mod, NVIDIA's DLSS library);
+the estimate counts texels times format size.
+
+| Event (window after it) | Before (d40bf43) | After |
+|---|---|---|
+| 20 s of gameplay | 0 | 0 |
+| DLSS dropout: `dlss mispin taa` (the anti-aliasing pass not recognised, as on loading screens and cuts), 10 s | 0 | 0 |
+| ... and back (`dlss mispin off`), 15 s | 0 | 0 |
+| session VISIBLE (`xr-sim focus 0`), 10 s | 0 | 0 |
+| session FOCUSED again, 10 s | 0 | 0 |
+| `xr-stop` (no session), 15 s | 14, 215 MB: the engine went mono after 45 frames (window-size targets, two 4168x2020) | 0: stereo held for 14.8 s, the eye target kept |
+| `xr-restart` (a new session), 15 s | 35, 1275 MB: the engine's eye-size targets again and the session's swapchains | 5, 186 MB: only the session's swapchains (the Null backend's eye and depth images, 178 MB) and the virtual screen |
+| `stereo off`, 20 s | 14, 215 MB | 15, 106 MB |
+| `stereo on`, 25 s | 28, 1078 MB | 34, 1287 MB |
+| a cutscene on the virtual screen (`stereo cutscene simulate 6000`), 25 s | 42, 1293 MB | 42, 1293 MB |
+| `dlss off` (the engine target grows to the runtime's size), 20 s | 60, 3972 MB | 62, 3982 MB |
+| `dlss on` (NGX features and the smaller target again), 25 s | 115, 6512 MB | 115, 6512 MB |
+
+- **DLSS dropouts never created anything** (also before): the features, DLSS's output
+  texture, the graded copy and the motion vector textures are sized once and kept (`features
+  created 0` in every `dlss: last 10.0 s` line of the headset sessions). What changed for
+  the runtime is only the projection image size, now constant (the `+raw` captures of a
+  dropout frame and a DLSS frame, `captures\events\caps\fill_rawL.png` and
+  `dlss_rawL.png`, both 3476x3364 and framed alike).
+- **A session gap of up to 30 s no longer costs the eye target** (`xr-stop` above; a 38-s
+  gap ended in mono after 30.0 s as intended, run 20261011-211843-hold). A new session still
+  creates its swapchains: OpenXR swapchains belong to their session.
+- **Mode switches still reallocate**: `stereo off/on` and every cutscene or movie on the
+  virtual screen release the engine's eye-size targets (about 1.1-1.3 GB) and create them
+  again 0.5-6 s later. `r.SceneRenderTargetResizeMethod 2` (grow only) changed nothing
+  (31 large, 1094 MB at `stereo on` with it, run 20261011-211140-grow); inferred: the released
+  targets are the separate eye target and the pooled post-processing targets, not the
+  scene buffers this variable governs.
+- **Per frame**, with or without these changes, the mod creates 6 shader resource views,
+  2 render target views per stereo frame (the blitter's views) and 1 query per frame while
+  DLSS evaluates (none during a dropout), no buffers or textures.
+- During a hold without a session the engine renders unpaced (86-109 fps against 72 in the
+  `xr-stop` window): nothing paces the frames until the runtime is back.
+
 ### What the mod does about it
 
 - **Detection.** The upload check (`[log] upload_check = 1`, default) times a 256 KB copy from
@@ -805,6 +854,9 @@ of system memory rather than one pass doing more work.
   Windows before a long headset session.
 - **The light volume pool** (above): built and working, off by default, its effect on the state
   not shown.
+- **Fewer allocation events (11/10):** see "Allocations per event" above: no projection
+  image size changes with DLSS, no eye target release for session gaps under 30 s, no new
+  foveation surface for a change of rates.
 - **Not done:** avoiding the onset. The mod's own resizes (render scale, dynamic resolution,
   DLSS on/off, stereo on/off) are each a chance to start it; in the two headset sessions none
   happened before the onset (stereo stayed on from the start), so there the game's own area and
