@@ -54,6 +54,7 @@ constexpr Default kDefaults[] = {
     {"stereo", "dynamic_resolution_min", "0.75"},
     {"stereo", "dynamic_resolution_target", "0.85"},
     {"stereo", "late_update", "0"},
+    {"stereo", "hold_target_seconds", "30"},
     {"stereo", "allow_unknown_build", "0"},
     {"stereo", "cutscene_screen_delay_ms", "500"},
     {"stereo", "cutscene_screen_hold_ms", "300"},

@@ -55,9 +55,12 @@ std::atomic<StereoHost*> g_host{nullptr};
 FixedStereoHost* g_fixed = nullptr;            // created in init(), never freed
 std::atomic<std::uint64_t> g_latest_frame_id{0};  // newest frame id the host returned
 
-// Frames the device keeps rendering in stereo (with the last views) while the host has no
-// frame for it, before it switches the engine to mono. Switching reallocates the eye
-// target and suspends the rendering thread, so a single late XR frame must not do that.
+// While the host has no frame for it, the device keeps rendering in stereo with the last
+// views, before it switches the engine to mono: at least this many frames, and up to
+// [stereo] hold_target_seconds (default 30 s, enough for a headset runtime to reconnect).
+// Switching releases the eye target and the scene buffers at the eye size and allocates
+// them again when stereo resumes (gigabytes at headset resolution, and a hitch), so a late
+// XR frame or a reconnect must not do that.
 constexpr int kHoldFrames = 45;
 
 std::uint64_t pack(std::uint32_t w, std::uint32_t h) { return w | (static_cast<std::uint64_t>(h) << 32); }
@@ -100,6 +103,10 @@ struct GameState {
     bool views_built = false;  // stereo views were built during this Tick
     bool frame_has_views = false;  // this Tick got fresh views from the host
     int host_gap = 0;          // consecutive stereo frames without a host frame
+    std::chrono::steady_clock::time_point gap_since{};  // the first of them
+    std::uint64_t holds = 0;          // runs of frames without a host frame
+    std::uint64_t holds_expired = 0;  // ... that ended in mono after hold_target_seconds
+    double longest_hold_s = 0;
     std::uint64_t held_frames = 0;
     std::uint64_t unusable_views = 0;  // frames whose views from the host were not usable (kept the last good ones)
     int logged_order = 0;
@@ -882,6 +889,7 @@ void configure_render_scale(const Config& cfg) {
     g_settings.dynres = cfg.get_bool("stereo", "dynamic_resolution", false);
     g_settings.dynres_min = static_cast<float>(std::clamp(cfg.get_float("stereo", "dynamic_resolution_min", 0.75), 0.3, 1.0));
     g_settings.dynres_target = static_cast<float>(std::clamp(cfg.get_float("stereo", "dynamic_resolution_target", 0.85), 0.3, 1.2));
+    g_settings.hold_target_seconds = static_cast<int>(std::clamp<long long>(cfg.get_int("stereo", "hold_target_seconds", 30), 0, 600));
     log::info("dynres: render scale {:.2f}, dynamic resolution {} (min {:.2f}, target {:.2f} of the frame period)",
               g_settings.render_scale.load(), g_settings.dynres.load() ? "on" : "off", g_settings.dynres_min.load(),
               g_settings.dynres_target.load());
@@ -1035,12 +1043,37 @@ void tick_begin() {
     bool frame_stereo = false;
     if (wanted && host_stereo) {
         frame_stereo = true;
+        if (g.host_gap > kHoldFrames) {
+            const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - g.gap_since).count();
+            g.longest_hold_s = std::max(g.longest_hold_s, s);
+            log::info("stereo: frames from the headset again after {:.1f} s ({} frames rendered with the last views); the eye target was kept", s,
+                      g.host_gap);
+        }
         g.host_gap = 0;
-    } else if (wanted && g_active.load() && ++g.host_gap <= kHoldFrames) {
-        // No frame from the host this time (a late XR frame, a hitch): keep the eye target
-        // and render with the last views instead of flipping the engine to mono and back.
-        frame_stereo = true;
-        ++g.held_frames;
+    } else if (wanted && g_active.load()) {
+        // No frame from the host this time (a late XR frame, a hitch, the runtime reconnecting):
+        // keep the eye target and render with the last views instead of flipping the engine to
+        // mono and back.
+        const auto now = std::chrono::steady_clock::now();
+        if (g.host_gap == 0) {
+            g.gap_since = now;
+            ++g.holds;
+        }
+        ++g.host_gap;
+        const double held_s = std::chrono::duration<double>(now - g.gap_since).count();
+        const int limit_s = std::max(0, g_settings.hold_target_seconds.load(std::memory_order_relaxed));
+        if (g.host_gap <= kHoldFrames || held_s <= limit_s) {
+            frame_stereo = true;
+            ++g.held_frames;
+            if (g.host_gap == kHoldFrames + 1)
+                log::info("stereo: no frames from the headset for {} frames: rendering with the last views for up to {} s before the eye target "
+                          "is released ([stereo] hold_target_seconds)",
+                          kHoldFrames, limit_s);
+        } else {
+            ++g.holds_expired;
+            g.longest_hold_s = std::max(g.longest_hold_s, held_s);
+            log::info("stereo: no frames from the headset for {:.1f} s ({} frames): switching to mono, the eye target is released", held_s, g.host_gap);
+        }
     }
     if (frame_stereo != g_active.load()) {
         if (frame_stereo) {
@@ -1104,7 +1137,7 @@ std::string status() {
         "wanted={} active={} eye={}x{} want={}x{} rt_texture={}x{} fmt={} mirror={} scale={:.2f} decouple_pitch={} positional={} "
         "ticks={} stereo_draws={} transitions={} view_offset_calls={} proj_calls={} rect_calls={} render_texture_calls={} "
         "rt_size_calls={} reallocs={} frame_end_queued={} frame_end_run={} frame_end_failed={} fifo_dropped={} held_frames={} unusable_views={} "
-        "sysres={} latest_frame={} frame_ms_avg={:.2f} p50={:.2f} p95={:.2f} max={:.2f} (n={}, {}) | {}",
+        "holds={} holds_expired={} longest_hold={:.1f}s hold_target_seconds={} sysres={} latest_frame={} frame_ms_avg={:.2f} p50={:.2f} p95={:.2f} max={:.2f} (n={}, {}) | {}",
         g_wanted.load() ? 1 : 0, g_active.load() ? 1 : 0, unpack_w(v), unpack_h(v), g.want_w, g.want_h, g_count.rt_tex_w.load(),
         g_count.rt_tex_h.load(),
         g_count.rt_tex_format.load(), mirror::to_string(static_cast<mirror::Mode>(g_settings.mirror.load())),
@@ -1112,7 +1145,7 @@ std::string status() {
         g.stereo_draws, g.transitions, g_count.view_offset.load(), g_count.projection.load(), g_count.adjust_rect.load(),
         g_count.render_texture.load(), g_count.calc_rt_size.load(), g_count.realloc_yes.load(), g_count.frame_end_queued.load(),
         g_count.frame_end_run.load(), g_count.frame_end_failed.load(), g_fifo_dropped.load(), g.held_frames, g.unusable_views,
-        fixes::system_resolution_overridden() ? 1 : 0, g_latest_frame_id.load(), g_timer.last_avg, g_timer.last_p50, g_timer.last_p95,
+        g.holds, g.holds_expired, g.longest_hold_s, g_settings.hold_target_seconds.load(), fixes::system_resolution_overridden() ? 1 : 0, g_latest_frame_id.load(), g_timer.last_avg, g_timer.last_p50, g_timer.last_p95,
         g_timer.last_max, g_timer.last_n, g_timer.last_window_stereo ? "stereo" : "mixed/mono", host_desc);
 }
 

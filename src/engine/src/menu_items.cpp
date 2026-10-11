@@ -429,6 +429,8 @@ void register_all(const Config& cfg) {
                  bloom_fix::set_tonemap_shift(v == "0" ? 0 : v == "1" ? 1 : 2);
                  return std::string();
              });
+    live_settings::add(integer("stereo.hold_target_seconds", "3D kept without headset frames (s)", kAdvanced + 15, "stereo", "hold_target_seconds", 0,
+                               600, 5, device::settings().hold_target_seconds));
     add_held(num_spec("controls.pad_log", "Log gamepad changes (count)", kAdvanced + 60, "controls", "pad_log", 0, 1000, 50, 0), cfg,
              [](const std::string& v) { return ok_or_error(controls::command("padlog " + v)); });
 

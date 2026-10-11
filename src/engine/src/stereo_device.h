@@ -36,6 +36,10 @@ struct Settings {
     std::atomic<bool> dynres{false};              // adjust the share each frame to hold the GPU frame time
     std::atomic<float> dynres_min{0.75f};         // lower bound of the dynamic share
     std::atomic<float> dynres_target{0.85f};      // GPU frame time to hold, as a share of the display's frame period
+    // [stereo] hold_target_seconds: how long stereo rendering (and with it the eye target and the
+    // scene buffers at the eye size) is kept while the host has no frames, e.g. while the
+    // headset's runtime reconnects. At least 45 frames either way.
+    std::atomic<int> hold_target_seconds{30};
 };
 Settings& settings();
 
