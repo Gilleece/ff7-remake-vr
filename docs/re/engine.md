@@ -1045,6 +1045,24 @@ Why the right view's reflection run is wrong, read from the pass's own pixel sha
   shader at the origin (the reference of `ssr test shift`) in all but 0.001 to 0.12 % of the
   pixels, at most 144 of them by more than 0.01 (tests with foveation off; see that section).
 
+### The light volumes' per-draw vertex buffers (LIVE, census call stacks)
+
+With the light sort-key patch (section 6) the lights of that group are drawn one by one as
+light volumes, and for each light and eye the engine creates a new vertex buffer. Found with
+`[log] d3d11_census = 1` (`src/render/src/d3d11_census.cpp`), which records the call stack of
+every dynamic vertex buffer the executable creates; 11/10, first room, eyes 3302x3533.
+
+| RVA | What | Status |
+|---|---|---|
+| `0x1f47600` | `FD3D11DynamicRHI::RHICreateVertexBuffer`: maps the buffer usage flags to a `D3D11_BUFFER_DESC` (`BUF_AnyDynamic` -> `D3D11_USAGE_DYNAMIC` with `D3D11_CPU_ACCESS_WRITE`) and calls `ID3D11Device::CreateBuffer`; the return address of that call is `0x1f47720`. One code reference, from `0x1f47880` (the RHI's vtable entry at `0x4d39840` points to it) | inferred from the code and the D3D11 descriptions seen |
+| `0x2234f50` | `RenderLights` (the function with the sort-key immediate at `0x22351b0`; strings `ScreenShadowMaskTexture`), called from `FDeferredShadingSceneRenderer::Render` (`0x21e64a0`) at `0x21e7501`, between the `Lighting` and `AfterRenderLights` markers | LIVE |
+| `0x25ea3d0` -> `0x25e8790` -> `0x25e7010` | per-light drawing; `0x25e8790` creates a buffer itself (return `0x25e8edb`) and through `0x25e7010` (return `0x25e7b8c`). At `0x25e8e7b`: `GDynamicRHI` (`[0x582c478]`) vtable `+0x400` (create, `count << 4` bytes, flags 4), `+0x420` (lock), a copy of `count` float4 values, then unlock; count 8 -> 128 bytes | LIVE (stacks), STATIC (the code) |
+| `0x25c00c0`, called from `Render` at `0x21e6b9f` | creates the other per-frame dynamic vertex buffer: 480 bytes per eye in stereo, 384 bytes once per frame in mono | LIVE |
+
+Per frame in stereo: 10 buffers through each of the two `0x25e8790` paths (20 of 128 bytes),
+2 of 480 bytes; none of 128 bytes in mono or with `stereo lightfix 0`. The pool for them is
+`[stereo] light_volume_pool` (`docs/benchmarking.md`, "Mid-session stall").
+
 ### Other FViewInfo fields seen (STATIC + LIVE)
 
 `+0x70` the rectangle post-processing reads the view from (equals the view rect at 100 %

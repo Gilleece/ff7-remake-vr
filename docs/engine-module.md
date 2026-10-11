@@ -1003,6 +1003,7 @@ movement (not rotated by design), how it feels.
 | `positional` | `1` | apply head position |
 | `mirror` | `crop` | desktop window in stereo: `crop` (left eye, centre crop at the window's aspect), `left`, `right`, `both` (side by side, letterboxed), `off` |
 | `light_fix` | `1` | light sort-key patch while stereo renders: white blocks on skin indoors (see "Skin lighting fix"; `docs/re/engine.md` section 6) |
+| `light_volume_pool` | `0` | the light volumes of `light_fix` take their 128-byte vertex buffers from a ring of 256 instead of 20 new ones a frame (`docs/benchmarking.md`, "Mid-session stall"; experimental) |
 | `bloom_fix` | `1` | right-eye bloom fix (below) |
 | `ao_fix` | `1` | right-eye ambient occlusion fix (below) |
 | `ssr_per_eye` | `1` | each eye's screen-space reflection run limited to its half of the target, and the per-view colour copy for it halved (see "Reflections per eye"); same image, about 0.45 ms less per frame at 2 x 3072x3264 |
@@ -1708,6 +1709,10 @@ when it renders mono again (the virtual screen, menus, loading screens, stereo s
 off), so the flat game runs the game's own code. `stereo lightfix 0|1` switches the
 setting; the log shows `fixes: light sort-key patch on` / `off (game default)` at every
 change.
+
+Side effect: each light of that group drawn as a volume gets a new 128-byte dynamic vertex
+buffer per eye, 20 a frame in the first room (`docs/re/engine.md`, "The light volumes'
+per-draw vertex buffers"); `[stereo] light_volume_pool = 1` serves them from a ring.
 
 Cost: in the first room the fix makes the frame slightly faster. Null backend unpaced,
 `t.MaxFPS 0`, `r.BloomQuality 5`, first person facing the door, 6 s windows alternating:

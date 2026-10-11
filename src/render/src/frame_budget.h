@@ -36,6 +36,7 @@ struct Window {
     uint32_t eyeWidth = 0, eyeHeight = 0;
     std::string foveationPreset;
     double copyEnginePercent = -1;  // the game's copy engines (video memory report), -1 unknown
+    double uploadGBps = -1;         // the upload check's latest copy from system memory to the card, -1 unknown
 };
 
 // [log] frame_budget (1 = on, the default; 0 = off). Registers the `budget` dev command.

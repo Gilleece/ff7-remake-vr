@@ -1143,6 +1143,8 @@ void RegisterSettings(const Config& cfg) {
          [](const std::string& v) { return OkOrError(Dispatch(std::string("xr-depth ") + (v == "1" ? "on" : "off"))); });
     if (!Registered("log", "frame_budget"))  // a module with a live path registers its own
         Held(OnOff("log.frame_budget", "Frame budget warning in the log", kPerformance + 90, "log", "frame_budget"));
+    Held(OnOff("log.upload_check", "Slow-transfer check in the log", kPerformance + 91, "log", "upload_check"));
+    Held(OnOff("stereo.light_volume_pool", "Reuse the light volume buffers", kPerformance + 92, "stereo", "light_volume_pool"));
     Held(Choice("dlss.mode", "DLSS mode", kPerformance + 71, "dlss", "mode", {"Upscale", "DLAA"}, {"upscale", "dlaa"}));
     Held(Number("dlss.input_scale", "DLSS input scale", kPerformance + 72, "dlss", "input_scale", 0.33f, 1.0f, 0.01f, 2));
     Held(Choice("dlss.output", "DLSS output", kPerformance + 73, "dlss", "output", {"Runtime size", "Engine size"}, {"runtime", "engine"}));

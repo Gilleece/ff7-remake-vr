@@ -621,6 +621,220 @@ second: busy GPU engines per process, each process's memory in the card and in s
 memory, the card's total; no elevation needed) alongside `tools\bench\nvml-log.ps1 -OutCsv <file>` (P-state, clocks, PCIe link, traffic and
 replays every 200 ms) and, for the transfer rates themselves, `upload_probe` (above).
 
+## Mid-session stall: the slow PCIe state
+
+What players see: after some time of normal play the frame time climbs within 40 s to 2
+minutes (15 -> 45 ms at 72 Hz in a headset session, GPU scene time 4.7 -> 30 ms) and stays
+there until the game is quit, while the game's video memory and its copy engine stay flat. The
+card then reports 99-100 % "utilisation" at a third of its power (67-160 W instead of 280 W)
+with its memory bus nearly idle (1-22 % instead of 51 %), clocks unchanged and no throttle
+reason.
+
+### What it is
+
+Measured on 11/10 with the Null backend (RTX 5080 on a PCIe gen 4 x8 link, driver 610.47),
+with `upload_probe` from a separate process and the mod's own upload check
+(`[log] upload_check`, `docs/render.md`, "Timing"):
+
+| Transfer | Normal | In the state |
+|---|---|---|
+| system memory -> card (the card reads system memory) | 9-14 GB/s with no game; 11.9-12.2 GB/s by the upload check inside the game | 0.02-0.07 GB/s (0.1-0.4 in the first seconds) |
+| card -> system memory (the card writes) | 7-14 GB/s | 0.3-3 GB/s |
+| card -> card | 270-490 GB/s | 270-390 GB/s |
+
+- **It is the card's reads of system memory.** Writes to system memory get 2-5 times slower,
+  reads 200-500 times; the card's own memory is untouched.
+- **It belongs to the machine, not to the game process.** A separate process measures the same
+  0.02-0.07 GB/s next to the game and with no game running at all: after the exit of a game in
+  the state the rate stayed there until another game was started (six exits tonight, 2.5 to more
+  than 5 minutes), while a separate program created a device on the card every 3 s.
+- **It deepens over the first one or two minutes.** With a probe every 3 s the rate went
+  11 GB/s -> 0.22 -> 0.13 -> 0.10 -> 0.08 ... -> 0.03 GB/s over 100 s after the onset, and the
+  frame time climbs with it: this is the 40-s to 2-minute climb the players see.
+- **Why the game's frames suffer.** Every frame's dynamic data (constants, per-draw vertex data
+  the CPU writes) is read by the card from system memory, and the draws wait for it. In stereo
+  the game creates 22 new dynamic buffers per frame for such data (20,300 in 10 s at 90 fps,
+  `[log] d3d11_census`, with and without DLSS; 20 of them come from the skin lighting fix, see
+  below). The flat game suffers too: with stereo off and `r.ScreenPercentage 300` (3840x2160
+  inside a 1280x720 window) it fell from 120 to 103, 93, 78, 68, 56, 46, 35, 29 fps over two
+  minutes in the state.
+- **What ends it: the next start of the game.** Seven times tonight the state was gone after the
+  next game start; the five that the probe loop timed ended near the end of the load (5-45 s
+  after gameplay was reached, while the copy engines were busy with the start-up uploads):
+  00:41:55, 00:51:35, 01:02:00, 01:11:17 and 01:22:46. Nothing inside a running game ended it: `xr-restart`, `stereo off` /
+  `stereo on`, `dlss on` (NGX features recreated), `fov off`, `r.UniformBufferPooling 0`,
+  `fp third` / `fp first` twice (the character's meshes shown and hidden), `dynres` back to 1.0;
+  nor, with no game running, a 6 GB allocation or a 768 MB upload (22 s at 0.04 GB/s) from a
+  separate process. The quick-restart state in "Video memory and slow phases" (state 3) has the
+  same transfer rates and is the same state arising at a start.
+
+### How it starts: the bisection
+
+Headless, Null backend at 90 Hz, `resolution_scale 1.6` (eyes 3302x3533), the player's
+settings otherwise (foveation `quality`, `ssr_fix 3`, depth layer on, bloom off), standing in
+the first room after loading the latest save. Each run began with the uploads normal (9-14 GB/s
+before the start; C started in the state, which ended 17 s after gameplay, 80 s before its first
+command), and was driven by `tools\bench\stall-run.ps1`; the onset is the first
+sample under 1 GB/s of its 3-s probe loop (or the first slow upload check, every 10 s).
+
+Runs H to Q (from 01:38 on) came after a restart of Windows at 01:34 (see below).
+
+| Run (11/10) | Build and settings | What was done (seconds after gameplay) | Onset of the state |
+|---|---|---|---|
+| first reproduction (10/10) | DLSS on at 0.60 (engine eye target 3960x2120) | 60 `dlss off` (target 6604x3533), 100 `dynres scale 0.6`, then `xr-sim pace 2` / `pace 1` | about 35 s after `dynres` (frame times only, no probe) |
+| r1b | same | same | about 30 s after `dynres` (frame times; a probe 3 minutes later: 0.03 GB/s) |
+| C | same | same | 4-6 s after `dynres`, before any `pace` command |
+| D | same, **foveation off** | 60 `dlss off`, 100 `dynres scale 0.6`, then 1.0 / 0.6 / 0.8 | 12-18 s after the first `dynres` |
+| E | **standard build (no DLSS)**, target 6604x3533 from the start | 60 `dynres scale 0.6`, 180 `1.0` | 28 s after `dynres` |
+| G | standard build, as E | 60 `dynres scale 0.6` | 30 s after `dynres` (a 3-s dip to 1.6 GB/s 8 s after it) |
+| F | standard build, as E | 25 `stereo off` (the eye target released: the game's memory 8146 -> 5778 MB) | 24 s after `stereo off`, in the flat game |
+| A | DLSS on at 0.60, target 3960x2120 | 60 `xr-sim pace 2` (half the frame rate), 120 `pace 1`; no size change | none in 230 s (two probes in the game at 2.6 GB/s); 0.28 GB/s 3 s after the exit |
+| J | standard build, as E | 75 `stereo off` for 40 s, then `stereo on` | partial: 0.4-5 GB/s for a minute, back to 10-14 by itself; no deep state |
+| L | standard build, as E, **`light_fix = 0`** | `dynres` 0.6, 1.0, 0.6, 1.0 every 50-60 s, then `stereo lightfix 1` and two more | partial for the whole 5 minutes: the probe alternating between 0.4-0.6 and 4-9 GB/s, the upload check at 2-3 GB/s, the scene 30 % slower and steady; never the collapse to 0.02-0.07 |
+| M | standard build, as E, **`light_fix = 0`** | 60 `dynres scale 0.6`, then 4 minutes of play | partial, as L: the probe 0.45-0.63 / 3-10 GB/s, the upload check 0.4-3.4 / 9-11 GB/s, the scene 5.7-5.8 ms steady at 90 fps; no collapse |
+| N | standard build, as E, `light_fix = 1` with **`light_volume_pool = 1`** (no per-frame light volume buffers) | 60 `dynres scale 0.6`, then 4 minutes | partial, as L and M |
+| O | standard build, as E (`light_fix = 1`, no pool): the control for N | the same | partial, as L to N (two slow upload checks, one warning) |
+| P | as O, and **no census** (`[log] d3d11_census = 0`) | the same | partial, as L to O |
+| Q | DLSS build, the first reproduction's exact sequence (as r1b and C) | 60 `dlss off`, 100 `dynres scale 0.6`, 135 `xr-sim pace 2`, 165 `pace 1` | partial: the scene 7.4-7.5 ms instead of 5.4 after the change, steady at 89 fps for 3 minutes; the upload check 0.4-2 / 10-11 GB/s |
+| I | DLSS at the headset player's settings: eyes 3476x3396, DLSS 0.60 (engine target 4168x2038), foveation `performance` | render scale 0.9, 0.95, 0.9, 1.0, 0.9 every 30-60 s (as he did from the settings panel); each change moved the game's resident memory by 1.4-1.5 GB | none in 4 minutes (single 3-s dips to 0.8 GB/s) |
+| H | **the game without the mod**, flat | the window resized 10 times between 2560x1440 and 1265x682 (the largest the game allows on this 2560x1440 monitor), every 30 s | none in 6 minutes (probe loop 4-14 GB/s throughout and after the exit) |
+
+What the runs show:
+
+- **A deep onset followed a change that releases or resizes large render targets**, by 4-35 s:
+  the eye target (`dlss off`, `stereo off`) or the view rectangles and with them the
+  post-processing targets the engine sizes from them (`dynres`, which only changes the views).
+  In C, D, E and G the game's resident video memory (`game ... MB` in the `video memory:` line,
+  from `QueryVideoMemoryInfo`) dropped by 1.5-1.6 GB in the same 10-s window while the card's
+  total stayed the same: allocations made non-resident, not freed. A frame rate change alone (A)
+  did not start it, though the same 1.5 GB drop happened there too, so the drop is not enough on
+  its own (as in state 4 above).
+- **Not needed for it:** foveated rendering (D), DLSS and NGX (E, G: a build without them),
+  stereo after the trigger (F: the collapse went on in the flat game), the pacing commands (C, D,
+  E, G: onset before any). Not tested for lack of time: the depth layer, `ssr_fix`, the UI layer,
+  the settings panel's keyboard hook and `game_vignette` each switched off (none of them
+  allocates anything when the size changes; the census shows no per-frame allocation from them).
+- **After a restart of Windows the same trigger no longer produced it.** Five deep onsets in
+  five comparable runs between 00:43 and 01:27 (C, D, E, F, G), 31 hours after the previous boot.
+  Windows was restarted at 01:34 (after the PC's Wi-Fi adapter, another PCIe device, had failed
+  with internal errors at 01:21; it had done so once before tonight, at 00:56, during run D's
+  deep state). After it no run reached the deep state (H to Q); every run with the same kind of
+  trigger (J, L, M, N, O, P, Q) stopped at a milder, steady state: reads of system memory
+  alternating between about 0.5 and 4-10 GB/s, the GPU 40-60 % busy at the same 139 W where the deep state shows 95-99 %, the scene
+  40 % slower than before the change but stable at 90 fps for 4-5 minutes. That held with the light
+  fix off (L, M), with the light volume pool (N) and without either (O, P, the controls), without
+  the census (P) and with the first reproduction's exact sequence (Q). The card's PCIe replay
+  counter, 8,167 before the restart, began again from zero (193 at 02:57); the link stayed at
+  gen 4 x8. The headset sessions with the stall (10/10 21:53 and 22:49) came 28-29 hours after
+  a boot as well.
+- **At the headset player's own settings** (I: engine target 4168x2038 with DLSS at 0.60) five
+  render-scale changes did not start it in 4 minutes, against one change each in C to G with the
+  6604x3533 target; but I ran after the restart, when no setting reached the deep state, so it
+  says nothing about the size.
+
+The headset sessions it was first seen in had no such change before the onset: at 21:53:45 on
+10/10 (a battle; the last render-scale change was 20 minutes earlier) and at 22:49:30 (an area
+load with a chapter title: mono frames, DLSS paused and the foveation surface rebuilt twice).
+In both the game's resident memory moved by 400-1,700 MB in the two minutes before. The game's own
+streaming of areas and battles makes the same kind of allocation event; the mod's resizes add
+more of them, and stereo makes the render targets larger (4168x2020 against 1920x1080 at his
+settings, about 4 times the pixels).
+
+### D3D11 objects created per frame: no leak, but a stereo-only churn in the light pass
+
+`[log] d3d11_census = 1` counted every object created on the game's device in runs C to O.
+
+- **The mod's own objects.** Per stereo frame the mod creates 6 shader resource views and 2
+  render target views, all released again: the view of each eye image it copies to the headset
+  and of each eye's depth (`d3d11_blitter.cpp`), a render target view of a cached headset image
+  (`GetRtv`, one cache miss a frame) and the desktop mirror's target view (`mirror.cpp`); its
+  queries are pooled; no buffers or textures per frame. Process private bytes and handles stayed
+  flat for whole runs (11,844-11,846 MB and 1,825-1,830 in C over three minutes, before and
+  inside the state). No leak.
+- **The game's buffers.** In stereo the game creates 20 dynamic vertex buffers of 128 bytes
+  (`D3D11_USAGE_DYNAMIC`, CPU write, no initial data) and 2 of 480 bytes per frame, 18,000 and
+  1,800 in every 10-s window at 90 fps, plus a few small dynamic constant buffers; with stereo
+  off the same scene creates one 384-byte vertex buffer per frame and none of 128 bytes (runs J,
+  F). The census's call stacks place the 128-byte ones in `FDeferredShadingSceneRenderer::Render`
+  (`0x21e64a0`) -> `RenderLights` (`0x2234f50`, the function with the light sort-key immediate) ->
+  `0x25ea3d0` -> `0x25e8790` / `0x25e7010` -> `RHICreateVertexBuffer` (`0x1f47600`), which fills
+  each with 8 float4 values (inferred: the corners of the light's bounds) before it is drawn. They are the light volumes
+  of the skin lighting fix: with `stereo lightfix 0` they stop at once and come back with
+  `lightfix 1` (run K: 18,002 -> 0 -> 16,720 -> 18,000 per window). So the light sort-key patch
+  (`[stereo] light_fix = 1`, default; the community's widescreen fix applies the same byte in
+  flat play) moves those lights from the tiled compute pass to per-light volumes, each with a
+  new dynamic vertex buffer: about 1,800 allocations and releases of CPU-written,
+  GPU-read buffers a second, in system memory, for as long as stereo renders.
+- **Does that churn matter for the state?** Not shown. With the light fix off (L, M) or the
+  pool on (N) the triggers gave only the milder state, but so did the controls with the churn (O,
+  P) at the same hour, and F reached the deep state in the flat game, where the patch is off and
+  these buffers are not made. Inside the deep state each of these buffers is one more read of
+  system memory per light and eye, so the fix adds to the state's cost in any case.
+- **`[stereo] light_volume_pool`** (default `0`; `src/render/src/buffer_pool.cpp`): a hook on
+  `ID3D11Device::CreateBuffer` answers the executable's 128-byte dynamic vertex buffer requests
+  with buffers from a ring of 256 it keeps (each filled with `Map(WRITE_DISCARD)` and drawn once,
+  as before; a buffer comes round again after about 12 frames). Measured in N: 18,000 requests
+  per 10 s served, 256 buffers created in all, none after the first second. Eye captures with
+  the pool on, off and on again (`captures\stall\caps\N_a`, `N_b`, `N_c`, static head, idle
+  characters) differ on/off by a mean of 6.0-6.8 levels and on/on by 7.1-7.7, the same as any two
+  captures of the idle scene, with the same mean brightness (47.92, 47.96, 47.93): no change seen,
+  but this is not a proof (no poison test). Off by default until it has been shown to help; dev
+  command `bufpool status | on | off`, one `buffer pool:` line per timing window.
+
+### GPU trace inside the state
+
+`gpu trace` of one frame before (full size) and 20 s into the state (render scale 0.6) in run E
+(`captures\stall\traces\E_before.txt`, `E_in.txt`, about 400 events each): the tracing serialises the
+GPU after every event, so the totals (14.7 ms both) say nothing; inside the state no single pass
+carries the extra time, it is spread over the draws, dispatches (0.66 -> 1.48 ms) and clears
+(0.06 -> 0.21 ms) although the views were smaller. That fits every command waiting on its reads
+of system memory rather than one pass doing more work.
+
+### What the mod does about it
+
+- **Detection.** The upload check (`[log] upload_check = 1`, default) times a 256 KB copy from
+  system memory every 10 s and warns after two slow checks: "the graphics card reads system
+  memory at 0.07 GB/s (normally 3-14 GB/s) ... Quit the game, wait a minute and start it
+  again". It fired in every run of the state tonight, 16-35 s after the onset (C, D, E, F, G),
+  never in a normal start and load (D, E, F, G), and logged "fast again" when the state ended
+  during a start (C). In the milder state of the later runs it fired once (O, two slow checks in
+  a row). The frame budget warning names the cause `transfer-bound` when the latest check is
+  below 0.5 GB/s (E, G), before its other tests.
+- **The remedy for the player:** quit and start the game again; the next start ended the state
+  every time (seven of seven tonight). Untested but suggested by the restart at 01:34: restart
+  Windows before a long headset session.
+- **The light volume pool** (above): built and working, off by default, its effect on the state
+  not shown.
+- **Not done:** avoiding the onset. The mod's own resizes (render scale, dynamic resolution,
+  DLSS on/off, stereo on/off) are each a chance to start it; in the two headset sessions none
+  happened before the onset (stereo stayed on from the start), so there the game's own area and
+  battle loads are the likely triggers. Options for later, none tried: keep the
+  engine's render targets at one size across the mod's switches (`r.SceneRenderTargetResizeMethod 2`,
+  grow only), fewer resizes from dynamic resolution, and a smaller card footprint.
+
+### What is still unknown
+
+- The mechanism inside the driver or the card: why reads of system memory slow down 200-500
+  times, why it deepens over a minute or two, why it outlasts the process and what in a game
+  start ends it (a separate process creating devices, allocating 6 GB or uploading 768 MB does
+  not).
+- Whether the machine's uptime or an earlier fault (the Wi-Fi adapter's failures, the PCIe
+  replays) is what makes the deep state possible: tonight it reproduced at will before a restart
+  of Windows and not at all after it (nine runs, H to Q). A reboot before a long headset session is
+  the cheapest thing to try.
+- Whether other PCs get it the same way. This card trains PCIe gen 4 x8 in an x16 slot, its
+  replay counter stood at 8,167 tonight (it did not move at any onset or end), and MSI
+  Afterburner applies a memory offset and a voltage curve; stock clocks, another driver and a
+  link at x16 were not tried.
+- Whether the game without the mod gets it. Run H could only resize up to 2560x1440 (about a
+  fifth of the memory the stereo targets move), and one run without an onset says little.
+- The real triggers in a headset session: the two sessions had no resize by the mod, only the
+  game's own loads and battles moving 0.4-1.7 GB of resident memory.
+
+Evidence: `captures\stall\` (local, not in the repository): one folder per run with `run.txt`,
+`windows.csv`, `probeloop.txt`, `gpu.csv` and the game's log; `probe-night.txt` (the probe loop
+over the whole night, including other runs' starts).
+
 ## Resting state
 
 After `bench-compare.ps1` (and after every `bench-run.ps1`) the machine is
