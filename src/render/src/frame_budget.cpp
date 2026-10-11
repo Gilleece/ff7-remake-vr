@@ -29,6 +29,7 @@ constexpr int kWindowsToWarn = 2;                      // consecutive windows ov
 constexpr auto kHoldOff = std::chrono::seconds(30);    // after a load, a stall, a mode change, the start
 constexpr auto kWarnEvery = std::chrono::seconds(60);  // at most one warning a minute
 constexpr double kGpuBound = 0.85;                     // GPU total at least this share of the interval
+constexpr double kSlowUploadGBps = 0.5;               // transfer-bound: the upload check below this
 constexpr double kGpuLow = 0.70;                       // game-thread-bound: GPU total below this share ...
 constexpr double kWaitLow = 0.30;                      // ... and the frame wait below this share
 constexpr double kSceneShare = 0.80;                   // stereo gameplay: the 3D scene rendered in this share of the frames
@@ -70,6 +71,16 @@ Verdict Classify(const Window& w, double interval, bool haveGpu, double dlssTwoE
     const double gpu = w.sceneMs + w.afterMs;
     const std::string runtime = w.runtime.empty() ? std::string("the runtime") : w.runtime;
     const std::string lowerRes = std::format("a lower resolution in {}", w.runtime.empty() ? std::string("the headset's runtime") : w.runtime);
+    if (w.uploadGBps >= 0 && w.uploadGBps < kSlowUploadGBps) {
+        // Checked first: in this state every part of the frame waits on reads of system memory,
+        // so the GPU figures look like any other cause.
+        v.kind = "transfer-bound";
+        v.detail = std::format("the graphics card reads system memory at {:.2f} GB/s (normally 3-14 GB/s){}", w.uploadGBps,
+                               haveGpu ? std::format("; GPU {:.1f} ms (scene {:.1f}, after the scene {:.1f})", gpu, w.sceneMs, w.afterMs) : std::string());
+        v.advice = "This slow state of the card's PCIe transfers outlasts the game and ends with the next start: quit, wait a minute, start again";
+        v.brief = "slow PCIe transfers: restart the game";
+        return v;
+    }
     if (haveGpu && gpu >= kGpuBound * interval) {
         v.kind = "GPU-bound";
         const bool dlssLargest = dlssTwoEyesMs > 0 && w.afterMs >= w.sceneMs && dlssTwoEyesMs >= 0.5 * w.afterMs;

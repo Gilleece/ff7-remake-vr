@@ -510,6 +510,7 @@ void XrController::LogStats() {
     if (dev) bw.copyEnginePercent = video_memory::LogReport(dev.Get()).processCopyPercent;
     if (const std::string c = census::TakeWindowLine(bw.stereoMode); !c.empty()) log::info("timing:   {}", c);
     if (const std::string u = upload_check::TakeWindowLine(); !u.empty()) log::info("timing:   {}", u);
+    bw.uploadGBps = upload_check::LatestGBps();
     frame_budget::Evaluate(bw);
 }
 
