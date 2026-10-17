@@ -419,6 +419,14 @@ bool start(const StartupContext& ctx) {
             log::info("engine: stereo disabled in ff7vr.ini ([stereo] enabled = 0); the game runs unmodified");
             return false;
         }
+        {
+            // [stereo] hair_dither = static (default) | game; hair_dither_size = 2 | 4 | 8.
+            std::string dither = cfg.get_string("stereo", "hair_dither", "static");
+            for (char& c : dither) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            const int tile = static_cast<int>(cfg.get_int("stereo", "hair_dither_size", 2));
+            shaders::set_dither_ab(cfg.get_bool("dev", "dither_ab", false));
+            shaders::set_dither(dither == "game" || dither == "0" || dither == "off" ? 0 : tile, cfg.get_bool("dev", "dither_screen", false));
+        }
         // Before the game creates its device: the reflections fix needs the bytecode of one
         // of the game's pixel shaders (shaders.h).
         shaders::install(cfg.get_bool("dev", "keep_shaders", false));
