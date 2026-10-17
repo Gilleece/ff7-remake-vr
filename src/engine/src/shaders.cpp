@@ -49,7 +49,7 @@ std::atomic<std::uint64_t> g_patch_matches{0}, g_patch_failures{0};
 // The dither patch (see find_dither): the size of the static tile (0: as the game), whether
 // the full-screen form is patched too, and every distinct shader seen, by its 3DMigoto hash
 // (`shader list`). Under g_mutex.
-std::atomic<int> g_dither_size{2};
+std::atomic<int> g_dither_size{32};
 std::atomic<bool> g_dither_screen{false};
 std::atomic<std::uint64_t> g_dither_patched{0}, g_dither_failed{0}, g_dither_material_seen{0}, g_dither_screen_seen{0};
 struct Known {
@@ -63,10 +63,14 @@ std::map<std::uint64_t, Known>* g_known = new std::map<std::uint64_t, Known>();
 // Comparison mode ([dev] dither_ab = 1): every dithered shader is also created as the game's
 // and in each tile size, and a hook on PSSetShader binds the variant `shader dither <mode>`
 // selects, so the modes can be compared in one session. Under g_mutex.
-constexpr int kTiles[] = {0, 2, 4, 8, 64};  // variant index -> tile (0: the game's shader)
+// Variant index -> tile (0: the game's shader). A negative value -k is the "slow" form: the
+// game's full noise, but the slice advances only every 2^k frames (see slow_copy).
+constexpr int kTiles[] = {0, 2, 4, 8, 16, 32, 64, -2, -3, -4, -5};
+constexpr std::size_t kVariants = std::size(kTiles);
 std::atomic<bool> g_ab{false};
 std::atomic<int> g_ab_variant{-1};  // -1: none, the object as created
-std::unordered_map<void*, std::array<ID3D11PixelShader*, 5>>* g_variants = new std::unordered_map<void*, std::array<ID3D11PixelShader*, 5>>();
+std::unordered_map<void*, std::array<ID3D11PixelShader*, kVariants>>* g_variants =
+    new std::unordered_map<void*, std::array<ID3D11PixelShader*, kVariants>>();
 hook::InlineHook* g_set_hook = new hook::InlineHook();
 std::atomic<std::uint64_t> g_ab_swaps{0};
 constexpr std::size_t kPSSetShader = 9;  // ID3D11DeviceContext vtable slot
@@ -224,6 +228,9 @@ std::size_t find_view_origin_add(const std::uint8_t* code, std::size_t size) {
 struct DitherScan {
     std::vector<std::size_t> material;  // byte offsets of the mask immediates (x, y, z follow), material form
     std::vector<std::size_t> screen;    // the same, full-screen form
+    // The material form's counter instructions (ishl rA, cbN[139].z, l(3)): byte offsets of
+    // the opcode token and of the shift immediate. Each instruction once.
+    std::vector<std::pair<std::size_t, std::size_t>> counter;
 };
 
 DitherScan find_dither(const std::uint8_t* code, std::size_t size) {
@@ -246,7 +253,8 @@ DitherScan find_dither(const std::uint8_t* code, std::size_t size) {
         if ((tok[0] >> 16) != 0) return out;  // pixel shaders only
 
         struct Instr {
-            unsigned op = ~0u;  // ~0u: an instruction of no interest here
+            unsigned op = ~0u;   // ~0u: an instruction of no interest here
+            std::size_t at = 0;  // token index of the opcode
             std::vector<Operand> ops;
         };
         std::vector<Instr> ins;  // the instructions after the declarations, in order
@@ -266,6 +274,7 @@ DitherScan find_dither(const std::uint8_t* code, std::size_t size) {
             }
             if (op < 88) {
                 Instr in;
+                in.at = i;
                 if (op != 53) {  // every instruction but custom data: its operands
                     std::size_t j = i + 1;
                     for (bool e = (t >> 31) != 0; e && j < n; ++j) e = (tok[j] >> 31) != 0;
@@ -314,6 +323,7 @@ DitherScan find_dither(const std::uint8_t* code, std::size_t size) {
             // Before it: xy from SV_Position, z from the frame counter.
             bool xy = false;
             int form = 0;  // 1 material, 2 full-screen, -1 something else wrote z
+            std::pair<std::size_t, std::size_t> counter{};  // material form: the counter instruction
             for (std::size_t m = k; m-- > 0 && m + 6 >= k;) {
                 const Instr& p = ins[m];
                 if (p.op == 27 && p.ops.size() == 2 && p.ops[0].type == 0 && p.ops[0].index[0] == r && write_mask(p.ops[0]) == 0x3 &&
@@ -336,6 +346,7 @@ DitherScan find_dither(const std::uint8_t* code, std::size_t size) {
                         if (!is_counter(h)) continue;
                         for (int s = 1; s <= 2; ++s)
                             if (is_temp(p.ops[s], h.ops[0].index[0]) && write_mask(h.ops[0]) == (1u << first_component(p.ops[s]))) form = 1;
+                        if (form == 1) counter = {base + 4 * h.at, base + 4 * h.ops[2].imm};
                     }
                     if (form == 0) form = -1;
                 } else {
@@ -344,6 +355,7 @@ DitherScan find_dither(const std::uint8_t* code, std::size_t size) {
             }
             if (!xy || form <= 0) continue;
             (form == 1 ? out.material : out.screen).push_back(base + 4 * a.ops[2].imm);
+            if (form == 1 && std::find(out.counter.begin(), out.counter.end(), counter) == out.counter.end()) out.counter.push_back(counter);
         }
         return out;
     }
@@ -360,9 +372,10 @@ std::uint64_t migoto_hash(const void* code, std::size_t size) {
     return h;
 }
 
-// A signed copy of the shader with the lookups at `at` masked for a static tile: 2, 4 or 8
-// = an x-by-x tile of the first noise slices; 64 = the whole 64x64 tile, the object's offset
-// kept among 8 slices. Empty if it could not be made.
+// A signed copy of the shader with the lookups at `at` masked for a static tile: 2 to 32
+// = an x-by-x tile of the first noise slices (the z mask is at most 7, which drops the
+// counter, a multiple of 8); 64 = the whole 64x64 tile, the object's offset kept among 8
+// slices. Empty if it could not be made.
 std::vector<std::uint8_t> dither_copy(const void* code, std::size_t size, const std::vector<std::size_t>& at, int tile) {
     std::vector<std::uint8_t> out(static_cast<const std::uint8_t*>(code), static_cast<const std::uint8_t*>(code) + size);
     const std::uint32_t xy = static_cast<std::uint32_t>(tile - 1), z = static_cast<std::uint32_t>(std::min(tile, 8) - 1);
@@ -371,6 +384,27 @@ std::vector<std::uint8_t> dither_copy(const void* code, std::size_t size, const 
         std::memcpy(out.data() + o, &xy, 4);
         std::memcpy(out.data() + o + 4, &xy, 4);
         std::memcpy(out.data() + o + 8, &z, 4);
+    }
+    if (!sign(out)) out.clear();
+    return out;
+}
+
+// Comparison only: a signed copy whose counter instructions `ishl rA, cbN[139].z, l(3)` become
+// `ushr rA, cbN[139].z, l(k)` (same operands, opcode 85 in place of 41): the slice is then
+// frame / 2^k + the object's offset, masked by 63 as before. The full noise is kept and the
+// pattern changes every 2^k frames instead of every frame. Empty if it could not be made.
+std::vector<std::uint8_t> slow_copy(const void* code, std::size_t size, const std::vector<std::pair<std::size_t, std::size_t>>& at, int k) {
+    if (at.empty()) return {};
+    std::vector<std::uint8_t> out(static_cast<const std::uint8_t*>(code), static_cast<const std::uint8_t*>(code) + size);
+    for (const auto& [op_at, imm_at] : at) {
+        if (op_at + 4 > size || imm_at + 4 > size) return {};
+        std::uint32_t t = 0;
+        std::memcpy(&t, out.data() + op_at, 4);
+        if ((t & 0x7ff) != 41) return {};
+        t = (t & ~0x7ffu) | 85u;
+        std::memcpy(out.data() + op_at, &t, 4);
+        const std::uint32_t shift = static_cast<std::uint32_t>(k);
+        std::memcpy(out.data() + imm_at, &shift, 4);
     }
     if (!sign(out)) out.clear();
     return out;
@@ -488,11 +522,12 @@ HRESULT STDMETHODCALLTYPE create_pixel_shader(ID3D11Device* dev, const void* cod
                 g_variants->erase(oldv);
             }
             if (g_ab.load(std::memory_order_relaxed) && !ds.material.empty()) {
-                std::array<ID3D11PixelShader*, 5> v{};
+                std::array<ID3D11PixelShader*, kVariants> v{};
                 for (std::size_t k = 0; k < v.size(); ++k) {
-                    std::vector<std::uint8_t> c = kTiles[k] ? dither_copy(code, size, ds.material, kTiles[k])
-                                                            : std::vector<std::uint8_t>(static_cast<const std::uint8_t*>(code),
-                                                                                        static_cast<const std::uint8_t*>(code) + size);
+                    std::vector<std::uint8_t> c = kTiles[k] > 0   ? dither_copy(code, size, ds.material, kTiles[k])
+                                                  : kTiles[k] < 0 ? slow_copy(code, size, ds.counter, -kTiles[k])
+                                                                  : std::vector<std::uint8_t>(static_cast<const std::uint8_t*>(code),
+                                                                                              static_cast<const std::uint8_t*>(code) + size);
                     if (!c.empty()) g_hook->original<CreatePixelShaderFn>()(dev, c.data(), c.size(), link, &v[k]);
                 }
                 (*g_variants)[*out] = v;
@@ -644,7 +679,7 @@ bool install(bool keep_all) {
 }
 
 void set_dither(int tile, bool screen) {
-    g_dither_size = tile == 2 || tile == 4 || tile == 8 || tile == 64 ? tile : 0;
+    g_dither_size = tile == 2 || tile == 4 || tile == 8 || tile == 16 || tile == 32 || tile == 64 ? tile : 0;
     g_dither_screen = screen;
     log::info("shaders: dithered materials {}", g_dither_size.load() ? std::format("patched to a static {0}x{0} dither tile{1} ([stereo] hair_dither)",
                                                                                      g_dither_size.load(), screen ? ", full-screen passes too" : "")
@@ -723,16 +758,19 @@ std::string command(const std::string& args) {
             if (a[1] == "off" || a[1] == "none") v = -1;
             else if (a[1] == "game") v = 0;
             else
-                for (int k = 1; k < 5; ++k)
-                    if (a[1] == std::to_string(kTiles[k])) v = k;
-            if (v == -2) return "err usage: shader dither off|game|2|4|8|64";
+                for (int k = 1; k < static_cast<int>(kVariants); ++k)
+                    if (a[1] == (kTiles[k] > 0 ? std::to_string(kTiles[k]) : std::format("slow{}", -kTiles[k]))) v = k;
+            if (v == -2) return "err usage: shader dither off|game|2|4|8|16|32|64|slow2|slow3|slow4|slow5";
             if (!g_ab.load()) return "err needs [dev] dither_ab = 1 at start";
             g_ab_variant = v;
         }
         std::lock_guard lk(g_mutex);
         const int v = g_ab_variant.load();
         return std::format("ok dither comparison {}: bound {}, shaders with variants {}, swaps {}", g_ab.load() ? "on" : "off",
-                           v < 0 ? std::string("as created") : v == 0 ? std::string("the game's") : std::format("static {}", kTiles[v]),
+                           v < 0             ? std::string("as created")
+                           : v == 0          ? std::string("the game's")
+                           : kTiles[v] > 0   ? std::format("static {}", kTiles[v])
+                                             : std::format("slow: the game's noise, a new slice every {} frames", 1 << -kTiles[v]),
                            g_variants->size(), g_ab_swaps.load());
     }
     if (a[0] == "list" && a.size() == 2) {

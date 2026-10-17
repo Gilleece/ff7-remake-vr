@@ -1069,7 +1069,7 @@ movement (not rotated by design), how it feels.
 | `distortion_fix` | `1` | heat haze and refraction per eye: without it the left view's distortion composite covers both eyes and the right view's draws nothing (see "Right-eye distortion fix") |
 | `game_vignette` | `0` | share of the game's lens vignette kept while stereo renders: `0` none, `1` as in the flat game (see "Lens vignette in stereo") |
 | `hair_dither` | `static` | `static`: the dither of hair, grates and fades is the same pattern every frame; `game`: a new one every frame, as the game draws it. At start only (see "Dithered hair and fades") |
-| `hair_dither_size` | `2` | tile of the static dither in pixels: `2`, `4` or `8` |
+| `hair_dither_size` | `32` | tile of the static dither in pixels: `32`, `16`, `8`, `4` or `2`. 32 and 16 keep the game's fine grain on hair and body hair; the small tiles show as lines or a grid on sparse hair |
 | `hzb_skip` | `0` | `1` leaves out the further mips of the hierarchical depth chain nothing reads, while `r.HZBOcclusion` is 0 (see "Volumes and hierarchical depth per view"); gain within noise |
 | `tonemap_shift` | `auto` | with ReShade's Luma add-on loaded, the right view's bloom-combine input shifted to the origin (Luma's shader reads it there; without it both eyes show the left eye's image). `auto`: only while Luma is loaded; `0` off; `1` always (breaks the right eye without Luma). See "ReShade and Luma: the tonemapping shift and Luma's DLSS" |
 | `luma_dlss` | `0` | `0`: while stereo renders, Luma's own DLSS calls into NGX are refused (Luma's DLSS takes the double-wide target for a 50 % frame and leaves the right eye a squeezed quarter); `1`: allowed, for comparison. No effect without Luma; the mod's own DLSS is not affected |
@@ -1154,7 +1154,7 @@ Through the dev pipe (`[dev] pipe = 1`, `tools\dev\send-input.ps1 -Pipe "<comman
 | `ssr fix <0\|1\|2\|3>` | right-eye reflections: `3` drawn in place with the patched shader (`drawn in place` counts the runs, `frames without it` the frames that fell back to `2`), `2` both eyes without screen-space reflections (`runs cleared` counts them), `1` moved into place (`applied` one per stereo frame, `failed`, the x where the right view's result was placed, how often that x changed (`moved`) and results no draw read (`not read`)), `0` off |
 | `ssr test equal\|same\|shift\|halves\|result` | tests of `ssr fix 3` on the next frame, result in the log and in `ssr test result`: `equal` the patched shader against the game's at the origin (bit for bit; `same` the game's shader twice, the control; run them with `fov off`), `shift` the run in place against the same view computed at the origin with the game's shader, `halves` the two halves of the target compared (for two identical views) |
 | `ssr shader <prefix>`, `shader status\|check`, `shader dump <pointer> <prefix>` | the reflection pass's pixel shader (`.dxbc` and `.asm`; needs `[dev] keep_shaders = 1` from start-up), the shaders created and the patched copies, the checksum check, any pixel shader by the pointer `gpu trace` logs (`docs/re/engine.md`, "Screen-space reflections: the pixel shader") |
-| `shader list <file>`, `shader dither off\|game\|2\|4\|8\|64` | every distinct pixel shader created (3DMigoto hash, checksum, size, dither lookups found, patched or not); with `[dev] dither_ab = 1` from start-up, binds the chosen dither variant of every dithered material live (see "Dithered hair and fades") |
+| `shader list <file>`, `shader dither off\|game\|2\|4\|8\|16\|32\|64\|slow2..slow5` | every distinct pixel shader created (3DMigoto hash, checksum, size, dither lookups found, patched or not); with `[dev] dither_ab = 1` from start-up, binds the chosen dither variant of every dithered material live (see "Dithered hair and fades") |
 | `shader fnv <hex>` | the kept shaders (`[dev] keep_shaders = 1`) whose 64-bit FNV-1 hash of the bytecode (offset basis 0, the name shader-replacement tools such as 3DMigoto give a shader) is the given one |
 | `hzb [0-4]` | the unread hierarchical depth chain: `0` built (default), `1` further mips left out, `2` / `3` the whole chain filled with near / far depth, `4` the read chain's further mips filled (control); shows the view chains seen and the mips left out |
 | `stereo framelog start` / `stop <csv>` | frame log: per frame the start, host return and end of `UGameEngine::Tick`, the render thread's end of the scene and the frame-end command on the RHI thread, each with the thread's CPU time (cycle count) and, at the start of Tick, the latest GPU frame time (see "Turning: where the slow frames come from") |
@@ -2222,7 +2222,12 @@ it. On a monitor that mostly works; in a headset, where the view never stands st
 anti-aliasing keeps dropping its history, it shows as shimmering, crawling hair.
 
 `[stereo] hair_dither = static` (default) makes the pattern the same in every frame;
-`hair_dither_size` (2, 4 or 8, default 2) is the pattern's tile in pixels. `game` leaves the
+`hair_dither_size` (32, 16, 8, 4 or 2, default 32) is the pattern's tile in pixels. Every
+size is equally steady; they differ in how the hair looks. 32 and 16 look like the game's own
+fine grain, on Cloud's and Tifa's hair and on body hair such as Barret's arms; 8, 4 and 2
+repeat a small tile, which shows as horizontal lines (2), a grid of dots (4) or vertical
+streaks (8) on sparse hair. If hair looks too grainy, try 16; if it looks striped, use a
+larger size. `game` leaves the
 shaders as the game made them. Read once at start (the shaders are created once); also in
 the settings panel (Picture tab, applied at the next start). The patched shaders stay in use
 when the game is shown flat (movies, cutscenes on the virtual screen, 3D off).
@@ -2233,7 +2238,8 @@ looks for the lookup in each pixel shader's bytecode (the `and` with `(63, 63, 6
 register whose x and y come from `SV_Position` and whose z is the frame counter times 8,
 from an `ishl ..., cbN[139].z, l(3)`, plus the object's offset, followed by a load from a
 texture declared 3D) and creates the shader from a copy where that mask is `(t-1, t-1,
-t-1, 0)`: a z mask below 8 drops the counter, a multiple of 8. One immediate changes, the
+min(t,8)-1, 0)`: a z mask below 8 drops the counter, a multiple of 8, so every tile size is
+static; 16 and 32 use the first 8 slices like 8 does. One immediate changes, the
 copy is re-signed, the instruction count is unchanged. The same lookup in full-screen passes
 (shadow projection, ambient occlusion, reflections), without the object's offset, is counted
 but left alone (`[dev] dither_screen = 1` patches it too, only for tests). The log says
@@ -2264,11 +2270,10 @@ and Barret in front of a wall of see-through grates; captures in `captures/hair/
   18.9 levels (of 255) in `game` and 3.0 to 3.3 with a static tile. Cloud's hair: the speckle
   that changes from frame to frame is gone with a static tile; his idle motion between
   captures (2 s apart) prevents a clean number there.
-- Default 2 (also the helixmod fix's choice): with 4 the best in the captures, and its
-  2-pixel period lies within the anti-aliasing's sub-pixel jitter, so the anti-aliasing
-  smooths it to the average coverage. A 2x2 tile has only 4 coverage levels, which can show
-  as faint lines in thin hair; 4 gives 16. The whole tile (`shader dither 64`) is a
-  comparison mode only.
+- First default 2 (the helixmod fix's choice): best on the grate wall, but a 2x2 tile has
+  only 4 coverage levels. In a headset, Cloud's and Tifa's hair looked good with it but
+  Barret's chest and arm hair in first person looked wrong, hence the comparison below and
+  the default of 32.
 - The scene's overall brightness drifted by up to 30 % over 40 s in these captures, the same
   in every mode when alternating, so whole-image comparisons between runs say nothing.
 - Cost: GPU time of the frame (`dynres`, median of 10 frames) 5.05 ms with `game` and 5.04
@@ -2278,10 +2283,42 @@ and Barret in front of a wall of see-through grates; captures in `captures/hair/
   the static pattern too; the helixmod fix removes the fade there instead), other areas,
   a headset.
 
+Choosing the tile size (Null backend, 2064x2208 per eye, the dev harness save, temporal
+anti-aliasing on unless stated; `[dev] dither_ab = 1`, every variant in one session, two
+captures about 175 frames apart per variant; captures in `captures/dither/`, not in git):
+
+- Look, Barret's forearm hair (first person, the head moved next to him with `xr-sim head`;
+  crops at 3x in two runs): 2 draws the strands as horizontal stripes across the whole
+  patch, 4 as a regular grid of dots, 8 as short vertical streaks; 16 and 32 give separate
+  fine strands like `game`; 64 is fine as well but grainier (salt and pepper) in one of the
+  two runs. A tile of t pixels has t x t thresholds (4, 16, 64, 256, 1024), so the small
+  tiles' structure is the tile itself repeating; at 16 and more the repetition is too wide
+  to see on a forearm.
+- Steadiness, the ceiling grate (a dithered material on static geometry; mean absolute
+  change of luma between the two captures, levels of 255, two runs): `game` 41.8 and 23.5;
+  2: 24.2 and 24.2; 4: 10.4 and 12.5; 8: 6.1 and 6.8; 16: 11.1 and 23.4; 32: 4.4 and 15.4;
+  64: 5.6 and 11.1. The plain ceiling next to it (not dithered, the control) changes by 4.2
+  to 13.2 in the same captures: the full-screen passes' own dither (shadows, ambient
+  occlusion; not patched) and light changes move the whole scene, so the figures are noisy
+  and only the large gap to `game` is meaningful. Without anti-aliasing: `game` 21.1, 2: 20.2,
+  4: 15.4, 8: 11.8, 16: 16.3, 32: 6.2, 64: 11.5, control 4.4 to 9.2. Every tile is static by
+  construction (the lookup no longer depends on the counter).
+- Characters' hair and skin: the idle animation moves them several pixels between two
+  captures, so the frame-to-frame change there measures the motion, not the dither (the skin
+  control changes as much as the hair); judged by the crops only.
+- A "slow" variant (`shader dither slow2` to `slow5`, comparison mode only): the counter
+  instruction `ishl rA, cbN[139].z, l(3)` becomes `ushr rA, cbN[139].z, l(k)` (opcode 85 in
+  place of 41, same operands), so the full noise is kept and the slice advances every 2^k
+  frames. On the grate it changed as much as `game` between captures (40.9, 32.7, 17.7, 37.8
+  for k = 2 to 5) and the change comes as a jump of the whole pattern every 2^k frames; it
+  is not a middle ground worth offering. That `slow5` still changes between captures 175
+  frames apart suggests the counter is a running frame number, not an index modulo 8.
+
 Dev commands: `shader status` (counts), `shader list <file>` (every distinct shader with its
 3DMigoto hash, checksum, size, lookups found, patched or not), and with `[dev] dither_ab = 1`
-from start-up `shader dither off|game|2|4|8|64`, which binds that variant of every dithered
-material live through a hook on `PSSetShader` (installed only in that mode).
+from start-up `shader dither off|game|2|4|8|16|32|64|slow2..slow5`, which binds that variant
+of every dithered material live through a hook on `PSSetShader` (installed only in that
+mode).
 
 ## ReShade and Luma: the tonemapping shift and Luma's DLSS
 
