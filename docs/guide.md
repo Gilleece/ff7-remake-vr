@@ -597,6 +597,7 @@ developer notes, `docs/engine-module.md`, "Picture settings measured"):
 |---|---|---|
 | `[stereo] game_vignette = 0` (default) | removes the game's vignette: without it each eye fades to a fifth of the light at the edge of the view | none measurable |
 | `[picture] sharpen` | the mod's own sharpening of the 3D view | 0.07 ms at 2064x2208 per eye (more at larger sizes) |
+| `[stereo] hair_dither = static` (default), `hair_dither_size = 2` | hair, fur and fading objects keep the same fine dither pattern from frame to frame instead of a new one every frame, which shimmers in a headset; `game` = as the game draws it. Also in the settings panel (Picture), from the next start | none |
 | `r.TemporalAASamples`, `r.Tonemapper.Sharpen`, `r.MaxAnisotropy`, `r.Streaming.MipBias`, `r.SSS.*`, `r.Tonemapper.Quality`, shadow resolution and distance | no visible change: the game's own settings are already at their highest | none |
 | `[foveation] translucency_full_rate = 1` | smoke, fire, particles and glass at full detail in the outer rings (not yet seen with such effects) | about 0.01 ms in a scene without them |
 | `r.DepthOfFieldQuality = 0` under `[stereo_cvars]` | no depth of field in cutscenes that play in 3D (not yet seen in a cutscene) | none |

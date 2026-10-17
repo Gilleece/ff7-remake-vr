@@ -397,7 +397,7 @@ HRESULT STDMETHODCALLTYPE create_pixel_shader(ID3D11Device* dev, const void* cod
     DitherScan ds;
     const int tile = g_dither_size.load(std::memory_order_relaxed);
     try {
-        if (code && size >= 32) {
+        if (code && size >= 32 && out) {  // out == nullptr: the caller only validates the code
             ds = find_dither(static_cast<const std::uint8_t*>(code), size);
             std::vector<std::size_t> at = ds.material;
             if (g_dither_screen.load(std::memory_order_relaxed)) at.insert(at.end(), ds.screen.begin(), ds.screen.end());

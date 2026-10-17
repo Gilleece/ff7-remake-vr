@@ -1648,6 +1648,37 @@ Verified headless 2026-10-10 (Null backend, 2 x 3072x3264, first room of the lat
 548 MB, 473 textures under their wanted mips; 6000: everything at the wanted mips;
 `r.Streaming.Boost 2`: required 2207 -> 2360 MB.
 
+## 16. Dithered materials: the noise lookup (LIVE, shader bytecode)
+
+Found from the pixel shaders the game creates (the `CreatePixelShader` hook, `shaders.cpp`
+`find_dither`), cross-checked against the disassemblies of a published flat-screen fix for
+this game (helixmod's FF7R DX11 fix, whose `ShaderFixes` are named by the 3DMigoto hash).
+
+- Material form (base pass, depth and shadow passes of masked materials):
+
+  ```
+  add r0.w, v4.w, l(0.5) ; round_ni ; ftoi      the object's offset (an interpolator's .w)
+  ishl r1.w, cbN[139].z, l(3)                    the view's frame counter * 8 (cb0 or cb1: the View buffer)
+  iadd r3.z, r0.w, r1.w
+  ftoi r3.xy, v<SV_Position>.xyxx
+  and r3.xyz, r3.xyzx, l(63, 63, 63, 0)
+  mov r3.w, l(0)
+  ld_indexable(texture3d) r3.xyz, r3.xyzw, t0    t0: a 64x64x64 noise texture
+  ```
+
+  Uses of the value seen: `noise < coverage` sets a G-buffer flag bit (`and ..., l(32)`
+  into `o2.w`) and dithers the encoded normals (`o1`, `o4`); in the depth and shadow
+  variants `discard_z ((noise < cb0[2].x) && (alpha > 0.5))`, a dithered fade (`cb0[2].x`
+  is 1 for an object that is not fading).
+- Full-screen form (shadow projection, ambient occlusion, reflections, other passes): the
+  same `and`/`ld` with `ishl rB.z, cbN[139].z, l(3)` written straight into the address
+  (no per-object offset). Variants with `ishl ..., cbN[139].w, l(1)` and a different
+  register order also exist (3 of the fix's shaders); `find_dither` does not match those.
+- The patch: the `and` immediate becomes `(t-1, t-1, min(t,8)-1, 0)` for a tile `t` of 2, 4
+  or 8 (the pack's choice is 2), or `(63, 63, 7, 0)` for the whole 64x64 tile. Any z mask
+  below 8 removes the counter term, a multiple of 8. One dword per lookup; the copy is
+  re-signed (`sign()`); instruction count unchanged.
+
 ## Tools
 
 All in `tools/re/`, run with the repo's `.venv` Python. The exe is found through Steam's

@@ -1068,6 +1068,8 @@ movement (not rotated by design), how it feels.
 | `ssr_fix` | `3` | screen-space reflections per eye. `3` (default since 09/10): the right view's run drawn in place with a patched copy of the pass's pixel shader, both eyes get their own reflections ("Right-eye reflections drawn in place"). `2`: none in either eye. `1`: the right view's run moved into place, but what it computes is wrong ("The right eye's reflections are not its own"). `0`: the right eye has none (see "Right-eye reflections fix"). `on` = 3, `off` = 0 |
 | `distortion_fix` | `1` | heat haze and refraction per eye: without it the left view's distortion composite covers both eyes and the right view's draws nothing (see "Right-eye distortion fix") |
 | `game_vignette` | `0` | share of the game's lens vignette kept while stereo renders: `0` none, `1` as in the flat game (see "Lens vignette in stereo") |
+| `hair_dither` | `static` | `static`: the dither of hair, grates and fades is the same pattern every frame; `game`: a new one every frame, as the game draws it. At start only (see "Dithered hair and fades") |
+| `hair_dither_size` | `2` | tile of the static dither in pixels: `2`, `4` or `8` |
 | `hzb_skip` | `0` | `1` leaves out the further mips of the hierarchical depth chain nothing reads, while `r.HZBOcclusion` is 0 (see "Volumes and hierarchical depth per view"); gain within noise |
 | `tonemap_shift` | `auto` | with ReShade's Luma add-on loaded, the right view's bloom-combine input shifted to the origin (Luma's shader reads it there; without it both eyes show the left eye's image). `auto`: only while Luma is loaded; `0` off; `1` always (breaks the right eye without Luma). See "ReShade and Luma: the tonemapping shift and Luma's DLSS" |
 | `luma_dlss` | `0` | `0`: while stereo renders, Luma's own DLSS calls into NGX are refused (Luma's DLSS takes the double-wide target for a 50 % frame and leaves the right eye a squeezed quarter); `1`: allowed, for comparison. No effect without Luma; the mod's own DLSS is not affected |
@@ -1152,6 +1154,7 @@ Through the dev pipe (`[dev] pipe = 1`, `tools\dev\send-input.ps1 -Pipe "<comman
 | `ssr fix <0\|1\|2\|3>` | right-eye reflections: `3` drawn in place with the patched shader (`drawn in place` counts the runs, `frames without it` the frames that fell back to `2`), `2` both eyes without screen-space reflections (`runs cleared` counts them), `1` moved into place (`applied` one per stereo frame, `failed`, the x where the right view's result was placed, how often that x changed (`moved`) and results no draw read (`not read`)), `0` off |
 | `ssr test equal\|same\|shift\|halves\|result` | tests of `ssr fix 3` on the next frame, result in the log and in `ssr test result`: `equal` the patched shader against the game's at the origin (bit for bit; `same` the game's shader twice, the control; run them with `fov off`), `shift` the run in place against the same view computed at the origin with the game's shader, `halves` the two halves of the target compared (for two identical views) |
 | `ssr shader <prefix>`, `shader status\|check`, `shader dump <pointer> <prefix>` | the reflection pass's pixel shader (`.dxbc` and `.asm`; needs `[dev] keep_shaders = 1` from start-up), the shaders created and the patched copies, the checksum check, any pixel shader by the pointer `gpu trace` logs (`docs/re/engine.md`, "Screen-space reflections: the pixel shader") |
+| `shader list <file>`, `shader dither off\|game\|2\|4\|8\|64` | every distinct pixel shader created (3DMigoto hash, checksum, size, dither lookups found, patched or not); with `[dev] dither_ab = 1` from start-up, binds the chosen dither variant of every dithered material live (see "Dithered hair and fades") |
 | `hzb [0-4]` | the unread hierarchical depth chain: `0` built (default), `1` further mips left out, `2` / `3` the whole chain filled with near / far depth, `4` the read chain's further mips filled (control); shows the view chains seen and the mips left out |
 | `stereo framelog start` / `stop <csv>` | frame log: per frame the start, host return and end of `UGameEngine::Tick`, the render thread's end of the scene and the frame-end command on the RHI thread, each with the thread's CPU time (cycle count) and, at the start of Tick, the latest GPU frame time (see "Turning: where the slow frames come from") |
 | `stereo lateupdate [status]` / `on` / `off` | late update of the head pose: on or off, whether the view layout was found, counters (stereo scenes, frames relocated, frames not paired with a queued frame, views whose matrices were not as built, locations refused), the eye's yaw change and shift the late location made (last, average, largest), and the average pose age at the hand-over to the XR layer, of the frame wait's location and of the late one |
@@ -2111,6 +2114,77 @@ on every frame (+552, +600), at 67 % on none (bloom `missed` +537, occlusion `fa
 middle and fits the buffer). Right eye at 67 % with all three fixes off and on:
 `014336-scales/sheet_sp67_R_allfix0_allfix1_L.png` (off: the orange streak and the doorway's
 copy from the left eye's bloom; on: gone).
+
+## Dithered hair and fades (`hair_dither`)
+
+Hair, fur, see-through grates and objects that fade out are drawn by Square Enix's materials
+with a dither instead of blending: each pixel compares a value from a 64x64x64 noise
+texture with the coverage it should have. The noise slice follows the view's frame counter,
+so the pattern is a new one every frame and the temporal anti-aliasing is left to average
+it. On a monitor that mostly works; in a headset, where the view never stands still and the
+anti-aliasing keeps dropping its history, it shows as shimmering, crawling hair.
+
+`[stereo] hair_dither = static` (default) makes the pattern the same in every frame;
+`hair_dither_size` (2, 4 or 8, default 2) is the pattern's tile in pixels. `game` leaves the
+shaders as the game made them. Read once at start (the shaders are created once); also in
+the settings panel (Picture tab, applied at the next start). The patched shaders stay in use
+when the game is shown flat (movies, cutscenes on the virtual screen, 3D off).
+
+How (`src/engine/src/shaders.cpp`, `find_dither`; the bytecode and its uses are in
+`docs/re/engine.md`, "Dithered materials: the noise lookup"): the `CreatePixelShader` hook
+looks for the lookup in each pixel shader's bytecode (the `and` with `(63, 63, 63, 0)` on a
+register whose x and y come from `SV_Position` and whose z is the frame counter times 8,
+from an `ishl ..., cbN[139].z, l(3)`, plus the object's offset, followed by a load from a
+texture declared 3D) and creates the shader from a copy where that mask is `(t-1, t-1,
+t-1, 0)`: a z mask below 8 drops the counter, a multiple of 8. One immediate changes, the
+copy is re-signed, the instruction count is unchanged. The same lookup in full-screen passes
+(shadow projection, ambient occlusion, reflections), without the object's offset, is counted
+but left alone (`[dev] dither_screen = 1` patches it too, only for tests). The log says
+`shaders: dithered materials: N pixel shader(s) patched so far` at the 1st, 10th, 100th and
+1000th; each one at debug level with its checksum and 3DMigoto hash. `shader status` counts
+them.
+
+The technique is the one of helixmod's flat-screen DX11 fix for this game (Masterotaku,
+Losti and the helixmod community), which edits the same mask by hand in the shaders it
+collected.
+
+Measured (Null backend, 2064x2208 per eye, the dev harness save: a corridor with Cloud, Tifa
+and Barret in front of a wall of see-through grates; captures in `captures/hair/`, not in git):
+
+- Found: 109 distinct pixel shaders created in that area, 36 with the material lookup (all
+  patched, none refused by the runtime), 11 with the full-screen one. Of the 55 shaders the
+  helixmod fix edits for the dither, 31 were created there: its 22 with the material lookup
+  are all among the 36 patched here (same 3DMigoto hash); 6 have the full-screen form, left
+  alone here (one of them is the reflection pass); 3 use other variants of the lookup (a
+  counter `cbN[139].w << 1`, or the `ftoi` further away) that are not matched. 14 of the 36
+  patched shaders are not in that fix (it was collected in other scenes).
+- Comparison in one session (`[dev] dither_ab = 1`, captures alternating `game` and a tile,
+  temporal anti-aliasing on): the grate wall, a dithered material, shows its bars as broken,
+  speckled lines in `game` and as continuous bars with the 2x2 and 4x4 tiles; 8x8 and the
+  whole tile keep some grain. Its high-frequency energy (mean absolute difference to the
+  3x3 mean, divided by its mean level) is 0.25 in `game` and 0.21 with every tile. Without
+  anti-aliasing (`r.PostProcessAAQuality 0`) the grate's mean change between two captures is
+  18.9 levels (of 255) in `game` and 3.0 to 3.3 with a static tile. Cloud's hair: the speckle
+  that changes from frame to frame is gone with a static tile; his idle motion between
+  captures (2 s apart) prevents a clean number there.
+- Default 2 (also the helixmod fix's choice): with 4 the best in the captures, and its
+  2-pixel period lies within the anti-aliasing's sub-pixel jitter, so the anti-aliasing
+  smooths it to the average coverage. A 2x2 tile has only 4 coverage levels, which can show
+  as faint lines in thin hair; 4 gives 16. The whole tile (`shader dither 64`) is a
+  comparison mode only.
+- The scene's overall brightness drifted by up to 30 % over 40 s in these captures, the same
+  in every mode when alternating, so whole-image comparisons between runs say nothing.
+- Cost: GPU time of the frame (`dynres`, median of 10 frames) 5.05 ms with `game` and 5.04
+  to 5.05 ms with the 2x2 tile in two runs; 5.11 to 5.13 ms for all five variants switched
+  in one session. No change, as expected from one changed constant.
+- Not checked: an object fading out (the depth and shadow passes' dithered fade now uses
+  the static pattern too; the helixmod fix removes the fade there instead), other areas,
+  a headset.
+
+Dev commands: `shader status` (counts), `shader list <file>` (every distinct shader with its
+3DMigoto hash, checksum, size, lookups found, patched or not), and with `[dev] dither_ab = 1`
+from start-up `shader dither off|game|2|4|8|64`, which binds that variant of every dithered
+material live through a hook on `PSSetShader` (installed only in that mode).
 
 ## ReShade and Luma: the tonemapping shift and Luma's DLSS
 
