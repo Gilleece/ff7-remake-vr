@@ -348,6 +348,11 @@ struct WidgetState {
     float tx = 0, ty = 0;  // render translation
     bool slot = false;
     float sx = 0, sy = 0;  // canvas slot offsets (left, top)
+    // A UserWidget added to the viewport: UUserWidget::ViewportAnchors.Minimum (+0x1b0) and
+    // ViewportOffsets.Left/Top (+0x1c0/+0x1c4), which the field target icon's placer writes
+    // (docs/re/engine.md, "The interaction prompt at a fixed place").
+    bool vp = false;
+    float ax = 0, ay = 0, ox = 0, oy = 0;
 };
 WidgetState widget_state(const WidgetRef& w) {
     WidgetState s;
@@ -363,6 +368,8 @@ WidgetState widget_state(const WidgetRef& w) {
         uobj::read(base + g_rt_prop.offset, s.tx);
         uobj::read(base + g_rt_prop.offset + 4, s.ty);
     }
+    if (w.user)
+        s.vp = uobj::read(base + 0x1b0, s.ax) && uobj::read(base + 0x1b4, s.ay) && uobj::read(base + 0x1c0, s.ox) && uobj::read(base + 0x1c4, s.oy);
     void* slot = nullptr;
     if (g_slot_prop.offset > 0 && uobj::read(base + g_slot_prop.offset, slot) && slot && uobj::alive(slot) &&
         uobj::class_named(slot, "CanvasPanelSlot")) {
@@ -381,6 +388,7 @@ WidgetState widget_state(const WidgetRef& w) {
 std::string widget_text(const WidgetState& s) {
     std::string r = std::format("vis={} vp={} enum={} rt=({:.0f},{:.0f})", s.visible, s.in_viewport, s.vis_enum, s.tx, s.ty);
     if (s.slot) r += std::format(" slot=({:.0f},{:.0f})", s.sx, s.sy);
+    if (s.vp) r += std::format(" vpo=({:.0f},{:.0f}) anchor=({:.2f},{:.2f})", s.ox, s.oy, s.ax, s.ay);
     return r;
 }
 
@@ -632,7 +640,8 @@ void poll_prompt(const Frame& f, double t) {
             log::info("prompt diag: instance {} at index {}: {}; {}", w.label, uobj::index_of(w.obj), outer_chain(w.obj), w.rank > 0 ? holder_of(w.obj) : std::string("-"));
         const bool vis_change = fresh || it->second.visible != s.visible || it->second.in_viewport != s.in_viewport || it->second.vis_enum != s.vis_enum;
         const bool moved = !fresh && (std::abs(it->second.tx - s.tx) > 2.0f || std::abs(it->second.ty - s.ty) > 2.0f || it->second.slot != s.slot ||
-                                      std::abs(it->second.sx - s.sx) > 2.0f || std::abs(it->second.sy - s.sy) > 2.0f);
+                                      std::abs(it->second.sx - s.sx) > 2.0f || std::abs(it->second.sy - s.sy) > 2.0f ||
+                                      std::abs(it->second.ox - s.ox) > 2.0f || std::abs(it->second.oy - s.oy) > 2.0f);
         const std::string text = w.label + " " + widget_text(s);
         all += " | " + text;
         if (vis_change || moved) changes += " | " + text;

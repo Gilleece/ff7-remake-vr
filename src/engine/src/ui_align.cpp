@@ -133,6 +133,9 @@ constexpr const char* kPlacePattern =
     "4C 8B DC 53 55 56 48 83 EC 60 F3 0F 10 05 ?? ?? ?? ?? 48 8B F1 F3 0F 10 0D ?? ?? ?? ?? 33 C9 40 32 ED F3 41 0F 11 43 08 "
     "F3 41 0F 11 4B 0C 49 8B D8 48 89 0E 48 8B C2 48 85 D2 0F 84 ?? ?? ?? ?? 4D 8D 43 08 49 8B D1 48 8B C8 E8";
 constexpr std::uintptr_t kPlaceRva = 0x142b500;
+// The placer's call of 0x1348940 (+0x4a) returns at +0x4f: the projection is the placer's
+// own when this return address is in its call chain.
+constexpr std::uintptr_t kPlaceCallReturn = kPlaceRva + 0x4f;
 // Checked byte for byte in the known build: the stores of the viewport offsets and anchors
 // and the virtual SetVisibility call (vtable +0x248).
 constexpr std::size_t kPlaceStoreLeft = 0x11d, kPlaceStoreTop = 0x125, kPlaceStoreAnchors = 0x12d, kPlaceSetVisibility = 0x22f;
@@ -145,6 +148,7 @@ hook::InlineHook g_place_hook;
 std::atomic<int> g_prompt_mode{kPromptAlways};  // [ui] prompt_fixed
 std::atomic<float> g_prompt_x{0.5f}, g_prompt_y{0.72f};
 std::atomic<std::uint64_t> g_place_calls{0}, g_place_pinned{0}, g_place_behind{0}, g_place_noproj{0};
+std::atomic<std::uint64_t> g_place_foreign{0};  // projections inside the placer that were not its own
 std::atomic<int> g_prompt_state{-1};  // last placement: 1 pinned, 0 the game's (-1 none yet)
 std::atomic<int> g_icons_max{0};      // most icons placed within 0.25 s of each other
 thread_local bool t_pin = false;      // inside the placer, the fixed point applies
@@ -420,11 +424,22 @@ bool detour(const void* local_player, void* viewport, std::int32_t pass, std::ui
     return ok;
 }
 
+// The projection running now was asked for by the field target icon's placer (its return
+// address 0x142b54f is among the innermost frames: this module's, UGameplayStatics, 0x1348940,
+// then the placer).
+bool placer_projection() {
+    const Chain c = capture_chain();
+    for (int i = 0; i < kChainFrames; ++i)
+        if (c[i] == kPlaceCallReturn) return true;
+    ++g_place_foreign;
+    return false;
+}
+
 bool project_detour(const float* world, const std::int32_t* rect, const float* vp, float* out) {
     const bool ok = g_project_hook.original<ProjectFn>()(world, rect, vp, out);
     const auto ret = reinterpret_cast<std::uintptr_t>(_ReturnAddress());
     // The field target icon's own projection ([ui] prompt_fixed): the fixed point, in front.
-    if (t_pin && ret == g_ret_statics && rect && out) {
+    if (t_pin && ret == g_ret_statics && rect && out && placer_projection()) {
         t_pin = false;
         t_pin_hit = true;
         const float fx = std::clamp(g_prompt_x.load(std::memory_order_relaxed), 0.0f, 1.0f);
@@ -532,6 +547,7 @@ std::string prompt_command(const std::string& args) {
         g_place_pinned = 0;
         g_place_behind = 0;
         g_place_noproj = 0;
+        g_place_foreign = 0;
         g_icons_max = 0;
     } else if (!w.empty()) {
         return "err usage: uihook prompt [mode <1|first_person|0> | x <0..1> | y <0..1> | reset]";
@@ -546,13 +562,13 @@ std::string prompt_command(const std::string& args) {
     std::lock_guard lk(g_mutex);
     const LastPin& l = g_last_pin;
     return std::format("ok interaction prompt: prompt_fixed {} at ({:.2f}, {:.2f}), placer hook {}, projection hook {}; now {} ({} person shown, headset view {}); "
-                       "placements {} pinned {} (behind the view {}) without a projection {}; icons now {} at most {}; "
+                       "placements {} pinned {} (behind the view {}) without a projection {}, other projections inside the placer {}; icons now {} at most {}; "
                        "last pinned point ({:.1f}, {:.1f}){} in {} {} {} {}",
                        prompt_mode_name(g_prompt_mode.load()), g_prompt_x.load(), g_prompt_y.load(), g_place_hook.installed() ? "installed" : "not installed",
                        g_project_hook.installed() && g_ret_statics ? "installed" : "not installed",
                        state < 0 ? "no icon placed yet" : state ? "pinned" : "the game's placement", player::first_person_shown() ? "first" : "third",
                        device::presenting() ? "on" : "off", g_place_calls.load(), g_place_pinned.load(), g_place_behind.load(), g_place_noproj.load(),
-                       icons_now, g_icons_max.load(), l.x, l.y, l.behind ? " (target behind)" : "", l.rect[0], l.rect[1], l.rect[2], l.rect[3]);
+                       g_place_foreign.load(), icons_now, g_icons_max.load(), l.x, l.y, l.behind ? " (target behind)" : "", l.rect[0], l.rect[1], l.rect[2], l.rect[3]);
 }
 
 void set_skip(const std::string& list) {
@@ -716,7 +732,8 @@ void start(std::uintptr_t base, bool known) {
     }
     const auto pl = pattern::scan_module(base, kPlacePattern, pattern::Sections::Executable, 2);
     const auto* f = pl.unique() ? reinterpret_cast<const std::uint8_t*>(pl.first()) : nullptr;
-    if (!known || !f || pl.first() - base != kPlaceRva || std::memcmp(f + kPlaceStoreLeft, kStoreLeft, sizeof(kStoreLeft)) != 0 ||
+    if (!known || !f || pl.first() - base != kPlaceRva || f[kPlaceCallReturn - kPlaceRva - 5] != 0xE8 ||
+        std::memcmp(f + kPlaceStoreLeft, kStoreLeft, sizeof(kStoreLeft)) != 0 ||
         std::memcmp(f + kPlaceStoreTop, kStoreTop, sizeof(kStoreTop)) != 0 ||
         std::memcmp(f + kPlaceStoreAnchors, kStoreAnchors, sizeof(kStoreAnchors)) != 0 ||
         std::memcmp(f + kPlaceSetVisibility, kCallSetVisibility, sizeof(kCallSetVisibility)) != 0) {

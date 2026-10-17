@@ -1181,7 +1181,7 @@ Through the dev pipe (`[dev] pipe = 1`, `tools\dev\send-input.ps1 -Pipe "<comman
 | `fp combat <1\|0\|auto\|area>` | test: pretend a fight is or is not in progress; `area` forces the battle signal on and lets the battle objects decide |
 | `fp combat status`, `fp combat objects <0\|1>`, `fp combat exit <s>`, `fp combat classes <names>` | the fight detection: verdict, last reason, signal, object poll; its settings live |
 | `fp battlelog <0\|1>` | `[first_person] battle_log` (default 0): every 100 ms the candidate battle signals are read and one `battle diag:` line is written when one of them changes (and every 10 s): the mod's verdict, the mode, the battle signal's raw value, the battle HUD widgets (`IsVisible`/`IsInViewport`/`Visibility` enum), properties of the controller and the pawn (targets, battle components), objects whose class name contains Battle, the camera manager and the view target. Values that change more than 20 times in 10 s are left out of the change test. At start it lists the candidates and the widget blueprint classes present; later passes log the classes that come and go. Diagnostic only, no behaviour change (`src/engine/src/diag.cpp`) |
-| `fp promptlog <0\|1>`, `fp prompt status` | `[first_person] prompt_log` (default 0): the interaction prompt widget candidates (`FieldAction_Command_C`, `Field_BtnGuide_C`, `FieldTarget_*`, the talk menu...): one `prompt diag:` line when one changes visibility or moves more than 2 px (render translation, canvas slot offsets), with the game camera (`PlayerCameraManager.GetCameraLocation/Rotation`), the camera and eye base of the last stereo frame, the head pose (tracking space and world), the mode, `[ui] align` and the distances from the camera and the head to the pawn; at most 10 lines a second. `fp prompt status` shows the same facts at the last poll (only while the log is on) |
+| `fp promptlog <0\|1>`, `fp prompt status` | `[first_person] prompt_log` (default 0): the interaction prompt widget candidates (`FieldAction_Command_C`, `Field_BtnGuide_C`, `FieldTarget_*`, the talk menu...): one `prompt diag:` line when one changes visibility or moves more than 2 px (render translation, canvas slot offsets, and for user widgets the viewport offsets `vpo` and anchors that the icon's placer writes), with the game camera (`PlayerCameraManager.GetCameraLocation/Rotation`), the camera and eye base of the last stereo frame, the head pose (tracking space and world), the mode, `[ui] align` and the distances from the camera and the head to the pawn; at most 10 lines a second. `fp prompt status` shows the same facts at the last poll (only while the log is on) |
 | `fp signal <Class.Function> [world] [result=<offset>:<size>] \| none` | switch the battle signal while the game runs (same form as `battle_signal`); `fp status` shows its raw value |
 | `fp pad <hex buttons>`, `controls pad <hex buttons>` | test: feed an XInput button state through the gamepad filter, prints what the game would get |
 | `controls status`, `controls recenter\|stereo\|nearer\|farther` | player controls: keys, counters; trigger an action as its key would (see "Player controls") |
@@ -1194,6 +1194,7 @@ Through the dev pipe (`[dev] pipe = 1`, `tools\dev\send-input.ps1 -Pipe "<comman
 | `stereo screenfx layout` | reads the post-process field offsets from the engine's reflection data (ScriptStruct `PostProcessSettings`) and compares them with the ones the hook uses |
 | `stereo screenfx force <hex offset> <value>` \| `force clear` | test: writes a float into every view's final post-process settings before the removal runs, as if the game had blended it in (`550` screen blur, `42c` colour separation; up to four) |
 | `stereo screenfx vfx [name]` | reverse engineering: the post-process objects (particle modules, components) whose path contains the name (default `FX_R_WaitFilter_01`, the tactical-mode effect), with their float and bool values and those of the distributions they point to; also written to the log |
+| `uihook prompt [mode <1\|first_person\|0> \| x <0..1> \| y <0..1> \| reset]` | `[ui] prompt_fixed`, `prompt_x`, `prompt_y` live ("The interaction prompt at a fixed place"), with the counters: icon placements, of them pinned, pinned with the object behind the view, pinned without a projection; icons shown now and at most at once; the mode now (pinned or the game's), whether first person is shown and the headset view is on; the last pinned point and the view rectangle; `reset` clears the counters |
 | `cvar get <name>` | integer and float value and set-by priority of a console variable |
 | `cvar set <name> <value>` | set it with console priority (applied on the game thread) |
 
@@ -2950,6 +2951,59 @@ Dev commands: `uihook callers on|off|reset` (call chains of the full pass, exe o
 object's location, distance and range, where it lands on the game camera's and the
 panel's view, whether each passes and the classifier's result; diagnostic: the first
 `on` installs a hook on the classifier, which stays until the game exits).
+
+### The interaction prompt at a fixed place
+
+Over an object the prompt is easy to lose in the headset: in first person the object is
+often below the panel or behind the head (the icon is then on the panel's edge or
+collapsed), and the panel's view and the game's choice of object disagree near low
+objects. `[ui] prompt_fixed` draws it like a HUD element instead:
+
+| Value | Where the icon is drawn while the headset view is shown |
+|---|---|
+| `1` (default) | at the fixed point (`prompt_x`, `prompt_y`) of the panel in first and third person, battles included, and shown whenever the game shows it, wherever its object is |
+| `first_person` | at the fixed point while first person is shown; in third person, in the automatic third person of a battle and under the game's own camera the game places it over its object |
+| `0` | the game's placement over the object everywhere |
+
+`prompt_x` and `prompt_y` (defaults `0.5` and `0.72`) are fractions of the panel from its
+top left. The default is centred across and a little below the middle: the panel shows
+the whole viewport, so 0.72 is about 8 degrees below the panel's centre on the default
+panel (2 m high at 3 m, about 37 degrees in all), out of the way of what the player looks
+at but found with a short glance down, and centred across it stays clear of the battle
+commands (lower left) and the party's bars (lower right). The flat game, and the virtual screen (3D off, cutscenes on the screen), keep
+the game's placement.
+
+How it works (`ui_align.cpp`): a hook on Square Enix's placer of the icon (`0x142b500`,
+signature `FieldTargetIcon::Place`, the known build only; `docs/re/engine.md`, "The
+interaction prompt at a fixed place") marks the call, and the projection the placer
+reaches (`FSceneView::ProjectWorldToScreen` called from `UGameplayStatics`, the hook of
+"Markers outside the panel", recognised as the placer's own by its return address
+`0x142b54f` in the call chain) returns the fixed point of the view rectangle and "in
+front" instead of the object's position. Everything else is the game's own code: the viewport
+scale, the half size of the widget, the viewport offsets, the companion widget placed with
+the icon, and visibility (HitTestInvisible, because the projection "succeeded"). The
+game's own hiding still applies: the manager's flag that collapses every icon, the icon's
+destruction when the object is left or out of range. Which object gets the prompt is not
+changed (that is the classifier, `[ui] align_target_test`). The mode is the one shown,
+not the one selected: `first_person` switches back to the game's placement as soon as
+the view is more than half way into third person (including the automatic switch in a
+fight) and the game's camera takes over in cutscenes.
+
+Several icons at once: each icon is placed through the same call, so all of them would be
+drawn at the same point, on top of each other. The manager gives the prompt to the
+nearest usable object only (the classifier keeps the nearest that passes), so one icon is
+expected; whether the game ever shows two (for example while one fades out and the next
+appears) is not yet measured: `uihook prompt` counts the icons placed within 0.25 s of
+each other ("at most").
+
+One log line when the placement changes (`ui: interaction prompt pinned at (0.50, 0.72)
+of the view ...` or `... placed by the game ...`), and at start-up `ui: interaction
+prompt hook installed (field target icon placer +0x142b500)`. On another build, or when
+the projection hook is missing, a warning says that `[ui] prompt_fixed` has no effect.
+
+Not verified: everything above was built and checked against the disassembly only, with
+no game run (the placement, the companion widget and the visibility with a real icon,
+the default place in a headset, several icons at once, battles).
 
 ## Trying the camera in the headset
 

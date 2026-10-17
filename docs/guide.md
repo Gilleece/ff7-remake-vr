@@ -426,6 +426,14 @@ session it is `ff7vr.log` in the game's `End\Binaries\Win64` folder).
   A marker whose object is outside the panel (close below you, far to the side) stays
   on the panel's edge in the object's direction (`[ui] align_clamp = 1`; `0` = it is
   drawn off the panel and not seen). Objects behind you have no marker.
+- **The interaction prompt** (the icon over a ladder, door, item or person you can
+  use) sits at a fixed place on the HUD panel, a little below the middle, whenever the
+  game shows it, so it no longer disappears when the object is below you or behind
+  you (`[ui] prompt_fixed = 1`, the place is `prompt_x = 0.5`, `prompt_y = 0.72`).
+  `prompt_fixed = first_person` does this in first person only and leaves it over the
+  object in third person; `0` leaves it over the object everywhere. Which object it is
+  for is still the game's choice: the one in front of you and nearest. Not yet tried
+  in a game run or a headset.
 - **The game window becomes 1280x720 while 3D runs** if the game was in a fullscreen
   mode, and stays that way until the game exits (switching 3D off with Insert does not
   change it back). The game does not remember it: your display setting is not changed,
