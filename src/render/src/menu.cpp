@@ -190,6 +190,24 @@ std::string g_armed;  // an action that needs a second select ("reset all")
 int64_t g_armedUntil = 0;
 std::map<std::string, std::string> g_startValues;  // id (or id.key) -> ini value when the panel first opened
 bool g_snapshot = false;
+// The values when the panel opened, or when its changes were last saved or kept for the
+// session only: the pending set is measured from them. id (or id.key) -> ini value, set.
+struct AtOpen {
+    std::string value;
+    bool set = true;
+};
+std::map<std::string, AtOpen> g_atOpen;
+// The save question, shown when the panel is closed with changes not saved.
+constexpr const char* kAskText = "Do you want to save these changes to the ini file so they persist on your next launch of FF7 Remake?";
+constexpr const char* kAskNo = "No, just testing them";
+constexpr const char* kAskYes = "Yes, please save";
+bool g_dialog = false;
+int g_dialogSel = 0;                      // 0: kAskNo, 1: kAskYes
+std::vector<std::string> g_dialogLabels;  // the changed settings, shown under the question
+bool DialogShown() {
+    std::lock_guard lk(g_mutex);
+    return g_dialog;
+}
 Canvas g_canvas;
 bool g_fontTried = false;
 std::string g_lastSignature;
@@ -412,6 +430,65 @@ void FitText(Canvas& c, int x, int base, std::string t, int px, int maxW, Rgba c
     c.Text(x, base, t, px, col);
 }
 
+// Splits text into lines no wider than maxW (at spaces).
+std::vector<std::string> Wrap(Canvas& c, const std::string& text, int px, int maxW) {
+    std::vector<std::string> lines;
+    std::istringstream in(text);
+    std::string word, cur;
+    while (in >> word) {
+        const std::string next = cur.empty() ? word : cur + " " + word;
+        if (!cur.empty() && c.TextWidth(next, px) > maxW) {
+            lines.push_back(cur);
+            cur = word;
+        } else {
+            cur = next;
+        }
+    }
+    if (!cur.empty()) lines.push_back(cur);
+    return lines;
+}
+
+// The save question over the dimmed panel: the question, the changed settings, and the two
+// answers side by side (the selected one highlighted).
+void DrawQuestion(Canvas& c) {
+    c.FillRect(0, 0, kW, kH, {0, 0, 0, 0.55f});
+    constexpr int bw = 860, bh = 340, bx = (int(kW) - bw) / 2, by = 150;
+    c.FillRect(bx, by, bw, bh, {28, 34, 48, 1.0f});
+    const Rgba border{214, 178, 98, 1.0f};
+    c.FillRect(bx, by, bw, 3, border);
+    c.FillRect(bx, by + bh - 3, bw, 3, border);
+    c.FillRect(bx, by, 3, bh, border);
+    c.FillRect(bx + bw - 3, by, 3, bh, border);
+    int y = by + 30 + c.Ascent(kBodyPx);
+    for (const std::string& l : Wrap(c, kAskText, kBodyPx, bw - 80)) {
+        c.Text((int(kW) - c.TextWidth(l, kBodyPx)) / 2, y, l, kBodyPx, {240, 242, 248, 1.0f});
+        y += 40;
+    }
+    std::string changed;
+    for (const std::string& l : g_dialogLabels) changed += (changed.empty() ? "" : ", ") + l;
+    changed = std::format("{} changed: {}", g_dialogLabels.size() == 1 ? std::string("1 setting") : std::format("{} settings", g_dialogLabels.size()), changed);
+    const int cw = std::min(c.TextWidth(changed, kSmallPx), bw - 80);
+    FitText(c, (int(kW) - cw) / 2, y + 6, changed, kSmallPx, bw - 80, {190, 196, 212, 1.0f});
+    constexpr int btnW = 370, btnH = 66, gap = 40;
+    const int btnY = by + bh - btnH - 32;
+    const char* answers[2] = {kAskNo, kAskYes};
+    for (int i = 0; i < 2; ++i) {
+        const int x = (int(kW) - 2 * btnW - gap) / 2 + i * (btnW + gap);
+        const bool sel = g_dialogSel == i;
+        c.FillRect(x, btnY, btnW, btnH, sel ? Rgba{46, 96, 172, 1.0f} : Rgba{52, 60, 80, 1.0f});
+        if (sel) {
+            const Rgba edge{255, 255, 255, 1.0f};
+            c.FillRect(x, btnY, btnW, 2, edge);
+            c.FillRect(x, btnY + btnH - 2, btnW, 2, edge);
+            c.FillRect(x, btnY, 2, btnH, edge);
+            c.FillRect(x + btnW - 2, btnY, 2, btnH, edge);
+        }
+        const int tw = c.TextWidth(answers[i], kBodyPx);
+        c.Text(x + (btnW - tw) / 2, btnY + (btnH + c.Ascent(kBodyPx)) / 2 - 3, answers[i], kBodyPx,
+               sel ? Rgba{255, 255, 255, 1.0f} : Rgba{196, 204, 222, 1.0f});
+    }
+}
+
 // Draws the panel into the canvas and publishes the image when it changed.
 void Draw(bool force) {
     std::lock_guard lk(g_mutex);
@@ -429,7 +506,8 @@ void Draw(bool force) {
     const bool showMsg = !g_msg.empty() && NowMs() < g_msgUntil;
     const bool perf = std::string(kCategories[g_cat]) == "Performance";
     // Everything shown, to skip drawing when nothing changed.
-    std::string sig = std::format("{}|{}|{}|{}|{}|{}|", g_cat, g_sel, g_top, showMsg ? g_msg : std::string(), g_armed, perf ? g_perfLine : std::string());
+    std::string sig = std::format("{}|{}|{}|{}|{}|{}|{}|", g_cat, g_sel, g_top, showMsg ? g_msg : std::string(), g_armed, perf ? g_perfLine : std::string(),
+                                  g_dialog ? 1 + g_dialogSel : 0);
     const int n = int(g_rows.size());
     std::vector<std::string> values(size_t(std::max(0, n)));
     std::vector<bool> avail(values.size()), restart(values.size()), changed(values.size());
@@ -523,7 +601,8 @@ void Draw(bool force) {
     const int footY = int(kH) - kFooterH;
     c.FillRect(10, footY, int(kW) - 20, 2, {70, 80, 100, 1.0f});
     std::string help;
-    if (showMsg) help = g_msg;
+    if (g_dialog) help = "Left/Right: choose an answer    A or Enter: confirm";
+    else if (showMsg) help = g_msg;
     else if (const Setting* s = SelectedSetting()) help = HelpText(*s);
     else if (g_sel < 0) help = "Left/Right or LB/RB: category    Down: the settings";
     if (perf && !showMsg && g_perfLine.find('\n') != std::string::npos && help.empty()) help = g_perfLine.substr(g_perfLine.find('\n') + 1);
@@ -531,9 +610,11 @@ void Draw(bool force) {
     const int hw = c.TextWidth(help, kSmallPx);
     FitText(c, std::max(16, (int(kW) - hw) / 2), line1, help, kSmallPx, int(kW) - 32,
             showMsg ? Rgba{255, 214, 120, 1.0f} : Rgba{214, 200, 160, 1.0f});
-    const std::string keys = "D-pad: choose / change    LB/RB: category    A: select    Y: default    X: save    B: close";
+    const std::string keys = g_dialog ? std::string("Closing waits for an answer")
+                                      : std::string("D-pad: choose / change    LB/RB: category    A: select    Y: default    X: save    B: close");
     const int kw = c.TextWidth(keys, kSmallPx);
     c.Text((int(kW) - kw) / 2, line1 + 30, keys, kSmallPx, {176, 186, 204, 1.0f});
+    if (g_dialog) DrawQuestion(c);
     {
         std::lock_guard pl(g_pixMutex);
         g_pixels = c.Pixels();
@@ -541,9 +622,7 @@ void Draw(bool force) {
     }
 }
 
-// The value a setting would write, for the save's comparison with the ini.
-bool SameValue(const std::string& a, const std::string& b) { return live_settings::same_value(a, b); }
-
+// The values when the panel first opened: what a key the file lacks is compared with by a save.
 void TakeSnapshot() {
     if (g_snapshot) return;
     g_snapshot = true;
@@ -555,13 +634,35 @@ void TakeSnapshot() {
     }
 }
 
-std::string Save() {
-    std::lock_guard lk(g_mutex);
-    TakeSnapshot();
+// The values shown now become the ones the pending set is measured from (the panel opens,
+// or its changes were saved or kept for this session only).
+void TakeOpenSnapshot() {
+    g_atOpen.clear();
+    for (const Setting& s : g_items) {
+        if (s.section.empty() || s.kind == Kind::Action) continue;
+        g_atOpen[s.id] = {live_settings::ini_value(s), !(s.optional && s.get_is_set) || s.get_is_set()};
+        if (s.extra_ini)
+            for (const auto& [k, v] : s.extra_ini()) g_atOpen[s.id + "." + k] = {v, true};
+    }
+}
+
+// One value to write to the ini.
+struct Write {
+    std::string id;                             // the setting
+    std::string section, key, value;            // [section] key as the setting names it
+    bool commentOut = false;                    // an optional line becomes "not set"
+    std::pair<std::string, std::string> where;  // the section and key written (a [headset:...] section when it sets the key)
+    std::string label;                          // for the question
+};
+
+std::string WriteText(const Write& w) { return w.section + "." + w.key + (w.commentOut ? std::string(" not set") : " = " + w.value); }
+
+// The values saving would write. `pendingOnly`: those changed since the panel opened (the
+// pending set, written by "Yes, please save"); otherwise every value shown that the file does
+// not hold (X, S, the Save row, `menu save`).
+std::vector<Write> CollectWrites(bool pendingOnly) {
     Config ini;
     ini.load(g_iniPath);
-    std::vector<ini_file::Update> updates;
-    std::vector<std::pair<std::string, std::string>> updatedKeys;  // section, key of each update (before redirection)
     // A key the active [headset:...] section sets is saved there, so that the base value (the
     // other headsets') stays as it is.
     const std::string headset = headset_profile::active_section();
@@ -577,48 +678,69 @@ std::string Save() {
         *cur = ini.get(section, key);
         return std::pair<std::string, std::string>(section, key);
     };
-    auto push = [&](const std::string& section, const std::string& key, const std::string& value, bool commentOut,
-                    const std::pair<std::string, std::string>& where) {
-        ini_file::Update u{where.first, where.second, value};
-        u.comment_out = commentOut;
-        updates.push_back(u);
-        updatedKeys.emplace_back(section, key);
-    };
-    auto consider = [&](const std::string& snapId, const std::string& section, const std::string& key, const std::string& value, bool text) {
-        if (value.empty() && !text) return;
+    std::vector<Write> out;
+    auto consider = [&](const Setting& s, const std::string& snapId, const std::string& key, const std::string& value, bool optional, bool text) {
+        live_settings::IniCompare c;
+        c.now = value;
+        c.optional = optional;
+        c.now_set = !optional || s.get_is_set();
+        c.text = text;
         std::optional<std::string> cur;
-        const auto where = target(section, key, &cur);
-        // A key in the file: written when the value differs. A key the file does not have: only
-        // when the value is not the one in effect when the panel first opened (the default).
-        const bool differs = cur ? !SameValue(*cur, value) : !SameValue(g_startValues[snapId], value);
-        if (differs) push(section, key, value, false, where);
+        const auto where = target(s.section, key, &cur);
+        c.in_file = cur;
+        if (pendingOnly) {
+            const auto at = g_atOpen.find(snapId);
+            if (at == g_atOpen.end()) return;
+            c.when_absent = at->second.value;  // a key the file lacks: pending when changed in the panel
+            if (!live_settings::pending(c, at->second.value, at->second.set)) return;
+        } else {
+            c.when_absent = g_startValues[snapId];  // the value in effect when the panel first opened
+        }
+        const live_settings::IniWrite w = live_settings::ini_write(c);
+        if (w == live_settings::IniWrite::None) return;
+        Write wr;
+        wr.id = s.id;
+        wr.section = s.section;
+        wr.key = key;
+        wr.commentOut = w == live_settings::IniWrite::CommentOut;
+        wr.value = wr.commentOut && cur ? *cur : value;  // a line commented out keeps its text, behind a ';'
+        wr.where = where;
+        wr.label = s.label;
+        out.push_back(std::move(wr));
     };
     for (const Setting& s : g_items) {
         if (s.section.empty() || s.kind == Kind::Action || s.read_only) continue;
         if (s.optional && s.get_is_set) {
-            std::optional<std::string> cur;
-            const auto where = target(s.section, s.key, &cur);
-            const std::string v = live_settings::ini_value(s);
-            if (!s.get_is_set()) {
-                if (cur) push(s.section, s.key, *cur, true, where);  // the line keeps its text, behind a ';'
-            } else if (!cur || !SameValue(*cur, v)) {
-                push(s.section, s.key, v, false, where);
-            }
+            consider(s, s.id, s.key, live_settings::ini_value(s), true, false);
             continue;
         }
-        consider(s.id, s.section, s.key, live_settings::ini_value(s), s.kind == Kind::Text);
+        consider(s, s.id, s.key, live_settings::ini_value(s), false, s.kind == Kind::Text);
         if (s.extra_ini)
-            for (const auto& [k, v] : s.extra_ini()) consider(s.id + "." + k, s.section, k, v, false);
+            for (const auto& [k, v] : s.extra_ini()) consider(s, s.id + "." + k, k, v, false, false);
     }
+    return out;
+}
+
+// Writes the values into the ini in place; returns the panel's message. `ok`: written, or
+// nothing to write.
+std::string WriteUpdates(const std::vector<Write>& writes, bool* ok = nullptr) {
+    if (ok) *ok = true;
     const std::string file = log::narrow(g_iniPath.wstring());
-    if (updates.empty()) {
+    if (writes.empty()) {
         log::info("menu: save: {} already holds every value shown; nothing written", file);
         return "Nothing to save: ff7vr.ini already has these values";
+    }
+    std::vector<ini_file::Update> updates;
+    for (const Write& w : writes) {
+        ini_file::Update u{w.where.first, w.where.second, w.value};
+        u.comment_out = w.commentOut;
+        updates.push_back(u);
     }
     ini_file::Report report;
     std::string err;
     if (!ini_file::update_file(g_iniPath, updates, &report, &err)) {
         log::error("menu: save to {} failed: {}", file, err);
+        if (ok) *ok = false;
         return "Save failed: " + err;
     }
     for (const auto& l : report.changed) log::info("menu: saved {}", l);
@@ -628,12 +750,27 @@ std::string Save() {
         if (s.section.empty() || s.kind == Kind::Action) continue;
         g_startValues[s.id] = live_settings::ini_value(s);
     }
+    TakeOpenSnapshot();  // saved: nothing is pending any more
     bool restartNeeded = false;
-    for (const auto& [section, key] : updatedKeys)
+    for (const Write& w : writes)
         for (const Setting& s : g_items)
-            if (s.restart && Lower(s.section) == Lower(section) && Lower(s.key) == Lower(key)) restartNeeded = true;
-    return std::format("Saved {} setting{} to ff7vr.ini{}", updates.size(), updates.size() == 1 ? "" : "s",
+            if (s.restart && Lower(s.section) == Lower(w.section) && Lower(s.key) == Lower(w.key)) restartNeeded = true;
+    return std::format("Saved {} setting{} to ff7vr.ini{}", writes.size(), writes.size() == 1 ? "" : "s",
                        restartNeeded ? " (some take effect at the next start)" : "");
+}
+
+// X, S, the Save row and `menu save`: every value shown that the file does not hold.
+std::string Save() {
+    std::lock_guard lk(g_mutex);
+    if (g_dialog) return "Choose an answer first";
+    TakeSnapshot();
+    return WriteUpdates(CollectWrites(false));
+}
+
+std::string PendingText(const std::vector<Write>& writes) {
+    std::string t;
+    for (const Write& w : writes) t += (t.empty() ? "" : ", ") + WriteText(w);
+    return t;
 }
 
 void OpenPanel(const char* how) {
@@ -641,6 +778,8 @@ void OpenPanel(const char* how) {
     if (g_open.load()) return;
     Refresh();
     TakeSnapshot();
+    TakeOpenSnapshot();
+    g_dialog = false;
     g_msg.clear();
     g_armed.clear();
     g_placement.fetch_add(1);
@@ -650,8 +789,72 @@ void OpenPanel(const char* how) {
 }
 
 void ClosePanel(const char* how) {
+    std::lock_guard lk(g_mutex);
+    g_dialog = false;
     if (!g_open.exchange(false)) return;
     log::info("menu: closed ({})", how);
+}
+
+// The panel's close (the panel key, B, View/Back + Y, the Close row, `menu close`): closes
+// it, or, when values changed in the panel are not saved yet, asks whether to save them.
+// While the question shows, the close inputs do nothing: it needs an answer.
+void RequestClose(const char* how) {
+    std::lock_guard lk(g_mutex);
+    if (!g_open.load() || g_dialog) return;
+    const std::vector<Write> writes = CollectWrites(true);
+    if (writes.empty()) {
+        ClosePanel(how);
+        return;
+    }
+    g_dialog = true;
+    g_dialogSel = 0;
+    g_dialogLabels.clear();
+    for (const Write& w : writes)
+        if (std::find(g_dialogLabels.begin(), g_dialogLabels.end(), w.label) == g_dialogLabels.end()) g_dialogLabels.push_back(w.label);
+    g_armed.clear();
+    g_msg.clear();
+    log::info("menu: close ({}) with {} unsaved change{}: {}; asking whether to save them", how, writes.size(), writes.size() == 1 ? "" : "s",
+              PendingText(writes));
+    Draw(false);
+}
+
+// The answer to the save question. Yes: every pending value is written and the panel closes
+// (a failed write keeps it open with the error). No: nothing is written, live values stay as
+// set for this session, and rows that only take effect at the next start go back to the value
+// they had when the panel opened (their change does nothing without a save).
+void Answer(bool save) {
+    std::lock_guard lk(g_mutex);
+    if (!g_dialog) return;
+    const std::vector<Write> writes = CollectWrites(true);
+    if (save) {
+        bool ok = true;
+        const std::string msg = WriteUpdates(writes, &ok);
+        log::info("menu: save question: \"{}\": {}", kAskYes, msg);
+        g_dialog = false;
+        if (!ok) {
+            Message(msg);
+            return;
+        }
+        ClosePanel("saved");
+        return;
+    }
+    int reverted = 0;
+    for (Setting& s : g_items) {
+        if (s.section.empty() || s.kind == Kind::Action || s.read_only || !(s.restart || s.optional)) continue;
+        const auto at = g_atOpen.find(s.id);
+        if (at == g_atOpen.end()) continue;
+        const bool setNow = !(s.optional && s.get_is_set) || s.get_is_set();
+        if (setNow == at->second.set && live_settings::same_value(live_settings::ini_value(s), at->second.value)) continue;
+        const std::string err = live_settings::set_from_ini(s, at->second.value);
+        if (s.optional && s.set_is_set) s.set_is_set(at->second.set);
+        if (!err.empty()) log::warn("menu: {} back to {}: {}", s.id, at->second.value, err);
+        ++reverted;
+    }
+    log::info("menu: save question: \"{}\": {} change{} not written ({}); {} next-start row{} back to the value in effect", kAskNo, writes.size(),
+              writes.size() == 1 ? "" : "s", PendingText(writes), reverted, reverted == 1 ? "" : "s");
+    g_dialog = false;
+    TakeOpenSnapshot();
+    ClosePanel("not saved");
 }
 
 // After a change to a setting of the graphics profile, the profile becomes custom so that
@@ -666,6 +869,7 @@ void ProfileToCustom() {
 
 void SetCategory(int c) {
     std::lock_guard lk(g_mutex);
+    if (g_dialog) return;
     g_cat = ((c % kNumCategories) + kNumCategories) % kNumCategories;
     BuildRows();
     if (g_sel >= 0) g_sel = 0;
@@ -675,6 +879,10 @@ void SetCategory(int c) {
 
 void Move(int d) {
     std::lock_guard lk(g_mutex);
+    if (g_dialog) {
+        g_dialogSel = g_dialogSel == 0 ? 1 : 0;  // two answers: any direction switches
+        return;
+    }
     const int n = int(g_rows.size());
     // -1 is the category row: up from the first setting, down from the last.
     g_sel += d;
@@ -697,6 +905,7 @@ std::string ResetSetting(Setting& s) {
 
 void ResetSelected() {
     std::lock_guard lk(g_mutex);
+    if (g_dialog) return;
     Setting* s = SelectedSetting();
     if (!s || s->kind == Kind::Action) return;
     if (s->read_only) {
@@ -732,6 +941,10 @@ std::string ResetMany(const std::string& category) {
 
 void Change(int d) {
     std::lock_guard lk(g_mutex);
+    if (g_dialog) {
+        Move(d);
+        return;
+    }
     if (g_sel < 0) {
         SetCategory(g_cat + d);
         return;
@@ -785,11 +998,15 @@ void Change(int d) {
     if (s.optional && s.set_is_set && err.empty()) s.set_is_set(true);
     if (!err.empty()) Message(s.label + ": " + err);
     else if (s.part_of_profile) ProfileToCustom();
-    else if (s.restart) Message(s.label + ": takes effect at the next start (save with X)");
+    else if (s.restart) Message(s.label + ": takes effect at the next start once saved");
 }
 
 void Select() {
     std::lock_guard lk(g_mutex);
+    if (g_dialog) {
+        Answer(g_dialogSel == 1);
+        return;
+    }
     if (g_sel < 0) {
         g_sel = 0;
         return;
@@ -820,7 +1037,7 @@ void Select() {
         const bool now = !s.get_is_set();
         s.set_is_set(now);
         log::info("menu: {} {}", s.label, now ? "set" : "not set");
-        Message(s.label + (now ? ": set" : ": not set") + " (next start; save with X)");
+        Message(s.label + (now ? ": set" : ": not set") + " (next start, once saved)");
     } else if (s.kind == Kind::Choice) {
         Change(+1);
     }
@@ -872,7 +1089,7 @@ void ThreadMain() {
             g_placement.fetch_add(1);
         }
         if (edge(g_cfg.key.load(), focus)) {
-            if (g_open.load()) ClosePanel("key");
+            if (g_open.load()) RequestClose("key");
             else OpenPanel("key");
         }
         const bool open = g_open.load();
@@ -901,8 +1118,8 @@ void ThreadMain() {
         if (pressed & kRB) SetCategory(g_cat + 1);
         if ((pressed & kA) || kEnter) Select();
         if (((pressed & kY) && !(pad & kView)) || kBack) ResetSelected();
-        if ((pressed & kX) || kS) Message(Save());
-        if ((pressed & kB) || ((pressed & kY) && (pad & kView))) ClosePanel("gamepad");
+        if (((pressed & kX) || kS) && !DialogShown()) Message(Save());
+        if ((pressed & kB) || ((pressed & kY) && (pad & kView))) RequestClose("gamepad");
         if (g_open.load()) {
             if (std::string(kCategories[g_cat]) == "Performance") UpdatePerformance();
             Draw(false);  // only publishes a new image when something shown changed
@@ -1245,7 +1462,7 @@ void RegisterSettings(const Config& cfg) {
         Setting s = Base("close", "Close", 0, "", "", Kind::Action);
         s.order = 903;
         s.run = [] {
-            ClosePanel("Close");
+            RequestClose("Close");
             return std::string();
         };
         live_settings::add(std::move(s));
@@ -1262,10 +1479,12 @@ std::string StatusText() {
         items += std::format("{}{}{}={}{}", items.empty() ? "" : ", ", r == g_sel ? "*" : "", s.id, ValueText(s, false), s.restart ? " (next start)" : "");
     }
     const Setting* sel = SelectedSetting();
-    return std::format("ok menu {}; category {} ({}); selected {} '{}'; frames shown {} images uploaded {}; pad: polls {} withheld from the game {} "
+    return std::format("ok menu {}{}; category {} ({}); selected {} '{}'; frames shown {} images uploaded {}; pad: polls {} withheld from the game {} "
                        "opened {} last raw {:#06x}; keyboard: hook {} on thread {}, keys kept from the game {}; key {} pad {}; {:.2f} m wide at {:.2f} m; "
                        "ini {}; {}",
-                       g_open.load() ? "open" : "closed", kCategories[g_cat], g_rows.size(), g_sel, sel ? sel->label : std::string("(category row)"),
+                       g_open.load() ? "open" : "closed",
+                       g_dialog ? std::format(" (save question shown, {} selected)", g_dialogSel == 1 ? kAskYes : kAskNo) : std::string(),
+                       kCategories[g_cat], g_rows.size(), g_sel, sel ? sel->label : std::string("(category row)"),
                        g_frames.load(), g_uploads.load(), g_padPolls.load(), g_padWithheld.load(), g_padOpens.load(), g_padLastRaw.load(),
                        g_kbHook ? "on" : "off", g_kbThread.load(), g_kbSwallowed.load(), g_cfg.key.load(), g_cfg.pad.load() ? 1 : 0, g_cfg.width.load(),
                        g_cfg.distance.load(), log::narrow(g_iniPath.wstring()), items);
@@ -1308,8 +1527,8 @@ void Start(const Config& c, const std::filesystem::path& iniPath) {
         Refresh();
     }
     dev_commands::add("menu",
-                      "menu status | open | close | toggle | up | down | left | right | select | reset | back | save | cat <name|next|prev> | list | "
-                      "set <id> <value> | default <id> | dump <png path>: the in-headset settings panel",
+                      "menu status | open | close | toggle | up | down | left | right | select | reset | back | save | answer <yes|no> | pending | "
+                      "cat <name|next|prev> | list | set <id> <value> | default <id> | dump <png path>: the in-headset settings panel",
                       [](std::string_view args) { return Command(std::string(args)); });
     std::thread(ThreadMain).detach();
     log::info("menu: settings panel on key {} and {}; {:.2f} m wide at {:.2f} m; {} settings in {} categories; saves to {}", g_cfg.key.load(),
@@ -1318,6 +1537,22 @@ void Start(const Config& c, const std::filesystem::path& iniPath) {
 }
 
 void Stop() {
+    // The game exits with the panel open (or the save question unanswered): changes made in
+    // it are not written, only listed.
+    static std::atomic<bool> once{false};
+    if (g_started.load() && g_open.load() && !once.exchange(true)) {
+        // Bounded: the panel's thread could hold the model for a moment.
+        bool locked = false;
+        for (int i = 0; i < 100 && !(locked = g_mutex.try_lock()); ++i) Sleep(10);
+        if (locked) {
+            const std::vector<Write> writes = CollectWrites(true);
+            const bool asked = g_dialog;
+            g_mutex.unlock();
+            if (!writes.empty())
+                log::info("menu: the game exits with {} unsaved change{} ({}); not written to ff7vr.ini: {}", writes.size(), writes.size() == 1 ? "" : "s",
+                          asked ? "the save question was not answered" : "the panel was open", PendingText(writes));
+        }
+    }
     if (g_kbHook) {
         UnhookWindowsHookEx(g_kbHook);
         g_kbHook = nullptr;
@@ -1395,11 +1630,24 @@ std::string Command(const std::string& argsIn) {
         return StatusText();
     }
     if (verb == "close" || verb == "back") {
-        ClosePanel("dev command");
+        RequestClose("dev command");
         return StatusText();
     }
+    if (verb == "answer") {
+        const std::string a = Lower(rest);
+        if (a != "yes" && a != "no") return "err usage: menu answer yes|no";
+        if (!DialogShown()) return "err the save question is not shown";
+        Answer(a == "yes");
+        return StatusText();
+    }
+    if (verb == "pending") {
+        std::lock_guard lk(g_mutex);
+        if (!g_open.load()) return "ok panel closed: nothing pending";
+        const auto writes = CollectWrites(true);
+        return std::format("ok {} pending{}{}", writes.size(), writes.empty() ? "" : ": ", PendingText(writes));
+    }
     if (verb == "toggle") {
-        if (g_open.load()) ClosePanel("dev command");
+        if (g_open.load()) RequestClose("dev command");
         else OpenPanel("dev command");
         return StatusText();
     }
@@ -1496,7 +1744,7 @@ std::string Command(const std::string& argsIn) {
     else if (verb == "select") Select();
     else if (verb == "reset") ResetSelected();
     else if (verb == "save") Message(Save());
-    else return "err usage: menu status | open | close | toggle | up | down | left | right | select | reset | save | cat <name> | list | set | default | dump";
+    else return "err usage: menu status | open | close | toggle | up | down | left | right | select | reset | save | answer | pending | cat <name> | list | set | default | dump";
     Draw(false);
     return StatusText();
 }
