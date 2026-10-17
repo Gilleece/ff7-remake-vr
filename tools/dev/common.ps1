@@ -561,10 +561,13 @@ function Backup-Saves([string]$saveRoot = (Get-SaveRoot), [string]$backupRoot = 
 # them (name, size, SHA-256) in ff7vr.deploy-manifest.json in that folder.
 # Undeploying removes exactly the recorded files, plus the files the mod
 # itself creates at runtime (ff7vr.log, ff7vr-crash-*.dmp, ff7vr-headset.txt), which are first
-# archived to captures\runs\<time>\ in the repo.
+# archived to captures\runs\<time>\ in the repo. A save from the settings panel rewrites the
+# deployed ff7vr.ini and keeps the previous one as ff7vr.ini.bak: both are ours too (the
+# manifest records whether a .bak was there before the deploy), archived and removed.
 
 $script:DeployFiles     = @('xinput1_3.dll', 'ff7vr.ini')
 $script:RuntimePatterns = @('ff7vr.log', 'ff7vr-crash-*.dmp', 'ff7vr-headset.txt')
+$script:IniBackupName   = 'ff7vr.ini.bak'                         # written by the settings panel's save
 
 function Get-ManifestPath { return (Join-Path (Get-GameBinDir) $script:ManifestName) }
 
@@ -605,7 +608,8 @@ function Invoke-Deploy([string]$buildDir, [string]$iniPath = '') {
         $entries += [pscustomobject]@{ name = $name; size = (Get-Item -LiteralPath $dst).Length; sha256 = $h; source = $sources[$name] }
     }
     $manifest = [pscustomobject]@{ deployed = (Get-Date).ToString('o'); repo = $script:RepoRoot; files = $entries;
-                                   runtime = $script:RuntimePatterns }
+                                   runtime = $script:RuntimePatterns
+                                   ini_backup_existed = (Test-Path -LiteralPath (Join-Path $bin $script:IniBackupName)) }
     $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Get-ManifestPath) -Encoding UTF8
     Write-Step "Deployed $($entries.Count) files to $bin"
     return $entries
@@ -650,20 +654,29 @@ function Save-RuntimeFiles([string]$stamp = (Get-Date).ToString('yyyyMMdd-HHmmss
 function Invoke-Undeploy([switch]$force) {
     $bin = Get-GameBinDir
     if (@(Get-GameProcesses).Count -gt 0) { throw 'The game is running; stop it before undeploying (tools\dev\stop.ps1).' }
-    [void](Save-RuntimeFiles)
+    $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss')
+    [void](Save-RuntimeFiles $stamp)
     $m = Read-DeployManifest
     if (-not $m) {
         Write-Step 'Nothing deployed (no manifest)'
         return $true
     }
+    $archive = Join-Path $script:CapturesDir ('runs\' + $stamp)
     $clean = $true
     foreach ($e in @($m.files)) {
         $p = Join-Path $bin $e.name
         if (-not (Test-Path -LiteralPath $p)) { continue }
         if ((Get-FileSha256 $p) -ne $e.sha256 -and -not $force) {
-            Write-Step "WARNING: $p changed since it was deployed; left in place (use -Force to remove it)"
-            $clean = $false
-            continue
+            if ($e.name -ne 'ff7vr.ini') {
+                Write-Step "WARNING: $p changed since it was deployed; left in place (use -Force to remove it)"
+                $clean = $false
+                continue
+            }
+            # The deployed ini changed: the settings panel saved into it. The copy goes to the
+            # run's archive; the build's (or -Ini) source file is not changed.
+            Ensure-Dir $archive
+            Copy-Item -LiteralPath $p -Destination (Join-Path $archive 'ff7vr.ini.saved') -Force
+            Write-Step "The ff7vr.ini saved during the run (settings panel) is removed from the game folder; its copy is $(Join-Path $archive 'ff7vr.ini.saved') (the deployed source $($e.source) is unchanged)"
         }
         $tries = 0
         while ($true) {
@@ -673,6 +686,21 @@ function Invoke-Undeploy([switch]$force) {
                 if ($tries -ge 20) { throw "Could not remove ${p}: $_" }
                 Start-Sleep -Milliseconds 500
             }
+        }
+    }
+    # The panel's ff7vr.ini.bak, when it was not there before the deploy (a manifest without the
+    # field, from before it existed: only when the .bak is newer than the deploy).
+    $bak = Join-Path $bin $script:IniBackupName
+    if (Test-Path -LiteralPath $bak) {
+        $existed = $m.PSObject.Properties['ini_backup_existed']
+        $ours = if ($existed) { -not [bool]$existed.Value } else { (Get-Item -LiteralPath $bak).CreationTime -ge [datetime]$m.deployed }
+        if ($ours) {
+            Ensure-Dir $archive
+            Copy-Item -LiteralPath $bak -Destination (Join-Path $archive $script:IniBackupName) -Force
+            Remove-Item -LiteralPath $bak -Force
+            Write-Step "Removed $script:IniBackupName written during the run (copy in $archive)"
+        } else {
+            Write-Step "$bak was there before the deploy; left in place"
         }
     }
     if ($clean) {

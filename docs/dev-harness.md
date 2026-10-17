@@ -454,8 +454,13 @@ undeploy.ps1 -Force                       # also remove deployed files that were
 file it did not deploy itself, and refuses while the game runs (the DLL is
 locked then). `undeploy.ps1` moves the mod's runtime files (`ff7vr.log`,
 `ff7vr-crash-*.dmp`) to `captures\runs\<time>\`, then deletes exactly the
-files in the manifest and the manifest itself. Nothing else in the game folder
-is touched. `launch.ps1` and `stop.ps1` call these for you.
+files in the manifest and the manifest itself. A deployed `ff7vr.ini` that the
+settings panel saved into is copied to the same folder as `ff7vr.ini.saved` and
+removed (one line says so; the build's or `-Ini` file is not changed), and the
+`ff7vr.ini.bak` the save wrote is copied there and removed when the manifest
+records that none was there before the deploy. A deployed DLL that changed is
+left in place unless `-Force` is given. Nothing else in the game folder is
+touched. `launch.ps1` and `stop.ps1` call these for you.
 
 ### `backup-saves.ps1` / `restore-saves.ps1`
 

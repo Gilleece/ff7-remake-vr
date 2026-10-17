@@ -5,9 +5,11 @@
 .DESCRIPTION
   Reads End\Binaries\Win64\ff7vr.deploy-manifest.json and deletes the files it
   lists. Files the mod writes at runtime (ff7vr.log, ff7vr-crash-*.dmp) are
-  first moved to captures\runs\<time>\ in the repo. A deployed file whose hash
-  changed since deployment is left in place unless -Force is given. Refuses
-  while the game is running. Safe to run when nothing is deployed.
+  first moved to captures\runs\<time>\ in the repo. An ff7vr.ini the settings
+  panel saved into, and the ff7vr.ini.bak its save wrote, are copied there too
+  and removed. Another deployed file whose hash changed since deployment is left
+  in place unless -Force is given. Refuses while the game is running. Safe to
+  run when nothing is deployed.
 
 .EXAMPLE
   powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev\undeploy.ps1
