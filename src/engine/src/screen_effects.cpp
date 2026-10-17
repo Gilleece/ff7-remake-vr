@@ -58,12 +58,10 @@ std::atomic<std::uint64_t> g_calls{0}, g_stereo_calls{0}, g_views_removed{0};
 // A run of frames in which the game applied one of the effects (for the log).
 struct Episode {
     bool active = false;
-    bool removed = false;
     bool stereo = false;
     std::chrono::steady_clock::time_point start{}, last{};
     float max_blur = 0.0f, max_aberration = 0.0f, max_fringe = 0.0f;
-    std::uint64_t views = 0;
-    std::array<float, kFields.size()> first{};  // every field at the first view of the run
+    std::uint64_t views = 0, removed_views = 0;
 };
 std::mutex g_mutex;  // g_episode, g_force, g_last
 Episode g_episode;
@@ -91,13 +89,23 @@ std::string values_text(const std::array<float, kFields.size()>& v) {
     return r.empty() ? " (all at their defaults)" : r;
 }
 
-void end_episode_locked(std::chrono::steady_clock::time_point now) {
-    const double secs = std::chrono::duration<double>(g_episode.last - g_episode.start).count();
-    log::info("screen effects: the game's screen effect ended after {:.1f} s ({} views; largest screen blur {:.3f}, colour separation {:.3f}, "
-              "fringe {:.3f}; {})",
-              secs, g_episode.views, g_episode.max_blur, g_episode.max_aberration, g_episode.max_fringe,
-              g_episode.removed ? "removed in 3D" : (g_episode.stereo ? "kept: [comfort] screen_blur = 1" : "flat view, kept"));
-    (void)now;
+// The first runs are logged in full (start and end); after that every 25th end line only, with
+// the count, so a long battle does not fill the log.
+constexpr std::uint64_t kLoggedRuns = 10, kLogEvery = 25;
+bool log_run(std::uint64_t n) { return n <= kLoggedRuns || n % kLogEvery == 0; }
+
+void end_episode_locked() {
+    if (log_run(g_episodes)) {
+        const double secs = std::chrono::duration<double>(g_episode.last - g_episode.start).count();
+        log::info("screen effects: the game's screen effect ended after {:.1f} s ({} views; largest screen blur {:.3f}, colour separation {:.3f}, "
+                  "fringe {:.3f}; {}; {} run(s) so far)",
+                  secs, g_episode.views, g_episode.max_blur, g_episode.max_aberration, g_episode.max_fringe,
+                  g_episode.removed_views == g_episode.views ? std::string("removed in 3D")
+                  : g_episode.removed_views > 0 ? std::format("removed in {} of the views", g_episode.removed_views)
+                  : g_episode.stereo            ? std::string("kept: [comfort] screen_blur = 1")
+                                                : std::string("flat view, kept"),
+                  g_episodes);
+    }
     g_episode = Episode{};
 }
 
@@ -107,9 +115,17 @@ void process(std::uint8_t* settings) {
     const bool stereo = device::presenting();
     if (stereo) g_stereo_calls.fetch_add(1, std::memory_order_relaxed);
 
-    if (const int n = g_force_count.load(std::memory_order_acquire); n > 0) {
-        std::lock_guard lk(g_mutex);
-        for (int i = 0; i < n; ++i) write_f(settings, g_force[i].offset, g_force[i].value);
+    // The view's memory is only touched outside the lock (the caller guards against faults, and
+    // a fault must not leave the mutex held).
+    if (g_force_count.load(std::memory_order_acquire) > 0) {
+        std::array<Forced, 4> forced{};
+        int n = 0;
+        {
+            std::lock_guard lk(g_mutex);
+            n = g_force_count.load();
+            forced = g_force;
+        }
+        for (int i = 0; i < n; ++i) write_f(settings, forced[i].offset, forced[i].value);
     }
 
     std::array<float, kFields.size()> v{};
@@ -117,9 +133,8 @@ void process(std::uint8_t* settings) {
     const bool applied = v[kBlur] > 0.0f || v[kAberration] > 0.0f || v[kFringe] > 0.0f;
     const bool remove = stereo && g_remove.load(std::memory_order_relaxed);
     if (applied && remove) {
-        write_f(settings, kFields[kBlur].offset, 0.0f);
-        write_f(settings, kFields[kAberration].offset, 0.0f);
-        write_f(settings, kFields[kFringe].offset, 0.0f);
+        for (const Field& f : kFields)
+            if (f.removed) write_f(settings, f.offset, 0.0f);
         g_views_removed.fetch_add(1, std::memory_order_relaxed);
     }
 
@@ -130,22 +145,21 @@ void process(std::uint8_t* settings) {
         if (!g_episode.active) {
             g_episode.active = true;
             g_episode.start = now;
-            g_episode.first = v;
-            g_episode.removed = remove;
             g_episode.stereo = stereo;
             ++g_episodes;
-            log::info("screen effects: the game applies a screen effect{}; {}", values_text(v),
-                      remove ? "removed in 3D" : (stereo ? "kept ([comfort] screen_blur = 1)" : "flat view, kept"));
+            if (g_episodes <= kLoggedRuns)
+                log::info("screen effects: the game applies a screen effect{}; {}", values_text(v),
+                          remove ? "removed in 3D" : (stereo ? "kept ([comfort] screen_blur = 1)" : "flat view, kept"));
         }
-        g_episode.removed = g_episode.removed || remove;
         g_episode.stereo = g_episode.stereo || stereo;
         g_episode.last = now;
         g_episode.max_blur = std::max(g_episode.max_blur, v[kBlur]);
         g_episode.max_aberration = std::max(g_episode.max_aberration, v[kAberration]);
         g_episode.max_fringe = std::max(g_episode.max_fringe, v[kFringe]);
         ++g_episode.views;
+        if (remove) ++g_episode.removed_views;
     } else if (g_episode.active && now - g_episode.last > std::chrono::seconds(1)) {
-        end_episode_locked(now);
+        end_episode_locked();
     }
 }
 
@@ -243,6 +257,84 @@ std::string layout() {
     else if (result == -1) g_layout_ok = false;
     log::info("screen effects: layout {}: {}", result == 1 ? "confirmed" : result == -1 ? "DIFFERS" : "not checked", text);
     return std::format("{} {}", result == 1 ? "confirmed" : result == -1 ? "differs" : "not checked", text);
+}
+
+namespace {
+
+// Float and bool properties of an object (its class chain, up to UObject), and the float
+// properties of objects its struct properties point to (for example a distribution's constant).
+std::string object_values(void* obj, int depth) {
+    std::string r;
+    for (void* c = uobj::class_of(obj); c && depth < 3; c = uobj::super_of(c)) {
+        const std::string cname = uobj::object_name(c);
+        if (cname == "Object" || cname == "ParticleModule") break;
+        void* f = nullptr;
+        if (!uobj::read(static_cast<std::uint8_t*>(c) + 0x38, f)) break;
+        for (int guard = 0; f && guard < 256; ++guard) {
+            const std::string name = uobj::object_name(f);
+            const std::string type = uobj::object_name(uobj::class_of(f));
+            std::int32_t off = -1, size = 0;
+            uobj::read(static_cast<std::uint8_t*>(f) + 0x44, off);
+            uobj::read(static_cast<std::uint8_t*>(f) + 0x34, size);
+            const auto* at = static_cast<const std::uint8_t*>(obj) + off;
+            if (off >= 0 && type == "FloatProperty") {
+                float v = 0.0f;
+                if (uobj::read(at, v)) r += std::format(" {}={:.3f}", name, v);
+            } else if (off >= 0 && type == "BoolProperty") {
+                std::uint8_t byte_off = 0, mask = 0, v = 0;
+                uobj::read(static_cast<std::uint8_t*>(f) + 0x71, byte_off);
+                uobj::read(static_cast<std::uint8_t*>(f) + 0x73, mask);
+                if (uobj::read(at + byte_off, v) && (v & mask)) r += std::format(" {}=1", name);
+            } else if (off >= 0 && type == "StructProperty" && size > 0 && size <= 0x100) {
+                // a distribution: its first words as floats (when any is set), and the objects it
+                // points to, with their own float values
+                std::string words;
+                bool any = false;
+                for (std::int32_t q = 0; q + 4 <= size && q < 0x40; q += 4) {
+                    std::uint32_t u = 0;
+                    if (!uobj::read(at + q, u)) break;
+                    float fv = 0.0f;
+                    std::memcpy(&fv, &u, sizeof fv);
+                    any = any || u != 0;
+                    // a float of plausible size (or 0) as a number, anything else in hex
+                    const std::uint32_t e = u >> 24;
+                    const bool plausible = u == 0 || (e >= 0x38 && e <= 0x47) || (e >= 0xb8 && e <= 0xc7);
+                    words += plausible
+                                 ? std::format("{}{:g}", words.empty() ? "" : ",", fv)
+                                 : std::format("{}#{:x}", words.empty() ? "" : ",", u);
+                }
+                if (any) r += std::format(" {}{{{}}}", name, words);
+                for (std::int32_t q = 0; q + 8 <= size; q += 8) {
+                    void* p = nullptr;
+                    if (!uobj::read(at + q, p) || !p || !uobj::alive(p)) continue;
+                    r += std::format(" {}=[{}{}]", name, uobj::object_name(uobj::class_of(p)), object_values(p, depth + 1));
+                }
+            }
+            if (!uobj::read(static_cast<std::uint8_t*>(f) + 0x28, f)) break;
+        }
+    }
+    return r;
+}
+
+}  // namespace
+
+std::string vfx(const std::string& name) {
+    if (!uobj::available()) return "object array not available";
+    std::string r;
+    int n = 0;
+    const int count = uobj::num_objects();
+    for (int i = 0; i < count && n < 24; ++i) {
+        void* o = uobj::object_at(i);
+        if (!o) continue;
+        const std::string cls = uobj::object_name(uobj::class_of(o));
+        if (cls.find("PostProcess") == std::string::npos) continue;
+        const std::string path = uobj::path_of(o);
+        if (path.find(name) == std::string::npos || path.find("Default__") != std::string::npos) continue;
+        ++n;
+        r += std::format(" | {} {}:{}", cls, path, object_values(o, 0));
+    }
+    log::info("screen effects: post-process objects under {}: {}{}", name, n, r);
+    return std::format("{} post-process object(s) under {}{}", n, name, r);
 }
 
 std::string force(const std::string& offset, const std::string& value) {

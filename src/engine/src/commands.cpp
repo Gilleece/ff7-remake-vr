@@ -245,6 +245,7 @@ std::string stereo_command(const std::vector<std::string>& a) {
         // [comfort] screen_blur: 0 = removed in stereo, 1 = kept (as the ini key)
         if (a.size() == 3 && (a[2] == "0" || a[2] == "1")) screen_effects::set_remove(a[2] == "0");
         if (a.size() == 3 && a[2] == "layout") return "ok " + screen_effects::layout();
+        if (a.size() >= 3 && a[2] == "vfx") return "ok " + screen_effects::vfx(a.size() >= 4 ? a[3] : std::string("FX_R_WaitFilter_01"));
         if (a.size() >= 4 && a[2] == "force") {
             const std::string r = screen_effects::force(a[3], a.size() >= 5 ? a[4] : std::string("0"));
             return r.starts_with("err") ? r : "ok " + r;
