@@ -206,6 +206,8 @@ All keys are optional. `ff7vr.ini` sits next to the DLL.
 | `[ui] align` | `1` | world-anchored elements (markers, names, prompts) over their objects at any panel size; `2` = the panel takes the game camera's angle; `0` = neither (see [World-anchored elements](#world-anchored-elements)) |
 | `[ui] align_target_test` | `0` | the game's choice of the usable object (the interaction prompt) keeps the game camera's view; `1` = it sees the panel's view as well, which rejects objects more than about 18 degrees below eye level in first person (`docs/engine-module.md`, "Interaction prompts") |
 | `[ui] align_clamp` | `1` | with `align = 1`: a marker whose object is outside the panel's view (but in front of the head) is placed on the panel's edge in the object's direction; `0` = where the projection puts it, off the panel (`docs/engine-module.md`, "Markers outside the panel") |
+| `[ui] prompt_fixed` | `1` | the interaction prompt (the icon over something you can use) at the fixed point `prompt_x`, `prompt_y` of the panel and shown wherever its object is, in first and third person; `first_person` = so only while first person is shown (the game's placement in third person and battles); `0` = the game's placement over the object (`docs/engine-module.md`, "The interaction prompt at a fixed place") |
+| `[ui] prompt_x`, `prompt_y` | `0.5`, `0.72` | that point as fractions of the panel from its top left |
 | `[ui] battle_size` | `0` | panel height in metres during a battle, `0` = unchanged |
 | `[ui] once_per_frame` | `1` | engine side: draw the UI for the first eye only (`0`: the game draws it for both eyes, as without the mod) |
 | `[foveation] ...` | on, `quality` | foveated rendering in stereo; keys in [Foveated rendering](#foveated-rendering) |

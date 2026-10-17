@@ -1315,6 +1315,13 @@ void RegisterSettings(const Config& cfg) {
          [&xc](const std::string& v) { return OkOrError(xc.UiCommand("follow " + v)); });
     Held(OnOff("ui.align", "Markers aligned with the world", kHud + 15, "ui", "align"),
          [&xc](const std::string& v) { return OkOrError(xc.UiCommand("align " + v)); });
+    Held(Choice("ui.prompt_fixed", "Interaction prompt", kHud + 16, "ui", "prompt_fixed", {"Fixed place", "Fixed in first person", "Over the object"},
+                {"1", "first_person", "0"}),
+         [](const std::string& v) { return OkOrError(Dispatch("uihook prompt mode " + v)); });
+    Held(Number("ui.prompt_x", "Prompt place, across (0 left, 1 right)", kHud + 17, "ui", "prompt_x", 0.0f, 1.0f, 0.02f, 2),
+         [](const std::string& v) { return OkOrError(Dispatch("uihook prompt x " + v)); });
+    Held(Number("ui.prompt_y", "Prompt place, down (0 top, 1 bottom)", kHud + 18, "ui", "prompt_y", 0.0f, 1.0f, 0.02f, 2),
+         [](const std::string& v) { return OkOrError(Dispatch("uihook prompt y " + v)); });
     Held(OnOff("ui.layer", "HUD on its own panel", kHud + 14, "ui", "layer"));
     Held(Number("screen.distance", "Virtual screen distance (m)", kHud + 20, "screen", "distance", 0.5f, 10.0f, 0.25f, 2));
     Held(Number("screen.width", "Virtual screen width (m)", kHud + 21, "screen", "width", 0.5f, 10.0f, 0.1f, 2));

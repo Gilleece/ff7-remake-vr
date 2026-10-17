@@ -831,6 +831,67 @@ rectangle's edge only for the two widget call sites and only when the full pass 
 caller just asked for was replaced by the panel's view (`docs/engine-module.md`,
 "Markers outside the panel").
 
+### The interaction prompt at a fixed place (STATIC, 2026-10-17)
+
+The placer of the field target icon and what it writes, read in the disassembly of
+1.0.0.7 (VERIFIED unless marked; signature `FieldTargetIcon::Place` in
+`tools/re/signatures.json`, checked with `tools/re/signatures.py`):
+
+- `0x142b500`: `FVector2D* Place(FVector2D* out, APlayerController* pc, UUserWidget* icon,
+  const FVector* world)` (rcx, rdx, r8, r9; returns `out`). It zeroes `out`, and when `pc`
+  is not null calls `0x1348940(pc, world, &screen)` (call at `+0x4a`, return `0x142b54f`).
+  When that returns true it multiplies the point by `1 / scale` (the scale from `0x13487c0`
+  and `0x13a94a0`, INFERRED: the viewport's DPI scale, as in `SetPositionInViewport(...,
+  bRemoveDPIScale)`), takes the icon's Slate widget (`0x28d95c0`, INFERRED
+  `UWidget::GetCachedWidget`, a `TSharedPtr` released afterwards) and subtracts half its
+  desired size (`+0x2c`, `+0x30` of the `SWidget`; when either is 200 or less both are taken
+  as 200), stores `out` and writes `icon+0x1c0 = out.x` (at `+0x11d`), `icon+0x1c4 = out.y`
+  (`+0x125`) and 16 zero bytes at `icon+0x1b0` (`+0x12d`). Then (`0x13b4ef0`, `0x1456ae0`,
+  a timer at `icon+0x360..+0x368` and `0x1186af0`; an animation step, not analysed) and last
+  the virtual call `[vtable+0x248](icon, 2 * projected + 1)` at `+0x22f`: `SetVisibility`
+  with 3 (HitTestInvisible) or 1 (Collapsed).
+- The stores match stock 4.18 `UUserWidget::SetPositionInViewport` inlined
+  (`ViewportOffsets.Left/Top = Position`, `ViewportAnchors = FAnchors(0, 0)`), so in this
+  build `UUserWidget::ViewportAnchors` is at `+0x1b0` (Minimum `+0x1b0`, Maximum `+0x1b8`)
+  and `ViewportOffsets` at `+0x1c0` (Left, Top, Right `+0x1c8`, Bottom `+0x1cc`) (VERIFIED for
+  the stores; the field names INFERRED from the stock source). The icon is therefore a
+  viewport widget positioned through its viewport slot, as found on 2026-10-11.
+- Callers (all three VERIFIED): `ShowFieldTargetIcon` (`0x1429770`, call at `0x1429c88`),
+  `0x142a020` (call at `0x142a11e`; it first copies a new world location into the icon's
+  entry) and the per-frame loop `0x142b740` (call at `0x142b92a`), called once per frame
+  from the menu tick `0x13ae310` (call at `0x13ae334`). The loop walks a set of 0x58-byte
+  entries (at `this+0x10`): `+0x00` a weak pointer to the icon, `+0x08` the world location
+  (`FVector`, passed to the placer), `+0x20` a weak pointer to a companion widget, `+0x38`
+  the last position. After each placement it copies the returned position to `+0x38` and
+  to the companion's `+0x1c0`/`+0x1c4` with zero anchors (the same viewport offsets), and,
+  when the byte `this+0x50` is set, collapses the icon (`SetVisibility(icon, 1)`): the
+  game's own way of hiding every icon. `0x142a020` places the companion the same way.
+  `0x3016cf0` applied to `icon+0x1e8` gives the placer's `pc` (INFERRED: the widget's
+  player context).
+- The projection chain the placer starts: `0x1348940` calls
+  `UGameplayStatics::ProjectWorldToScreen` (return `0x1348951`), which calls
+  `GetProjectionData` (return `0x2f5a483`) and then `FSceneView::ProjectWorldToScreen`
+  (return `0x2f5a4ae`) with the full pass's constrained view rectangle. The quest icons
+  share every frame of it below `0x1348951`, so the placer's own return address
+  (`0x142b54f`) is what tells the prompt apart.
+
+Used by `[ui] prompt_fixed` (`docs/engine-module.md`, "The interaction prompt at a fixed
+place"): the mod hooks the placer and, for the `FSceneView::ProjectWorldToScreen` call whose
+chain contains `0x142b54f`, returns true with the fixed point of the view rectangle, so the
+game's own code sizes, places and shows the icon and its companion.
+
+LIVE (2026-10-17, Null backend, 1280x720 window, a switch panel in Mako Reactor 5): the
+icon's `+0x1c0/+0x1c4` read (860, 678) for the point (640, 518.4) of the view and (380, 332)
+for (320, 288): the placer works in 1920x1080 units at this window size (the wrapper's
+scale 1.5) and subtracts 100, half the 200x200 floor, so the icon's desired size is 200 or
+less. The anchors stayed (0, 0) and the visibility 3 (HitTestInvisible) with the object
+behind the camera; with the game's placement the same case gave 1 (Collapsed), confirming
+the placer's own test. `IsInViewport` reads 0 for this icon although its viewport offsets
+place it (the slot it is added to was not traced). The capture chain check never refused a
+projection inside the placer (`other projections inside the placer 0`). Not seen: the
+companion widget (the entry's `+0x20` may be empty for this kind of object), and more than
+one icon at once (`uihook prompt` counted one at most).
+
 ## 10. Post-processing in stereo: Square Enix's passes (LIVE, GPU trace)
 
 Recorded with the engine module's one-frame GPU trace (`gpu trace`, see [Tools](#tools)) in

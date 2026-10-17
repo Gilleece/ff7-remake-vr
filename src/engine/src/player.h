@@ -85,6 +85,10 @@ void request_toggle();
 void request_mode(bool first_person);
 // Any thread: the mode outside the automatic switch, as of the last game frame (true = first person).
 bool first_person_selected();
+// Any thread: first person is what the eyes show in the last game frame (stereo, the follow
+// camera, more than half way into first person); false in third person, during the
+// automatic third person of a battle and with the game's own camera (cutscenes).
+bool first_person_shown();
 // The gamepad combination for the toggle was pressed (any thread; controls.cpp).
 void request_pad_toggle();
 // Test: 1 / 0 pretend a fight is or is not on, 2 forces the battle signal on and leaves the

@@ -602,7 +602,7 @@ bool start_ui_layer(const StartupContext& ctx) {
         log::warn("ui: hooks could not be installed; the UI layer is not available");
         return false;
     }
-    dev_commands::add("uihook", "uihook status | once <0|1> | proj | align | callers [on|off|reset|skip <hex>] | clamp [0|1]: engine side of the UI layer (counters; one UI pass per frame in stereo; log the views' projections; marker alignment)",
+    dev_commands::add("uihook", "uihook status | once <0|1> | proj | align | callers [on|off|reset|skip <hex>] | clamp [0|1] | prompt [mode <1|first_person|0> | x <0..1> | y <0..1> | reset]: engine side of the UI layer (counters; one UI pass per frame in stereo; log the views' projections; marker alignment; the interaction prompt's fixed place)",
                       [](std::string_view args) -> std::string {
                           std::string a(args);
                           while (!a.empty() && a.back() == ' ') a.pop_back();
@@ -610,6 +610,7 @@ bool start_ui_layer(const StartupContext& ctx) {
                           if (a == "align") return ui_align::status();
                           if (a.rfind("callers", 0) == 0) return ui_align::callers_command(a.size() > 7 ? a.substr(8) : std::string());
                           if (a.rfind("clamp", 0) == 0) return ui_align::clamp_command(a.size() > 5 ? a.substr(6) : std::string());
+                          if (a.rfind("prompt", 0) == 0) return ui_align::prompt_command(a.size() > 6 ? a.substr(7) : std::string());
                           if (a == "proj") {
                               g_projScans = 2;
                               return "ok the projections of the next two views the UI pass receives go to ff7vr.log";
@@ -618,7 +619,7 @@ bool start_ui_layer(const StartupContext& ctx) {
                               g_oncePerFrame = a.back() == '1';
                               return status();
                           }
-                          return "err usage: uihook status | once <0|1> | proj | align | callers [on|off|reset|skip <hex offsets>]";
+                          return "err usage: uihook status | once <0|1> | proj | align | callers [on|off|reset|skip <hex offsets>] | clamp [0|1] | prompt [...]";
                       });
     g_ready = true;
     log::info("ui: UI layer hooks installed in {} ms (BeginRenderingInGameUI +0x{:x}, EndRenderingInGameUI +0x{:x}, UI target member +0x{:x}, "
