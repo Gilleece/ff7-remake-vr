@@ -49,7 +49,7 @@ std::atomic<std::uint64_t> g_patch_matches{0}, g_patch_failures{0};
 // The dither patch (see find_dither): the size of the static tile (0: as the game), whether
 // the full-screen form is patched too, and every distinct shader seen, by its 3DMigoto hash
 // (`shader list`). Under g_mutex.
-std::atomic<int> g_dither_size{2};
+std::atomic<int> g_dither_size{32};
 std::atomic<bool> g_dither_screen{false};
 std::atomic<std::uint64_t> g_dither_patched{0}, g_dither_failed{0}, g_dither_material_seen{0}, g_dither_screen_seen{0};
 struct Known {

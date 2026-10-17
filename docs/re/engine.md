@@ -1768,8 +1768,9 @@ this game (helixmod's FF7R DX11 fix, whose `ShaderFixes` are named by the 3DMigo
   same `and`/`ld` with `ishl rB.z, cbN[139].z, l(3)` written straight into the address
   (no per-object offset). Variants with `ishl ..., cbN[139].w, l(1)` and a different
   register order also exist (3 of the fix's shaders); `find_dither` does not match those.
-- The patch: the `and` immediate becomes `(t-1, t-1, min(t,8)-1, 0)` for a tile `t` of 2, 4
-  or 8 (the pack's choice is 2), or `(63, 63, 7, 0)` for the whole 64x64 tile. Any z mask
+- The patch: the `and` immediate becomes `(t-1, t-1, min(t,8)-1, 0)` for a tile `t` of 2, 4,
+  8, 16 or 32 (the pack's choice is 2; the mod's default 32), or `(63, 63, 7, 0)` for the
+  whole 64x64 tile. Any z mask
   below 8 removes the counter term, a multiple of 8. One dword per lookup; the copy is
   re-signed (`sign()`); instruction count unchanged.
 
