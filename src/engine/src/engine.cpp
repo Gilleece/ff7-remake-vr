@@ -316,6 +316,12 @@ bool start(const StartupContext& ctx) {
         diag::set_prompt_log(cfg.get_bool("first_person", "prompt_log", false));
         ui_align::set_target_test_panel(cfg.get_bool("ui", "align_target_test", false));
         ui_align::set_clamp(cfg.get_bool("ui", "align_clamp", true));
+        {
+            const std::string v = cfg.get_string("ui", "prompt_fixed", "1");
+            int mode = ui_align::kPromptAlways;
+            if (!ui_align::parse_prompt_mode(v, mode)) log::warn("engine: [ui] prompt_fixed = {}: not 1, first_person or 0; using 1", v);
+            ui_align::set_prompt(mode, static_cast<float>(cfg.get_float("ui", "prompt_x", 0.5)), static_cast<float>(cfg.get_float("ui", "prompt_y", 0.72)));
+        }
         g_opt.bloom_fix = cfg.get_bool("stereo", "bloom_fix", true);
         g_opt.ao_fix = cfg.get_bool("stereo", "ao_fix", true);
         g_opt.distortion_fix = cfg.get_bool("stereo", "distortion_fix", true);

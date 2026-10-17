@@ -308,6 +308,18 @@
       "desc": "static bool FSceneView::ProjectWorldToScreen(const FVector& WorldPosition, const FIntRect& ViewRect, const FMatrix& ViewProjectionMatrix, FVector2D& out_ScreenPos). Returns true when the point is in front of the view (W > 0), with no test against the rectangle. Called by UGameplayStatics::ProjectWorldToScreen (0x2f5a3f0, call at 0x2f5a4a9) and UWidgetLayoutLibrary (call at 0x28fc642), among ten call sites."
     },
     {
+      "name": "FieldTargetIcon::Place",
+      "kind": "function",
+      "pattern": "4C 8B DC 53 55 56 48 83 EC 60 F3 0F 10 05 ?? ?? ?? ?? 48 8B F1 F3 0F 10 0D ?? ?? ?? ?? 33 C9 40 32 ED F3 41 0F 11 43 08 F3 41 0F 11 4B 0C 49 8B D8 48 89 0E 48 8B C2 48 85 D2 0F 84 ?? ?? ?? ?? 4D 8D 43 08 49 8B D1 48 8B C8 E8",
+      "resolve": {
+        "type": "match",
+        "offset": 0
+      },
+      "expect": "0x142b500",
+      "desc": "Square Enix's placer of the field target icon (the interaction prompt widget FieldTarget_01_C): FVector2D* Place(FVector2D* out, APlayerController* pc, UUserWidget* icon, const FVector* world). Projects the world location with 0x1348940 (call at +0x4a, return +0x4f; the wrapper of UGameplayStatics::ProjectWorldToScreen), multiplies by 1/viewport scale, subtracts half the cached Slate widget's desired size (+0x2c/+0x30 of the SWidget, at least 200 x 200), stores UUserWidget::ViewportOffsets.Left/Top (+0x1c0 at +0x11d, +0x1c4 at +0x125) and zeroes ViewportAnchors (+0x1b0, 16 bytes, at +0x12d), and ends with the virtual SetVisibility (vtable +0x248 at +0x22f) with 3 (HitTestInvisible) when the projection succeeded, 1 (Collapsed) when not. Returns out (the offsets); its callers copy them to a companion widget. Callers: ShowFieldTargetIcon (0x1429770, call at 0x1429c88), 0x142a020 (call at 0x142a11e) and the per-frame loop 0x142b740 (call at 0x142b92a) from the menu tick 0x13ae310. Hooked for [ui] prompt_fixed.",
+      "howto": "The only function called from both ShowFieldTargetIcon and the per-frame icon loop 0x142b740 that calls 0x1348940; or the stores to +0x1c0/+0x1c4 followed by movups [rbx+0x1b0] (an inlined UUserWidget::SetPositionInViewport)."
+    },
+    {
       "name": "ULocalPlayer::CalcSceneView",
       "kind": "function",
       "pattern": "4C 8B DC 55 56 49 8D AB 08 F8 FF FF",

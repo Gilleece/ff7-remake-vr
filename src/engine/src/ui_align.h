@@ -55,6 +55,19 @@ void set_clamp(bool on);
 // `uihook clamp [0|1]`: the setting live, with counters and the last moved point.
 std::string clamp_command(const std::string& args);
 
+// [ui] prompt_fixed: where the interaction prompt (the field target icon over a ladder, door,
+// item or person) is drawn while the headset view is shown. Always (1, default) = at the fixed
+// point (prompt_x, prompt_y) of the view, fractions 0..1 from its top left, and kept visible
+// whenever the game shows it, wherever its object is; FirstPerson ("first_person") = so only
+// while first person is shown, the game's placement in third person and in battles; Off (0)
+// = the game's placement over the object. Any thread; applies at the next frame.
+constexpr int kPromptOff = 0, kPromptAlways = 1, kPromptFirstPerson = 2;
+void set_prompt(int mode, float x, float y);
+bool parse_prompt_mode(const std::string& value, int& mode);  // "1", "first_person", "0"
+// `uihook prompt [mode <1|first_person|0> | x <0..1> | y <0..1> | reset]`: the setting live,
+// with the counters (placements, pinned, icons at once) and the current mode.
+std::string prompt_command(const std::string& args);
+
 // The last published camera, eye base and head pose, with the alignment counters (for
 // diagnostics; any thread).
 struct Snapshot {

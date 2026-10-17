@@ -104,6 +104,7 @@ std::vector<std::function<void()>> g_work;
 std::atomic<int> g_toggle_requests{0};
 std::atomic<int> g_mode_request{-1};
 std::atomic<bool> g_fp_selected{true};  // g.first_person for other threads
+std::atomic<bool> g_fp_shown{false};    // first person is what the eyes show (first_person_shown)
 std::atomic<int> g_combat_override{-1};
 std::atomic<std::uint64_t> g_pad_toggles{0};
 
@@ -1111,6 +1112,7 @@ void tick(bool stereo, float delta_seconds) {
     const bool hide = stereo && hide_mode != 0 && g.blend > 0.5f && g.pawn;
     if (hide) hide_meshes(g.pawn, hide_mode);
     else if (!g.hidden.empty() || !g.hidden_bones.empty() || !g.hidden_pass.empty() || g.hidden_pawn) restore_meshes();
+    g_fp_shown.store(stereo && g.follow_camera && g.blend > 0.5f, std::memory_order_relaxed);
     audio_listener::player_frame({g.pc, g.pawn, g.view_target, g.in_battle, stereo, stereo && g.follow_camera && g.blend > 0.5f});
     diag::player_frame({g.pc, g.pawn, g.view_target, g.battle_raw, g.in_battle, g.first_person, stereo && g.follow_camera && g.blend > 0.5f,
                         g.follow_camera, stereo});
@@ -1317,6 +1319,7 @@ void request_mode(bool first_person) {
     g_fp_selected = first_person;  // shown at once; the game thread applies it at the next frame
 }
 bool first_person_selected() { return g_fp_selected.load(std::memory_order_relaxed); }
+bool first_person_shown() { return g_fp_shown.load(std::memory_order_relaxed); }
 void set_combat_override(int v) { g_combat_override = v; }
 
 std::string status() {

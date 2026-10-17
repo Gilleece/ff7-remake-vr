@@ -1,5 +1,6 @@
 #include "ui_align.h"
 
+#include "player.h"
 #include "stereo_device.h"
 #include "ue_math.h"
 
@@ -115,6 +116,47 @@ struct LastClamp {
     std::int32_t rect[4]{};
 };
 LastClamp g_last_clamp;
+
+// The interaction prompt at a fixed place ([ui] prompt_fixed). Square Enix's placer of the
+// field target icon (0x142b500: out position, player controller, icon widget, world
+// location) projects the target with 0x1348940 (UGameplayStatics::ProjectWorldToScreen
+// inside), converts the point to the widget's viewport units, subtracts half the widget's
+// size, writes the widget's viewport anchors (+0x1b0, zero) and offsets (+0x1c0 left, +0x1c4
+// top) and sets its visibility to HitTestInvisible when the projection succeeded and
+// Collapsed when not; its callers copy the returned position to a companion widget. The
+// placer is hooked, and while it runs, the projection it reaches (FSceneView::
+// ProjectWorldToScreen called from UGameplayStatics, return address 0x2f5a4ae) returns the
+// fixed point of the view rectangle and "in front". The game's own code then does the rest:
+// size, scale, companion and visibility, and its own hiding (the manager's flag, the
+// destroy on leaving) still applies.
+constexpr const char* kPlacePattern =
+    "4C 8B DC 53 55 56 48 83 EC 60 F3 0F 10 05 ?? ?? ?? ?? 48 8B F1 F3 0F 10 0D ?? ?? ?? ?? 33 C9 40 32 ED F3 41 0F 11 43 08 "
+    "F3 41 0F 11 4B 0C 49 8B D8 48 89 0E 48 8B C2 48 85 D2 0F 84 ?? ?? ?? ?? 4D 8D 43 08 49 8B D1 48 8B C8 E8";
+constexpr std::uintptr_t kPlaceRva = 0x142b500;
+// Checked byte for byte in the known build: the stores of the viewport offsets and anchors
+// and the virtual SetVisibility call (vtable +0x248).
+constexpr std::size_t kPlaceStoreLeft = 0x11d, kPlaceStoreTop = 0x125, kPlaceStoreAnchors = 0x12d, kPlaceSetVisibility = 0x22f;
+constexpr std::uint8_t kStoreLeft[] = {0xF3, 0x0F, 0x11, 0x83, 0xC0, 0x01, 0x00, 0x00};
+constexpr std::uint8_t kStoreTop[] = {0xF3, 0x0F, 0x11, 0x9B, 0xC4, 0x01, 0x00, 0x00};
+constexpr std::uint8_t kStoreAnchors[] = {0x0F, 0x11, 0x8B, 0xB0, 0x01, 0x00, 0x00};
+constexpr std::uint8_t kCallSetVisibility[] = {0xFF, 0x90, 0x48, 0x02, 0x00, 0x00};
+using PlaceFn = float* (*)(float*, void*, std::uint8_t*, const float*);
+hook::InlineHook g_place_hook;
+std::atomic<int> g_prompt_mode{kPromptAlways};  // [ui] prompt_fixed
+std::atomic<float> g_prompt_x{0.5f}, g_prompt_y{0.72f};
+std::atomic<std::uint64_t> g_place_calls{0}, g_place_pinned{0}, g_place_behind{0}, g_place_noproj{0};
+std::atomic<int> g_prompt_state{-1};  // last placement: 1 pinned, 0 the game's (-1 none yet)
+std::atomic<int> g_icons_max{0};      // most icons placed within 0.25 s of each other
+thread_local bool t_pin = false;      // inside the placer, the fixed point applies
+thread_local bool t_pin_hit = false;  // ... and the projection was replaced
+std::mutex g_icons_mutex;
+std::vector<std::pair<const void*, double>> g_icons;  // icon widgets placed recently, last time
+struct LastPin {
+    float x = 0, y = 0;
+    std::int32_t rect[4]{};
+    bool behind = false;
+};
+LastPin g_last_pin;
 
 // `uihook targetprobe on`: a probe on the field-target classifier (0x1017ad0; it returns
 // 1 = out, 2 = in range, 3 = near; its third argument is the target's location) that logs,
@@ -380,8 +422,22 @@ bool detour(const void* local_player, void* viewport, std::int32_t pass, std::ui
 
 bool project_detour(const float* world, const std::int32_t* rect, const float* vp, float* out) {
     const bool ok = g_project_hook.original<ProjectFn>()(world, rect, vp, out);
-    if (!t_panel_view || !g_clamp.load(std::memory_order_relaxed) || !world || !rect || !vp || !out) return ok;
     const auto ret = reinterpret_cast<std::uintptr_t>(_ReturnAddress());
+    // The field target icon's own projection ([ui] prompt_fixed): the fixed point, in front.
+    if (t_pin && ret == g_ret_statics && rect && out) {
+        t_pin = false;
+        t_pin_hit = true;
+        const float fx = std::clamp(g_prompt_x.load(std::memory_order_relaxed), 0.0f, 1.0f);
+        const float fy = std::clamp(g_prompt_y.load(std::memory_order_relaxed), 0.0f, 1.0f);
+        out[0] = static_cast<float>(rect[0] + fx * (rect[2] - rect[0]));
+        out[1] = static_cast<float>(rect[1] + fy * (rect[3] - rect[1]));
+        ++g_place_pinned;
+        if (!ok) ++g_place_behind;
+        std::lock_guard lk(g_mutex);
+        g_last_pin = LastPin{out[0], out[1], {rect[0], rect[1], rect[2], rect[3]}, !ok};
+        return true;
+    }
+    if (!t_panel_view || !g_clamp.load(std::memory_order_relaxed) || !world || !rect || !vp || !out) return ok;
     if (ret != g_ret_statics && ret != g_ret_layout) return ok;
     ++g_marker_calls;
     if (!ok) {
@@ -406,7 +462,98 @@ bool project_detour(const float* world, const std::int32_t* rect, const float* v
     return ok;
 }
 
+const char* prompt_mode_name(int m) { return m == kPromptAlways ? "1 (always)" : m == kPromptFirstPerson ? "first_person" : "0 (off)"; }
+
+// The icon placer (see g_place_hook). Game thread (the menu tick and the icon's creation).
+float* place_detour(float* out, void* controller, std::uint8_t* widget, const float* world) {
+    const int mode = g_prompt_mode.load(std::memory_order_relaxed);
+    const bool fp = player::first_person_shown();
+    const bool pin = device::presenting() && (mode == kPromptAlways || (mode == kPromptFirstPerson && fp));
+    t_pin = pin;
+    t_pin_hit = false;
+    float* r = g_place_hook.original<PlaceFn>()(out, controller, widget, world);
+    t_pin = false;
+    ++g_place_calls;
+    // No projection reached (no controller, or the game had no view this frame): the game
+    // keeps the icon collapsed at its last place.
+    if (pin && !t_pin_hit) ++g_place_noproj;
+    const int state = pin ? 1 : 0;
+    if (g_prompt_state.exchange(state) != state) {
+        if (pin)
+            log::info("ui: interaction prompt pinned at ({:.2f}, {:.2f}) of the view ([ui] prompt_fixed = {}, {} person shown)", g_prompt_x.load(),
+                      g_prompt_y.load(), prompt_mode_name(mode), fp ? "first" : "third");
+        else
+            log::info("ui: interaction prompt placed by the game ([ui] prompt_fixed = {}, {} person shown, headset view {})", prompt_mode_name(mode),
+                      fp ? "first" : "third", device::presenting() ? "on" : "off");
+    }
+    // How many icons the game shows at once (each one is placed every frame).
+    const double now = GetTickCount64() / 1000.0;
+    std::lock_guard lk(g_icons_mutex);
+    std::erase_if(g_icons, [now](const auto& e) { return now - e.second > 0.25; });
+    auto it = std::find_if(g_icons.begin(), g_icons.end(), [widget](const auto& e) { return e.first == widget; });
+    if (it != g_icons.end()) it->second = now;
+    else if (g_icons.size() < 64) g_icons.push_back({widget, now});
+    if (static_cast<int>(g_icons.size()) > g_icons_max.load()) g_icons_max = static_cast<int>(g_icons.size());
+    return r;
+}
+
 }  // namespace
+
+void set_prompt(int mode, float x, float y) {
+    g_prompt_mode = mode == kPromptAlways || mode == kPromptFirstPerson ? mode : kPromptOff;
+    if (std::isfinite(x)) g_prompt_x = std::clamp(x, 0.0f, 1.0f);
+    if (std::isfinite(y)) g_prompt_y = std::clamp(y, 0.0f, 1.0f);
+}
+
+bool parse_prompt_mode(const std::string& v, int& mode) {
+    if (v == "1" || v == "on" || v == "always") mode = kPromptAlways;
+    else if (v == "first_person" || v == "first") mode = kPromptFirstPerson;
+    else if (v == "0" || v == "off") mode = kPromptOff;
+    else return false;
+    return true;
+}
+
+std::string prompt_command(const std::string& args) {
+    std::istringstream in(args);
+    std::string w;
+    in >> w;
+    if (w == "mode") {
+        std::string v;
+        in >> v;
+        int m = 0;
+        if (!parse_prompt_mode(v, m)) return "err usage: uihook prompt mode <1|first_person|0>";
+        g_prompt_mode = m;
+    } else if (w == "x" || w == "y") {
+        float v = 0;
+        if (!(in >> v) || !std::isfinite(v) || v < 0.0f || v > 1.0f) return "err usage: uihook prompt x|y <0..1>";
+        (w == "x" ? g_prompt_x : g_prompt_y) = v;
+    } else if (w == "reset") {
+        g_place_calls = 0;
+        g_place_pinned = 0;
+        g_place_behind = 0;
+        g_place_noproj = 0;
+        g_icons_max = 0;
+    } else if (!w.empty()) {
+        return "err usage: uihook prompt [mode <1|first_person|0> | x <0..1> | y <0..1> | reset]";
+    }
+    int icons_now = 0;
+    {
+        const double now = GetTickCount64() / 1000.0;
+        std::lock_guard lk(g_icons_mutex);
+        for (const auto& e : g_icons) icons_now += now - e.second <= 0.25 ? 1 : 0;
+    }
+    const int state = g_prompt_state.load();
+    std::lock_guard lk(g_mutex);
+    const LastPin& l = g_last_pin;
+    return std::format("ok interaction prompt: prompt_fixed {} at ({:.2f}, {:.2f}), placer hook {}, projection hook {}; now {} ({} person shown, headset view {}); "
+                       "placements {} pinned {} (behind the view {}) without a projection {}; icons now {} at most {}; "
+                       "last pinned point ({:.1f}, {:.1f}){} in {} {} {} {}",
+                       prompt_mode_name(g_prompt_mode.load()), g_prompt_x.load(), g_prompt_y.load(), g_place_hook.installed() ? "installed" : "not installed",
+                       g_project_hook.installed() && g_ret_statics ? "installed" : "not installed",
+                       state < 0 ? "no icon placed yet" : state ? "pinned" : "the game's placement", player::first_person_shown() ? "first" : "third",
+                       device::presenting() ? "on" : "off", g_place_calls.load(), g_place_pinned.load(), g_place_behind.load(), g_place_noproj.load(),
+                       icons_now, g_icons_max.load(), l.x, l.y, l.behind ? " (target behind)" : "", l.rect[0], l.rect[1], l.rect[2], l.rect[3]);
+}
 
 void set_skip(const std::string& list) {
     std::string t = list;
@@ -560,6 +707,28 @@ void start(std::uintptr_t base, bool known) {
     }
     log::info("ui: marker clamp hook installed (FSceneView::ProjectWorldToScreen +0x{:x}, callers{}{})", pr.first() - base,
               g_ret_statics ? " UGameplayStatics" : "", g_ret_layout ? " UWidgetLayoutLibrary" : "");
+
+    // The interaction prompt at a fixed place ([ui] prompt_fixed): the field target icon's
+    // placer, known build only (the widget offsets it writes were read in this build).
+    if (!g_ret_statics) {
+        log::warn("ui: UGameplayStatics::ProjectWorldToScreen's call is not at its known place; [ui] prompt_fixed has no effect");
+        return;
+    }
+    const auto pl = pattern::scan_module(base, kPlacePattern, pattern::Sections::Executable, 2);
+    const auto* f = pl.unique() ? reinterpret_cast<const std::uint8_t*>(pl.first()) : nullptr;
+    if (!known || !f || pl.first() - base != kPlaceRva || std::memcmp(f + kPlaceStoreLeft, kStoreLeft, sizeof(kStoreLeft)) != 0 ||
+        std::memcmp(f + kPlaceStoreTop, kStoreTop, sizeof(kStoreTop)) != 0 ||
+        std::memcmp(f + kPlaceStoreAnchors, kStoreAnchors, sizeof(kStoreAnchors)) != 0 ||
+        std::memcmp(f + kPlaceSetVisibility, kCallSetVisibility, sizeof(kCallSetVisibility)) != 0) {
+        log::warn("ui: the field target icon's placer is not at its known place ({} matches); [ui] prompt_fixed has no effect", pl.matches.size());
+        return;
+    }
+    if (!g_place_hook.create(reinterpret_cast<void*>(pl.first()), &place_detour)) {
+        log::warn("ui: the field target icon's placer could not be hooked; [ui] prompt_fixed has no effect");
+        return;
+    }
+    log::info("ui: interaction prompt hook installed (field target icon placer +0x{:x}); prompt_fixed {} at ({:.2f}, {:.2f})", pl.first() - base,
+              prompt_mode_name(g_prompt_mode.load()), g_prompt_x.load(), g_prompt_y.load());
 }
 
 void publish(const FRotator& game_rot, const FVector& game_loc, float game_fov_deg, const FRotator& base_level, const FVector& base_loc,
