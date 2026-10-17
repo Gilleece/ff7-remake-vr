@@ -1027,7 +1027,7 @@ void RegisterSettings(const Config& cfg) {
     // Shaders are created once, so both take effect at the next start.
     Held(Choice("stereo.hair_dither", "Hair and fade dither", kPicture + 30, "stereo", "hair_dither", {"Mod default (shimmer fix)", "Game default (may shimmer)"},
                 {"static", "game"}));
-    Held(Choice("stereo.hair_dither_size", "Steady dither tile", kPicture + 31, "stereo", "hair_dither_size", {"2x2", "4x4", "8x8"}, {"2", "4", "8"}));
+    Held(Choice("stereo.hair_dither_size", "Steady dither tile", kPicture + 31, "stereo", "hair_dither_size", {"2x2", "4x4", "8x8", "16x16", "32x32"}, {"2", "4", "8", "16", "32"}));
     Optional(Number("cvar.depth_of_field", "Depth of field (r.DepthOfFieldQuality)", kPicture + 80, "stereo_cvars", "r.DepthOfFieldQuality", 0, 4, 1, 0));
 
     // ---- Comfort ----

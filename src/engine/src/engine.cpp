@@ -424,7 +424,7 @@ bool start(const StartupContext& ctx) {
             return false;
         }
         {
-            // [stereo] hair_dither = static (default) | game; hair_dither_size = 2 | 4 | 8.
+            // [stereo] hair_dither = static (default) | game; hair_dither_size = 2 | 4 | 8 | 16 | 32.
             std::string dither = cfg.get_string("stereo", "hair_dither", "static");
             for (char& c : dither) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
             const int tile = static_cast<int>(cfg.get_int("stereo", "hair_dither_size", 2));
