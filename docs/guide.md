@@ -232,7 +232,7 @@ The settings panel opens in front of you (1.2 m away, 0.8 m wide; `[menu] distan
 `size`). It holds every setting of `ff7vr.ini` in seven categories shown as tabs: Picture,
 Comfort, View, HUD, Performance, Controls and Advanced. Most changes apply at once; a row
 marked **next start** (and its help line) is a setting the game only reads when it starts:
-its value is saved, and it takes effect the next time you start the game. The Performance
+once saved, it takes effect the next time you start the game. The Performance
 tab shows the frame rate against the headset's, the GPU time and the video memory. While
 the panel is open the game sees neither the gamepad nor the panel's keys: D-pad up/down
 (or the left stick) choose a row (up from the first row reaches the tabs), left/right
@@ -240,7 +240,15 @@ change its value (on the tabs: the category), LB/RB switch category, A selects (
 the next choice, or "set / not set" on an optional line), Y resets the row to its
 default, X saves, B closes, and View/Back + Y closes it again. Each category ends with
 Reset this category, Reset all (both ask you to select twice), Save and Close. On the
-keyboard: arrows, Enter, Backspace (default), S (save) and Delete (close). Saving writes
+keyboard: arrows, Enter, Backspace (default), S (save) and Delete (close). Nothing is
+written while you try values out. When you close the panel after changing something, it
+asks "Do you want to save these changes to the ini file so they persist on your next
+launch of FF7 Remake?": **No, just testing them** keeps the changes for this session only
+(a **next start** row goes back to its value), **Yes, please save** writes them to
+`ff7vr.ini`. Left/right choose the answer and A (Enter) confirms it; until you answer, the
+close buttons do nothing. A change you undo before closing does not count, and X saves at
+once without closing. If the game ends while the panel is open, nothing is written (the
+log lists what was not saved). Saving writes
 only the values that differ from `ff7vr.ini` into it, in place: every comment and the
 order stay (an optional line under `[stereo_cvars]` is uncommented or commented out where
 it is), and the previous file is kept as `ff7vr.ini.bak`. The launcher copies a

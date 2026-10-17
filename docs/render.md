@@ -605,7 +605,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\dev\send-input.ps1 -Pi
 | `fov ...` | foveated rendering: status, settings, one-frame trace, timing ([Foveation dev commands](#foveation-dev-commands)) |
 | `picture status` / `picture reset` / `picture <key> <value>` | the colour adjustment now, back to no change, or one key (`brightness`, `contrast`, `saturation`, `gamma`, `black_level`) set and clamped; applies from the next image copied to the headset ([Picture controls](#picture-controls)) |
 | `menu status` / `open` / `close` / `toggle` / `cat` / `list` / `set` / `default` | the settings panel: open or closed, the category and selected row, the category's values, frames shown and images uploaded, the gamepad and keyboard counters; every setting with its default; set or reset one ([Settings panel](#settings-panel)) |
-| `menu up` / `down` / `left` / `right` / `select` / `back` / `save` | the panel's buttons: choose a line, change its value, select, close, save to `ff7vr.ini` |
+| `menu up` / `down` / `left` / `right` / `select` / `back` / `save` | the panel's buttons: choose a line, change its value, select, close (or ask, when changes are pending), save to `ff7vr.ini` at once; while the save question shows, `up` to `right` switch the answer and `select` confirms it |
+| `menu answer yes\|no` / `menu pending` | answer the save question (as selecting "Yes, please save" or "No, just testing them"); list the pending changes (`section.key = value`) |
 | `menu dump <png>` | write the panel texture as uploaded to the GPU (premultiplied alpha) to a PNG; the panel must be open |
 | `menu pad <hex buttons> [user]` | one XInput state through the panel's pad filter, as the game's poll passes it; replies with what the game receives |
 | `menu focus any\|window` | tests: the panel's keyboard and gamepad input also without the window focus (`any`) or only with it (default) |
@@ -677,9 +678,34 @@ warns at start when it is on). Capture and trace output paths are not restricted
   selected row to it; Reset this category and Reset all ask for a second select
   within 4 s. Resetting the graphics profile comes first, so it cannot undo the settings
   reset after it.
+- **Saving.** A change applies live at once (or waits for the next start) and nothing is
+  written while the panel is open. Closing it (the panel key, B, View/Back + Y, the Close
+  row, `menu close`) with changes pending shows a question over the dimmed panel: "Do you
+  want to save these changes to the ini file so they persist on your next launch of FF7
+  Remake?", the changed settings' names under it, and two answers side by side, "No, just
+  testing them" (selected first) and "Yes, please save". Left/right or up/down switch the
+  answer, A or Enter confirms it; B, the panel key, View/Back + Y, Y, X, LB/RB and
+  Backspace do nothing until it is answered. **Yes** writes every pending value (the same
+  in-place write as X, below) and closes; a failed write keeps the panel open with the
+  error. **No** writes nothing and closes; live values stay as set for the session, and
+  rows that take effect at the next start (and optional lines) go back to the value they
+  had when the panel opened. The pending set is measured from the values shown when the
+  panel opened (or were last saved): a key is pending when it changed since then and the
+  file does not hold its value (`live_settings::pending`, unit-tested in
+  `ff7vr_core_tests`), so a key changed twice is pending with its last value, a key changed
+  back to the file's value or to its value at the open drops out, and a reset counts as a
+  change. Values changed outside the panel (Page Up/Down, the brightness keys) are not
+  pending; X (S, the Save row, `menu save`) still writes at once every value shown that
+  the file does not hold, those included. When the game exits with the panel open or the
+  question unanswered, nothing is written and one line is logged: `menu: the game exits
+  with N unsaved changes (...); not written to ff7vr.ini: section.key = value, ...`.
+  `menu set` changes a value as the panel's own change does: while the panel is open it is
+  pending like any other (the close asks), with the panel closed it is not tracked; scripts
+  that need the value in the file follow it with `menu save`. The launcher's copy-back of a
+  changed `ff7vr.ini` after the session is unchanged (the file only changes on a save).
 - **Input.** Delete (`[menu] key`) or View/Back + Y opens and closes it. Pad: D-pad (or the
   left stick) up/down choose, left/right change (on the tab row: switch category), LB/RB
-  switch category anywhere, A selects, Y resets the row, X saves, B closes. Keyboard:
+  switch category anywhere, A selects, Y resets the row, X saves at once, B closes (asking first when changes are pending). Keyboard:
   arrows, Enter, Backspace (default), S (save), Delete (close); Escape no longer closes it
   (it opened the game's menu as well). While the panel is open those keys never reach the
   game: a `WH_GETMESSAGE` hook on the game window's thread (the `UnrealWindow` of the
