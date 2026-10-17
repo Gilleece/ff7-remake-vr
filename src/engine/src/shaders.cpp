@@ -638,7 +638,7 @@ bool install(bool keep_all) {
     const bool ok = g_hook->create(fn, &create_pixel_shader);
     log::info("shaders: CreatePixelShader {} (bytecode kept: {})", ok ? "hooked" : "NOT hooked",
               keep_all ? "every shader, [dev] keep_shaders = 1" : "the shaders the fixes need");
-    dev_commands::add("shader", "shader status | dump <hex pointer> <prefix> | check | list <file>: pixel shader bytecode as the game created it",
+    dev_commands::add("shader", "shader status | dump <hex pointer> <prefix> | check | list <file> | fnv <hex>: pixel shader bytecode as the game created it",
                       [](std::string_view args) { return command(std::string(args)); });
     return ok;
 }
@@ -760,7 +760,21 @@ std::string command(const std::string& args) {
         }
         return std::format("ok checksums recomputed for {} kept shaders, {} differ", n, bad);
     }
-    return "err usage: shader status | dump <hex pointer> <prefix> | check | list <file>";
+    if (a[0] == "fnv" && a.size() == 2) {
+        // The kept shaders with the given 3DMigoto hash (the name shader-replacement tools give a shader).
+        const std::uint64_t want = std::stoull(a[1], nullptr, 16);
+        std::string r;
+        std::size_t n = 0;
+        std::lock_guard lk(g_mutex);
+        for (const auto& [ptr, e] : *g_seen) {
+            if (e.code.empty()) continue;
+            ++n;
+            if (migoto_hash(e.code.data(), e.code.size()) == want)
+                r += std::format(" {} ({}, {} bytes)", static_cast<void*>(ptr), hash_string(e.hash), e.code.size());
+        }
+        return std::format("ok {} kept shaders hashed; {:016x}:{}", n, want, r.empty() ? " none" : r);
+    }
+    return "err usage: shader status | dump <hex pointer> <prefix> | check | list <file> | fnv <hex>";
 }
 
 }  // namespace ff7vr::engine::shaders

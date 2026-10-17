@@ -123,6 +123,7 @@ constexpr Default kDefaults[] = {
     {"comfort", "vignette", "0"},
     {"comfort", "vignette_radius", "0.55"},
     {"comfort", "vignette_softness", "0.25"},
+    {"comfort", "screen_blur", "0"},
     {"comfort", "cut_fade_ms", "0"},
     {"comfort", "cut_fade_deg", "25"},
     {"comfort", "cut_fade_m", "1.0"},

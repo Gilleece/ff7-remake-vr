@@ -453,7 +453,11 @@ session it is `ff7vr.log` in the game's `End\Binaries\Win64` folder).
 - **Some effects stay as in the flat game:** the game's depth of field in cutscenes.
   Camera motion blur, chromatic aberration and the game's vignette (the image fading
   towards its edges, in 3D to a fifth of the light at the edge of the view) are
-  switched off while 3D runs (`[stereo] game_vignette = 1` keeps the vignette).
+  switched off while 3D runs (`[stereo] game_vignette = 1` keeps the vignette). So are
+  the blur over the whole view and the colour fringes of tactical mode (the battle
+  command menu; its greying stays): `[comfort] screen_blur = 1` keeps them. Their
+  removal was checked with the effect forced outside a battle; in a real battle the log
+  says `screen effects: the game applies a screen effect ...` when it happens.
 - **Square Enix's lens glare effect** may appear in the wrong eye in scenes that use
   it (not seen in testing). With bloom off (`r.BloomQuality = 0`) the game does not
   draw it at all.
@@ -596,6 +600,7 @@ developer notes, `docs/engine-module.md`, "Picture settings measured"):
 | Setting | What it does in the headset | Cost |
 |---|---|---|
 | `[stereo] game_vignette = 0` (default) | removes the game's vignette: without it each eye fades to a fifth of the light at the edge of the view | none measurable |
+| `[comfort] screen_blur = 0` (default) | removes the blur over the whole view and the colour fringes the game adds in tactical mode (battle command menu open); `1` = as in the game. Also on the settings panel (Comfort) | none; saves the effect's passes while it would show |
 | `[picture] sharpen` | the mod's own sharpening of the 3D view | 0.07 ms at 2064x2208 per eye (more at larger sizes) |
 | `[stereo] hair_dither = static` (default), `hair_dither_size = 2` | hair, fur and fading objects keep the same fine dither pattern from frame to frame instead of a new one every frame, which shimmers in a headset; `game` = as the game draws it. Also in the settings panel (Picture), from the next start | none |
 | `r.TemporalAASamples`, `r.Tonemapper.Sharpen`, `r.MaxAnisotropy`, `r.Streaming.MipBias`, `r.SSS.*`, `r.Tonemapper.Quality`, shadow resolution and distance | no visible change: the game's own settings are already at their highest | none |

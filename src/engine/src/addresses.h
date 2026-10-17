@@ -47,6 +47,7 @@ struct Addresses {
     std::uintptr_t FindFreeElement = 0;            // FRenderTargetPool::FindFreeElement (GPU trace names)
     std::uintptr_t ScePadReadState = 0;            // libScePad's scePadReadState (PlayStation pad combinations)
     std::uintptr_t PostProcessSettingsCtor = 0;    // FPostProcessSettings::FPostProcessSettings (lens vignette in stereo)
+    std::uintptr_t EndFinalPostprocessSettings = 0;  // FSceneView::EndFinalPostprocessSettings (screen blur and fringe in stereo)
 
     // ---- texture streaming status (known build only; docs/re/engine.md, "Texture streaming")
     void** StreamingManagerCollection = nullptr;       // FStreamingManagerCollection* static of IStreamingManager::Get

@@ -1155,6 +1155,7 @@ Through the dev pipe (`[dev] pipe = 1`, `tools\dev\send-input.ps1 -Pipe "<comman
 | `ssr test equal\|same\|shift\|halves\|result` | tests of `ssr fix 3` on the next frame, result in the log and in `ssr test result`: `equal` the patched shader against the game's at the origin (bit for bit; `same` the game's shader twice, the control; run them with `fov off`), `shift` the run in place against the same view computed at the origin with the game's shader, `halves` the two halves of the target compared (for two identical views) |
 | `ssr shader <prefix>`, `shader status\|check`, `shader dump <pointer> <prefix>` | the reflection pass's pixel shader (`.dxbc` and `.asm`; needs `[dev] keep_shaders = 1` from start-up), the shaders created and the patched copies, the checksum check, any pixel shader by the pointer `gpu trace` logs (`docs/re/engine.md`, "Screen-space reflections: the pixel shader") |
 | `shader list <file>`, `shader dither off\|game\|2\|4\|8\|64` | every distinct pixel shader created (3DMigoto hash, checksum, size, dither lookups found, patched or not); with `[dev] dither_ab = 1` from start-up, binds the chosen dither variant of every dithered material live (see "Dithered hair and fades") |
+| `shader fnv <hex>` | the kept shaders (`[dev] keep_shaders = 1`) whose 64-bit FNV-1 hash of the bytecode (offset basis 0, the name shader-replacement tools such as 3DMigoto give a shader) is the given one |
 | `hzb [0-4]` | the unread hierarchical depth chain: `0` built (default), `1` further mips left out, `2` / `3` the whole chain filled with near / far depth, `4` the read chain's further mips filled (control); shows the view chains seen and the mips left out |
 | `stereo framelog start` / `stop <csv>` | frame log: per frame the start, host return and end of `UGameEngine::Tick`, the render thread's end of the scene and the frame-end command on the RHI thread, each with the thread's CPU time (cycle count) and, at the start of Tick, the latest GPU frame time (see "Turning: where the slow frames come from") |
 | `stereo lateupdate [status]` / `on` / `off` | late update of the head pose: on or off, whether the view layout was found, counters (stereo scenes, frames relocated, frames not paired with a queued frame, views whose matrices were not as built, locations refused), the eye's yaw change and shift the late location made (last, average, largest), and the average pose age at the hand-over to the XR layer, of the frame wait's location and of the late one |
@@ -1189,6 +1190,10 @@ Through the dev pipe (`[dev] pipe = 1`, `tools\dev\send-input.ps1 -Pipe "<comman
 | `fp boom <level\|game>`, `fp pivot <cm>` | third-person camera settings |
 | `fp find <name> [outer] [class]`, `fp classes <text>`, `fp chain <hex address \| pawn \| view \| pc>` | reverse engineering: objects by name, objects whose class name contains a text, the class chain of an object |
 | `stereo vignette [<share>]` | the game's lens vignette in stereo (`[stereo] game_vignette`): set the share kept (0 to 1) and show the hook's counters |
+| `stereo screenfx [0\|1]` | the game's screen blur and colour separation in stereo (`[comfort] screen_blur`: `0` removed, `1` kept) and the hook's counters, with the last view's values of the fields it watches (see "Screen blur and colour fringe") |
+| `stereo screenfx layout` | reads the post-process field offsets from the engine's reflection data (ScriptStruct `PostProcessSettings`) and compares them with the ones the hook uses |
+| `stereo screenfx force <hex offset> <value>` \| `force clear` | test: writes a float into every view's final post-process settings before the removal runs, as if the game had blended it in (`550` screen blur, `42c` colour separation; up to four) |
+| `stereo screenfx vfx [name]` | reverse engineering: the post-process objects (particle modules, components) whose path contains the name (default `FX_R_WaitFilter_01`, the tactical-mode effect), with their float and bool values and those of the distributions they point to; also written to the log |
 | `cvar get <name>` | integer and float value and set-by priority of a console variable |
 | `cvar set <name> <value>` | set it with console priority (applied on the game thread) |
 
@@ -1535,7 +1540,7 @@ renders in stereo (saved when stereo starts, put back when it stops, the same me
 | Effect | What was done | Why |
 |---|---|---|
 | camera motion blur | `r.MotionBlurQuality = 0` | in a headset it smears the image while the view turns, and the head's own motion is not part of it. Costs nothing to remove (`r.MotionBlurQuality` in "Measured"). The game runs with 4 |
-| chromatic aberration | `r.SceneColorFringeQuality = 0` | an imitation of lens fringing around the image centre; each eye's image centre is not its lens centre (asymmetric projection) and the headset's lenses add their own. The game runs with 1 |
+| chromatic aberration | `r.SceneColorFringeQuality = 0` | an imitation of lens fringing around the image centre; each eye's image centre is not its lens centre (asymmetric projection) and the headset's lenses add their own. The game runs with 1. This is UE's own fringe; Square Enix's colour separation and screen blur (tactical mode) are separate post-process settings, removed by `[comfort] screen_blur = 0` ("Screen blur and colour fringe") |
 | depth of field | not changed (`r.DepthOfFieldQuality` stays 2) | no depth of field was seen in gameplay in the scenes tested; in cutscenes it is part of the authored look. Candidate: hold it at 0 only while the follow camera applies (the camera-mode signal), once a scene with gameplay depth of field has been seen |
 | camera shake | not a console variable | shakes reach the eyes through the game camera's point of view: decoupled pitch drops their pitch and roll, the level boom their up-and-down motion along the boom, and first person uses only the camera's yaw; the yaw part and the sideways part remain in third person |
 | film grain | not changed | `r.Tonemapper.GrainQuantization 1` is the tonemapper's dithering against banding, not visible grain; grain intensity is a post-process setting without a console variable |
@@ -1727,6 +1732,97 @@ against 6.07 / 5.97 ms without (two pairs of 15 s windows), the passes after the
 0.97 ms either way: nothing measurable. The vignette per eye is a flat-screen camera effect
 (each eye's image centre is not where the lens is centred, and the eye looks around inside
 the image), so it is removed by default; `game_vignette = 1` keeps the game's look.
+
+## Screen blur and colour fringe
+
+When the battle command menu opens (tactical mode: time slows nearly to a stop) the game blurs
+the picture outwards from its centre, separates its colours along every edge and greys it. On
+a flat screen it frames the menu; in a headset it smears everything you look at, around a
+point that is the centre of the flat image rather than where the eye looks, and the colour
+fringes double the headset lenses' own. The blur and the fringes are removed in 3D by default;
+the greying stays.
+
+How the game produces it (`docs/re/engine.md`, "Square Enix's post-process settings: screen
+blur and colour separation"). Tactical mode shows the particle effect `FX_R_WaitFilter_01`
+(resident, `/Game/GameContents/Effect/Resident/Particle/`). Its only post-process module,
+`VfxParticleModulePostProcessImageEffects`, overrides two of the fields Square Enix added to
+`FPostProcessSettings` (read from the running game with `stereo screenfx vfx`):
+`ChromaticAberrationIntensity` (+0x42c), a curve rising to 2.0, and `ChromaticSaturation`
+(+0x430), 0.3. The first drives Square Enix's colour-separation pass
+(`PostProcessChromaticAberration`, before the bloom), which in captures shows as a blur
+outwards from the image centre with red and blue fringes along the edges. The second greys the picture in the same pass (to 30 %); it does not blur. A second
+screen-wide blur exists, `DirectionalBlurDistortionIntensity` (+0x550): a full-screen pass of
+Square Enix's distortion pipeline (the one that draws heat haze, see "Right-eye distortion
+fix") that smears the scene colour around a centre; the tactical-mode effect does not use it,
+other effects can (a fix for the flat game names its composite shader "RadialBlurCutsceneMako").
+All three are 0 (saturation 1) in the default settings and are blended in like any
+post-process setting. `r.SceneColorFringeQuality = 0` does not reach them: it only clears UE's
+own `SceneFringeIntensity`.
+
+`[comfort] screen_blur` (default `0`; settings panel: Comfort, "Game's screen blur and colour
+fringe", applied at once; dev command `stereo screenfx`). `src/engine/src/screen_effects.cpp`
+hooks `FSceneView::EndFinalPostprocessSettings` (RVA `0x3210090`, signature in
+`tools/re/signatures.json`), which every view runs once per frame after all cameras, camera
+modifiers, volumes and effects have blended their settings in, and after the engine's quality
+clamps. While the engine renders in stereo, the detour sets the view's final
+`DirectionalBlurDistortionIntensity`, `ChromaticAberrationIntensity` and `SceneFringeIntensity`
+to 0, whatever blended them in: the directional blur's passes are not added, and the
+colour-separation pass is left with nothing to separate (it still runs for the greying while
+`ChromaticSaturation` is below 1). The flat game and the virtual-screen phase (cutscenes,
+movies, 3D off) keep the game's look: with 3D switched off the hook counted no more removals. The view's final settings are at
+`+0xC40`, checked at start-up through the function's own stores of the final fringe and bloom
+intensity; the field offsets are those of build 1.0.0.7, compared with the engine's reflection
+data by `stereo screenfx layout` (they match: 392 properties, every offset as used). Cost: none
+while no effect is applied (one read of three floats per view); while one is, the removed passes
+are GPU time saved.
+
+The log names every run of frames in which the game applied one of the effects, with the values
+and whether they were removed, for example
+`screen effects: the game applies a screen effect ChromaticAberrationIntensity 0.500; removed in 3D`
+and, a second after it stops, `screen effects: the game's screen effect ended after 1.0 s (...)`.
+The first ten runs of a session are logged in full, after that every 25th end line with the
+count, so a long battle does not fill the log.
+
+Checked on the Null backend at 2 x 2064x2208 in the harness's save (no battle can be reached
+there, so the effect was forced: `stereo screenfx force` writes the values into every view's
+final settings before the removal, as a blend would). Captures of the left and right eye,
+measured over the whole image: sharpness = mean absolute luma gradient (horizontal plus
+vertical), colour separation = mean absolute difference of the red and blue channels'
+horizontal gradients. With tactical mode's own values (`ChromaticAberrationIntensity` 2.0, its
+curve's top, and `ChromaticSaturation` 0.3; run `captures/tactical/r5`):
+
+| Capture | Sharpness L / R | Colour separation L / R |
+|---|---|---|
+| no effect (two captures 3 s apart) | 5.39 / 5.46, 5.90 / 5.99 | 1.01 / 1.03, 1.03 / 1.05 |
+| tactical mode, kept (`screen_blur = 1`) | 3.60 / 3.70 | 1.53 / 1.49 |
+| tactical mode, removed (default) | 6.19 / 6.26 | 0.97 / 0.98 |
+
+Kept, the picture is the tactical-mode look: a blur outwards from each eye's image centre with
+rainbow fringes on every bright edge; removed, it is sharp and greyed as in the game
+(`sheet_wait_L_crop.png`: no effect, kept, removed). Each field on its own (run
+`captures/tactical/r1`):
+
+| Capture | Sharpness L / R | Colour separation L / R |
+|---|---|---|
+| no effect (two captures 3 s apart) | 6.00 / 6.06, 6.44 / 6.47 | 1.06 / 1.11, 0.99 / 1.00 |
+| screen blur 1.0, kept (`screen_blur = 1`) | 2.45 / 2.45 | 0.50 / 0.51 |
+| screen blur 1.0, removed | 6.05 / 6.12 | 1.07 / 1.11 |
+| colour separation 1.0, kept | 3.69 / 3.79 | 1.69 / 1.68 |
+| colour separation 1.0, removed | 5.83 / 5.91 | 1.02 / 1.07 |
+| both (blur 4.0), kept | 2.38 / 2.38 | 0.65 / 0.66 |
+| both (blur 4.0), removed | 6.43 / 6.55 | 1.02 / 1.04 |
+
+The kept blur is a zoom blur around the centre of each eye's image, the kept colour separation
+red and blue fringes along every edge (`sheet_L.png`: no effect, blur kept, separation kept,
+both removed). A one-frame GPU trace with both forced and kept shows five passes per view of
+the distortion pipeline (full-screen accumulate into a half-size target, direction, two blurs,
+composite into the scene colour) and one colour-separation draw per view at the view's own
+rectangle; with them removed none of these draws is made, and the other draws use the same
+pixel shaders in both traces. The composite's pixel shader is the one a 3DMigoto fix for the
+flat game skips as "RadialBlurCutsceneMako" (`docs/re/engine.md`). The settings panel's row
+switches the removal at once (`menu set comfort.screen_blur 1` and `0` through the dev pipe,
+`stereo screenfx` reporting kept and removed in turn; `captures/tactical/r2/panel_comfort.png`).
+The logs of the runs hold no warning or error.
 
 ## Skin lighting fix
 

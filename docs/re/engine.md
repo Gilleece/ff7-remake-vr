@@ -981,6 +981,100 @@ never ran it.
 - Fix: `src/engine/src/distortion_fix.cpp`, `docs/engine-module.md` "Right-eye distortion
   fix" (with it: 4 557 312 pixels per eye, 1 924 608 at 0.65).
 
+### Square Enix's post-process settings: screen blur and colour separation (STATIC + LIVE)
+
+Tactical mode (the battle command menu, time slowed) blurs the picture outwards from its centre,
+separates its colours and greys it. All three come from fields Square Enix added to
+`FPostProcessSettings`.
+
+- Field offsets (STATIC, then LIVE): the reflection code's property parameter blocks
+  (UE4CodeGen, 4.18 layout: type byte at +0, name at +8, offset at +0x30, the non-constant
+  members written by a dynamic initializer such as `mov dword ptr [rip+...], 0x54c` at
+  `0x377250b`) give, for ScriptStruct `PostProcessSettings`:
+
+  | Field | Offset | Default (constructor `0x32050f0`) |
+  |---|---|---|
+  | `SceneFringeIntensity` (UE's own fringe) | `0x228` | 0 |
+  | `BloomIntensity` | `0x230` | |
+  | `VignetteIntensity` | `0x418` | 1.0 |
+  | `ChromaticAberrationIntensity` | `0x42c` | 0 |
+  | `ChromaticSaturation` | `0x430` | 1.0 |
+  | `DirectionalBlurIntensity` | `0x54c` | 1.0 |
+  | `DirectionalBlurDistortionIntensity` | `0x550` | 0 |
+  | `DirectionalBlurDistortionGradient`, `Field`, `Frequency`, `Position` | `0x554`, `0x558`, `0x55c`, `0x560` | 0, 1.0, 0, 0 |
+
+  LIVE: `stereo screenfx layout` walks the ScriptStruct's properties at run time
+  (`/Script/Engine.PostProcessSettings`, 392 properties) and finds every offset above.
+  The same names exist a second time on Square Enix's post-process components
+  (`UPostProcessDirectionalBlurComponent`, `APostProcessDirectionalBlur`, at other offsets).
+- `FSceneView::EndFinalPostprocessSettings` = `0x3210090` (STATIC; signature in
+  `tools/re/signatures.json`): the only function referencing both `L"r.SceneColorFringeQuality"`
+  (second copy `0x4871328`) and `L"r.BloomQuality"` (`0x48936c8`). It zeroes view+`0xE68` and
+  view+`0xE70` when those cvars are 0, so `FinalPostProcessSettings` is at view+`0xC40`
+  (FSceneView is `0x1420` bytes: the view setup functions allocate that much). Callers:
+  `0x25740e0`, `0x25b6df0`, `0x28d6200`, `0x3018da0`, each right after
+  `StartFinalPostprocessSettings` (`0x320fbd0`) and the blends. `OverridePostProcessSettings`
+  (`0x320c0a0`, writes the blended `DirectionalBlurDistortionIntensity` at `0x320f05e`) is
+  called only from `StartFinalPostprocessSettings` (in its loop over the post-process volumes,
+  judging by its structure) and from two of
+  those view setup functions, always before `EndFinalPostprocessSettings`. So whatever source
+  sets these fields, their final value per view is settled when that function returns.
+- Readers (STATIC): the distortion renderer `0x2202e90` (see "Distortion" above) runs when a
+  view has `DirectionalBlurIntensity` (view+`0x118C`) > 0 and either distortion primitives or
+  `DirectionalBlurDistortionIntensity` (view+`0x1190`) > 0; the full-screen accumulate
+  `0x220b1d0` reads view+`0x1190` to `0x11A0` (intensity, gradient, field, frequency,
+  position). `FPostProcessing::Process` adds the colour-separation pass
+  (`FPostProcessChromaticAberrationPS0` / `CS0`, `/Engine/Private/PostProcessChromaticAberration.usf`,
+  shader parameters `ChromaticAberrationContext`, `ChromaticAberrationComputeParameter`) when
+  `ChromaticAberrationIntensity` (view+`0x106C`) > 0 or `ChromaticSaturation` (view+`0x1070`)
+  < 1.0 (`comiss` at `0x251d776` / `0x251d780`), before the bloom chain. The directional blur's
+  shaders bind `DirectionalBlurContext` (`0x22073c0`) and `DirectionalBlurDistortionContext`,
+  `...Context2` (`0x2207a60`). `DirectionalBlurIntensity` (default 1) scales the whole
+  distortion pipeline, heat haze included, and is left alone.
+- LIVE, forced (`stereo screenfx force`, Null backend, eyes 2064x2208,
+  `captures/tactical/r1`): `DirectionalBlurDistortionIntensity` 1 gives a zoom blur around each
+  eye's image centre; `ChromaticAberrationIntensity` 1 a softer blur outwards from the centre
+  with red/blue fringes along edges. GPU trace
+  with both forced: per view five distortion draws (accumulate into a 2064x1104 target, three
+  half-size passes, composite into the scene colour; the right view's composite is the one
+  `distortion_fix` handles) and one colour-separation draw at the view's own rectangle
+  (`vp 0 0 2064 2208` and `vp 2064 0 2064 2208`: per eye correct). With the fields zeroed after
+  `EndFinalPostprocessSettings` none of these draws is made.
+- Where tactical mode sets them (STATIC + LIVE, the effect itself not seen in a battle): the
+  menu code has a UI filter type `EEndMenuUIFilterType` { `WaitMode`, `Dying`, `MainMenuFade`,
+  `MainMenuMono`, `MainMenu`, `MainMenuParticle` } (`EndMenuAPI.BPShowUIFilterWindow` /
+  `BPHideUIFilterWindow`), and the executable names the particle systems `FX_R_WaitFilter_01`,
+  `FX_R_DyingFilter_01`, `FX_R_MainMenuFilter_01` side by side (`0x43fa138`..`0x43fa1d8`).
+  All three are resident (`/Game/GameContents/Effect/Resident/Particle/`, loaded in the
+  harness's save). Square Enix's particle system has post-process modules:
+  `UVfxParticleModulePostProcessDirectionalBlur` (`m_DirectionalBlurDistortionIntensity` +0x40,
+  `Gradient` +0x80, `Field` +0xC0, `Frequency` +0x100, `Position` +0x140) and
+  `UVfxParticleModulePostProcessImageEffects` (`m_ChromaticAberrationIntensity` +0x100,
+  `m_ChromaticSaturation`, `m_VignetteIntensity`, `m_NormalizedTint*`, `m_ContrastIntensity`
+  and more, each with a `bOverride_*` flag); each value is a 0x40-byte float distribution
+  (UE's lookup table: op and entry counts, time scale, a `TArray<float>` of values at +0x10,
+  min and max at +0x28 / +0x2C). LIVE (`stereo screenfx vfx`, `captures/events/*-tactical-r4`):
+  each of the three filters holds one `VfxParticleModulePostProcessImageEffects` and no
+  directional blur module. In `FX_R_WaitFilter_01` only `bOverride_ChromaticAberrationIntensity`
+  and `bOverride_ChromaticSaturation` are set: `ChromaticAberrationIntensity` is a 32-entry
+  curve from 0 to 2.0 (time scale 31), `ChromaticSaturation` a constant 0.3. The dying and
+  main-menu filters override neither (their tint and contrast curves are set without their
+  override flags). So tactical mode's blur and fringes are the colour-separation pass at up to
+  2.0, plus a desaturation to 0.3 in the same pass; `DirectionalBlurDistortionIntensity` is
+  another source of screen-wide blur, used by other effects.
+  Forced with these values (`ChromaticAberrationIntensity` 2.0, `ChromaticSaturation` 0.3):
+  see `docs/engine-module.md`, "Screen blur and colour fringe". `ChromaticSaturation` alone
+  (0.5 and 0, `ChromaticAberrationIntensity` 0) leaves the sharpness and the colour-separation
+  measure unchanged and greys parts of the picture (the yellow bin of the start room turns grey).
+- A 3DMigoto fix for the flat game skips a pixel shader it calls "RadialBlurCutsceneMako"
+  (FNV-1 hash of the bytecode `b0bc6c778e08714f`). LIVE (`[dev] keep_shaders = 1`, `shader fnv
+  b0bc6c778e08714f` after forcing the blur, `captures/tactical/r2`): that shader (780 bytes) was
+  not among the 116 shaders created before the distortion pipeline first ran, was there after
+  the blur was forced, and the GPU trace shows it as the last of the five distortion passes, the
+  composite into the scene colour (`vp 0 0 4128 2208`, reading the half-size targets). Whether
+  heat haze uses the same composite permutation is not known; zeroing
+  `DirectionalBlurDistortionIntensity` drops only the screen-wide blur either way.
+
 ### Screen-space reflections: the pixel shader (LIVE, bytecode disassembled, fixed)
 
 Why the right view's reflection run is wrong, read from the pass's own pixel shader

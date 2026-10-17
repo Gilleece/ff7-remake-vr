@@ -117,6 +117,15 @@ constexpr Sig kFindFreeElement{"FRenderTargetPool::FindFreeElement", "40 55 53 4
 constexpr Sig kPostProcessSettingsCtor{"FPostProcessSettings::FPostProcessSettings", "48 89 5C 24 08 57 48 83 EC 30 C7 41 3C 00 00 80 3F",
                                        Rule::Match, 0, 0, 0, 0x32050f0};
 constexpr std::uint8_t kVignetteDefaultStore[] = {0xc7, 0x83, 0x18, 0x04, 0x00, 0x00, 0x00, 0x00, 0x80, 0x3f};
+// FSceneView::EndFinalPostprocessSettings: runs once per view after every post-process blend.
+// Its stores of the final SceneFringeIntensity (`mov [rbx+0xE68], edi` at +0x99, taken when
+// r.SceneColorFringeQuality is 0) and BloomIntensity (`mov [rbx+0xE70], edi` at +0xB9) pin the
+// view's FinalPostProcessSettings at +0xC40 (the two fields are +0x228 and +0x230 of the struct).
+constexpr Sig kEndFinalPostprocessSettings{"FSceneView::EndFinalPostprocessSettings",
+                                           "48 89 5C 24 10 48 89 6C 24 18 56 57 41 54 41 56 41 57 48 83 EC 50 44 8B A1 F8 13 00 00 48 8B D9 33 FF",
+                                           Rule::Match, 0, 0, 0, 0x3210090};
+constexpr std::uint8_t kFinalFringeStore[] = {0x89, 0xbb, 0x68, 0x0e, 0x00, 0x00};
+constexpr std::uint8_t kFinalBloomStore[] = {0x89, 0xbb, 0x70, 0x0e, 0x00, 0x00};
 
 // Texture streaming (docs/re/engine.md, "Texture streaming"). IStreamingManager::Get: the
 // static FStreamingManagerCollection* and its once-only creation (operator new of 0x40 bytes).
@@ -397,6 +406,13 @@ Addresses resolve_addresses(bool allow_unknown_build, const void* hmd_detour) {
             a.PostProcessSettingsCtor = p;
         else
             log::warn("engine: post-process settings constructor found, but its vignette default differs from this build's");
+    }
+    if (std::uintptr_t p = addr(kEndFinalPostprocessSettings, false)) {
+        if (std::memcmp(reinterpret_cast<const void*>(p + 0x99), kFinalFringeStore, sizeof(kFinalFringeStore)) == 0 &&
+            std::memcmp(reinterpret_cast<const void*>(p + 0xb9), kFinalBloomStore, sizeof(kFinalBloomStore)) == 0)
+            a.EndFinalPostprocessSettings = p;
+        else
+            log::warn("engine: EndFinalPostprocessSettings found, but its final-settings offsets differ from this build's");
     }
 
     // Texture streaming status: on the known build only (the members it reads besides the

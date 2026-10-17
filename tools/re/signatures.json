@@ -499,6 +499,18 @@
       "desc": "Default constructor of FPostProcessSettings. The vignette mod hooks its epilogue to override VignetteIntensity. The default VignetteIntensity is stored at +0x58B (mov dword ptr [rbx+0x418], 1.0: the field is at +0x418, Square Enix default 1.0 where stock UE4 has 0.4); the engine module checks those bytes and hooks the constructor to scale it in stereo ([stereo] game_vignette)."
     },
     {
+      "name": "FSceneView::EndFinalPostprocessSettings",
+      "kind": "function",
+      "pattern": "48 89 5C 24 10 48 89 6C 24 18 56 57 41 54 41 56 41 57 48 83 EC 50 44 8B A1 F8 13 00 00 48 8B D9 33 FF",
+      "resolve": {
+        "type": "match",
+        "offset": 0
+      },
+      "expect": "0x3210090",
+      "desc": "FSceneView::EndFinalPostprocessSettings(this = view, rdx = FSceneViewInitOptions). Runs once per view after StartFinalPostprocessSettings (0x320fbd0) and every OverridePostProcessSettings (0x320c0a0); applies the quality clamps (r.SceneColorFringeQuality 0 -> mov [rbx+0xE68], edi at +0x99; r.BloomQuality 0 -> mov [rbx+0xE70], edi at +0xB9). FinalPostProcessSettings is at view+0xC40 (SceneFringeIntensity +0x228, BloomIntensity +0x230 by reflection). The engine module checks those two stores and hooks the function to zero DirectionalBlurDistortionIntensity (+0x550) and ChromaticAberrationIntensity (+0x42c) in stereo ([comfort] screen_blur).",
+      "howto": "The only function that references both L\"r.SceneColorFringeQuality\" (second copy, 0x4871328) and L\"r.BloomQuality\" (second copy, 0x48936c8); the first copies belong to the TAutoConsoleVariable registrations."
+    },
+    {
       "name": "FSceneViewport::bForceSeparateRenderTarget",
       "kind": "offset",
       "pattern": "3A 9F ?? ?? ?? ?? 75 15",
