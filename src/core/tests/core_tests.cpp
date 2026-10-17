@@ -59,6 +59,69 @@ static void test_graphics_profile() {
     CHECK(ff7vr::graphics_profile::lines("nonsense").empty());
 }
 
+// The settings panel's pending set: a value is pending when it changed since the panel
+// opened and the file does not hold it.
+static void test_pending() {
+    using live_settings::IniCompare;
+    using live_settings::IniWrite;
+    using live_settings::ini_write;
+    using live_settings::pending;
+    IniCompare c;
+    c.in_file = "1.5";
+    c.now = "1.6";
+    CHECK(ini_write(c) == IniWrite::Value);
+    CHECK(pending(c, "1.5"));        // changed in the panel
+    c.now = "1.7";
+    CHECK(pending(c, "1.5"));        // changed twice: pending with the last value
+    c.now = "1.50";
+    CHECK(!pending(c, "1.5"));       // back to the file's value: drops out
+    CHECK(!pending(c, "1.6"));       // also when it was something else at the open
+    c.now = "1.6";
+    CHECK(!pending(c, "1.6"));       // differs from the file but not changed in this visit
+    // A reset to the default where the file holds another value is a change like any other.
+    c.in_file = "0.25";
+    c.now = "-0.25";
+    CHECK(pending(c, "0.25"));
+    // A key the file does not have: pending when the value is not the one in effect without it.
+    IniCompare a;
+    a.when_absent = "0";
+    a.now = "1";
+    CHECK(pending(a, "0"));
+    a.now = "0";
+    CHECK(!pending(a, "1"));
+    CHECK(ini_write(a) == IniWrite::None);
+    // on/off spellings compare as the values Config reads.
+    IniCompare b;
+    b.in_file = "on";
+    b.now = "1";
+    CHECK(!pending(b, "0"));
+    // An empty value is written only for text settings.
+    IniCompare e;
+    e.in_file = "x";
+    CHECK(ini_write(e) == IniWrite::None);
+    e.text = true;
+    CHECK(ini_write(e) == IniWrite::Value);
+    CHECK(pending(e, "x"));
+    // Optional lines: "not set" comments the line out, "set" writes or uncomments it.
+    IniCompare o;
+    o.optional = true;
+    o.now = "2500";
+    o.now_set = false;
+    o.in_file = "2500";
+    CHECK(ini_write(o) == IniWrite::CommentOut);
+    CHECK(pending(o, "2500", true));
+    CHECK(!pending(o, "2500", false));  // not set at the open and now: nothing changed
+    o.in_file.reset();
+    CHECK(ini_write(o) == IniWrite::None);  // already commented out
+    CHECK(!pending(o, "2500", true));
+    o.now_set = true;
+    CHECK(ini_write(o) == IniWrite::Value);
+    CHECK(pending(o, "2500", false));
+    o.in_file = "2500";
+    CHECK(!pending(o, "3000", true));  // set back to the file's value
+    std::printf("pending: ok\n");
+}
+
 static void test_pattern() {
     auto p = pattern::Pattern::parse("48 8B ?? 05 ? C3");
     CHECK(p.has_value());
@@ -434,6 +497,7 @@ int main(int argc, char** argv) {
     test_headset_config();
     test_ini_file();
     test_graphics_profile();
+    test_pending();
     test_pattern();
     test_hook();
     std::printf(g_failures ? "FAILED (%d)\n" : "ALL PASSED\n", g_failures);

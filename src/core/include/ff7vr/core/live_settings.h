@@ -2,7 +2,7 @@
 // Settings that can be changed while the game runs, for the in-headset settings panel
 // (src/render/src/menu.cpp). Each module registers the settings it owns with a getter
 // and a setter that use its existing live-change path; the panel lists them, changes
-// them and writes them back to ff7vr.ini (ini_file.h).
+// them, and writes them back to ff7vr.ini (ini_file.h) when the player saves.
 //
 //   live_settings::Setting s;
 //   s.id = "vignette"; s.label = "Comfort vignette"; s.section = "comfort"; s.key = "vignette";
@@ -120,6 +120,26 @@ Setting held(Setting s, std::optional<std::string> start_value, std::function<st
 // texture streamer, the frame budget). Thread-safe; an unregistered name returns "".
 void set_status(const std::string& name, std::function<std::string()> fn);
 std::string status(const std::string& name);
+
+// ---- what saving a value does to the ini (the panel's save and its pending set) ----
+enum class IniWrite {
+    None,        // the file already holds the value
+    Value,       // the key's line gets the value (added or uncommented when missing)
+    CommentOut,  // an optional line is "not set": its line is commented out
+};
+struct IniCompare {
+    std::string now;                     // the value shown, as written to the ini
+    bool now_set = true;                 // an optional line: set now
+    std::optional<std::string> in_file;  // the key's value in the file; nullopt: no (uncommented) line
+    std::string when_absent;             // the value in effect when the file has no line for the key
+    bool optional = false;               // an optional line (set / not set)
+    bool text = false;                   // a Text setting: an empty value is a value
+};
+IniWrite ini_write(const IniCompare& c);
+// Whether a value belongs to the pending set: changed since the panel opened (`at_open`,
+// `at_open_set`) and not what the file holds. A key changed and changed back, or changed back
+// to the file's value, is not pending; a key changed twice is pending with its last value.
+bool pending(const IniCompare& c, const std::string& at_open, bool at_open_set = true);
 
 // Compares two ini values the way Config reads them (numbers numerically, on/off/true/false
 // as 1/0, otherwise without regard to case).

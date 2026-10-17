@@ -320,6 +320,22 @@ bool is_default(const Setting& s) {
     return same_value(ini_value(s), default_of(s));
 }
 
+IniWrite ini_write(const IniCompare& c) {
+    if (c.optional) {
+        if (!c.now_set) return c.in_file ? IniWrite::CommentOut : IniWrite::None;  // the line keeps its text, behind a ';'
+        return !c.in_file || !same_value(*c.in_file, c.now) ? IniWrite::Value : IniWrite::None;
+    }
+    if (c.now.empty() && !c.text) return IniWrite::None;
+    // A key in the file: written when the value differs. A key the file does not have: when
+    // the value is not the one in effect without it.
+    return !same_value(c.in_file ? *c.in_file : c.when_absent, c.now) ? IniWrite::Value : IniWrite::None;
+}
+
+bool pending(const IniCompare& c, const std::string& at_open, bool at_open_set) {
+    const bool changed = c.optional ? (c.now_set != at_open_set || (c.now_set && !same_value(c.now, at_open))) : !same_value(c.now, at_open);
+    return changed && ini_write(c) != IniWrite::None;
+}
+
 Setting held(Setting s, std::optional<std::string> start_value, std::function<std::string(const std::string&)> live) {
     auto value = std::make_shared<std::string>(start_value.value_or(default_of(s)));
     auto m = std::make_shared<std::mutex>();
