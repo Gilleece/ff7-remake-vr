@@ -3001,9 +3001,32 @@ of the view ...` or `... placed by the game ...`), and at start-up `ui: interact
 prompt hook installed (field target icon placer +0x142b500)`. On another build, or when
 the projection hook is missing, a warning says that `[ui] prompt_fixed` has no effect.
 
-Not verified: everything above was built and checked against the disassembly only, with
-no game run (the placement, the companion widget and the visibility with a real icon,
-the default place in a headset, several icons at once, battles).
+Measured headless (Null backend, 1280x720 window, eyes 2064x2208; the switch panel
+`OpB070_StoreB2Door06Sw_Out` in Mako Reactor 5, the player put 2 m in front of it with
+`fp call ... Actor.K2_TeleportTo`; this object has no screen test, so it stays selected
+whatever the camera looks at):
+
+| Case | `prompt_fixed` | Icon (`fp prompt status`) | Left eye |
+|---|---|---|---|
+| first person, facing it | `1` | `vis=1 enum=3 vpo=(860,678)` | the ring at about (1220, 1175) |
+| same, `prompt_x 0.25`, `prompt_y 0.40` | `1` | `vpo=(380,332)` | the ring at about (940, 955) |
+| first person, view turned 100 degrees | `1` / `0` | `vis=1 enum=3` / `vis=0 enum=1` (collapsed) | ring at the fixed point / none |
+| first person, view turned 180 degrees | `1` / `0` | `vis=1 enum=3` / `vis=0 enum=1` | ring / none |
+| third person, facing it | `1` / `first_person` | pinned / the game's placement | ring at (1224, 1172) / over the panel at (1234, 1043) |
+| third person, panel behind the camera | `1` / `first_person` | `vis=1 enum=3` / `vis=0 enum=1` | ring on Cloud's back / none |
+
+The pinned point lands at the same place in the eye in first and third person. `vpo` is the
+game's own arithmetic for the fixed point: (640, 518.4) of the 1280x720 view is (960,
+777.6) in the menu's 1920x1080 units, less half the 200x200 floor. `uihook prompt` counted
+one icon at most, every placement pinned under `1` (the "behind the view" count rising while
+the panel was behind the camera) and no placement without a projection; the log has the
+hook line and one line per switch, and no warning or error besides the one for
+`[dev] unsafe_commands`. Captures: `captures\prompt\` (`b-`, `c-`, `d-`, `h-` to `n-`).
+
+Not verified: a headset; battles (no fight was started); several icons at once (one object
+here); the companion widget (none was seen with this object); an object with the screen
+test on (it is deselected when the camera turns away, so no icon is created at all; that
+is the game's choice and unchanged).
 
 ## Trying the camera in the headset
 

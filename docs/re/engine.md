@@ -878,11 +878,19 @@ The placer of the field target icon and what it writes, read in the disassembly 
 Used by `[ui] prompt_fixed` (`docs/engine-module.md`, "The interaction prompt at a fixed
 place"): the mod hooks the placer and, for the `FSceneView::ProjectWorldToScreen` call whose
 chain contains `0x142b54f`, returns true with the fixed point of the view rectangle, so the
-game's own code sizes, places and shows the icon and its companion. Not yet verified in a
-game run: the companion's identity (`FieldAction_Command_C` or `Field_BtnGuide_C` are the
-candidates the prompt diagnostic lists), whether the scale and half size behave with the
-fixed point as with a projected one, and whether the game ever keeps two icons at once
-(the loop allows any number; the manager gives the prompt to the nearest object).
+game's own code sizes, places and shows the icon and its companion.
+
+LIVE (2026-10-17, Null backend, 1280x720 window, a switch panel in Mako Reactor 5): the
+icon's `+0x1c0/+0x1c4` read (860, 678) for the point (640, 518.4) of the view and (380, 332)
+for (320, 288): the placer works in 1920x1080 units at this window size (the wrapper's
+scale 1.5) and subtracts 100, half the 200x200 floor, so the icon's desired size is 200 or
+less. The anchors stayed (0, 0) and the visibility 3 (HitTestInvisible) with the object
+behind the camera; with the game's placement the same case gave 1 (Collapsed), confirming
+the placer's own test. `IsInViewport` reads 0 for this icon although its viewport offsets
+place it (the slot it is added to was not traced). The capture chain check never refused a
+projection inside the placer (`other projections inside the placer 0`). Not seen: the
+companion widget (the entry's `+0x20` may be empty for this kind of object), and more than
+one icon at once (`uihook prompt` counted one at most).
 
 ## 10. Post-processing in stereo: Square Enix's passes (LIVE, GPU trace)
 

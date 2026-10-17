@@ -433,7 +433,7 @@ session it is `ff7vr.log` in the game's `End\Binaries\Win64` folder).
   `prompt_fixed = first_person` does this in first person only and leaves it over the
   object in third person; `0` leaves it over the object everywhere. Which object it is
   for is still the game's choice: the one in front of you and nearest. Not yet tried
-  in a game run or a headset.
+  in a headset or in a battle.
 - **The game window becomes 1280x720 while 3D runs** if the game was in a fullscreen
   mode, and stays that way until the game exits (switching 3D off with Insert does not
   change it back). The game does not remember it: your display setting is not changed,
