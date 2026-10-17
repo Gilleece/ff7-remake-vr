@@ -414,7 +414,26 @@ std::string command(const std::string& args) {
         }
         return std::format("ok checksums recomputed for {} kept shaders, {} differ", n, bad);
     }
-    return "err usage: shader status | dump <hex pointer> <prefix> | check";
+    if (a[0] == "fnv" && a.size() == 2) {
+        // The kept shaders whose 64-bit FNV-1 hash of the whole bytecode (offset basis 0, the
+        // hash shader-replacement tools such as 3DMigoto name shaders by) is the given one.
+        const std::uint64_t want = std::stoull(a[1], nullptr, 16);
+        std::string r;
+        std::size_t n = 0;
+        std::lock_guard lk(g_mutex);
+        for (const auto& [ptr, e] : *g_seen) {
+            if (e.code.empty()) continue;
+            ++n;
+            std::uint64_t h = 0;
+            for (const std::uint8_t b : e.code) {
+                h *= 0x100000001b3ull;
+                h ^= b;
+            }
+            if (h == want) r += std::format(" {} ({}, {} bytes)", static_cast<void*>(ptr), hash_string(e.hash), e.code.size());
+        }
+        return std::format("ok {} kept shaders hashed; {:016x}:{}", n, want, r.empty() ? " none" : r);
+    }
+    return "err usage: shader status | dump <hex pointer> <prefix> | check | fnv <hex>";
 }
 
 }  // namespace ff7vr::engine::shaders

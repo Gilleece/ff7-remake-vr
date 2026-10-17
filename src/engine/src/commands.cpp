@@ -35,6 +35,7 @@
 #include "bloom_fix.h"
 #include "distortion_fix.h"
 #include "lens_vignette.h"
+#include "screen_effects.h"
 #include "engine_internal.h"
 #include "fixes.h"
 #include "late_update.h"
@@ -239,6 +240,16 @@ std::string stereo_command(const std::vector<std::string>& a) {
     if (c == "vignette") {
         if (a.size() == 3) lens_vignette::set_scale(static_cast<float>(std::atof(a[2].c_str())));
         return "ok " + lens_vignette::status();
+    }
+    if (c == "screenfx") {
+        // [comfort] screen_blur: 0 = removed in stereo, 1 = kept (as the ini key)
+        if (a.size() == 3 && (a[2] == "0" || a[2] == "1")) screen_effects::set_remove(a[2] == "0");
+        if (a.size() == 3 && a[2] == "layout") return "ok " + screen_effects::layout();
+        if (a.size() >= 4 && a[2] == "force") {
+            const std::string r = screen_effects::force(a[3], a.size() >= 5 ? a[4] : std::string("0"));
+            return r.starts_with("err") ? r : "ok " + r;
+        }
+        return "ok " + screen_effects::status();
     }
     if (c == "distortfix") {
         if (a.size() == 3) distortion_fix::set_enabled(a[2] == "1");

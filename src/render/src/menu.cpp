@@ -1034,6 +1034,9 @@ void RegisterSettings(const Config& cfg) {
          [](const std::string& v) { return OkOrError(comfort::Command("radius " + v)); });
     Held(Number("comfort.vignette_softness", "Vignette fade width", kComfort + 22, "comfort", "vignette_softness", 0.05f, 1.0f, 0.05f, 2),
          [](const std::string& v) { return OkOrError(comfort::Command("softness " + v)); });
+    Held(Choice("comfort.screen_blur", "Game's screen blur and colour fringe", kComfort + 23, "comfort", "screen_blur",
+                {"Removed", "As in the game"}, {"0", "1"}),
+         [](const std::string& v) { return OkOrError(Dispatch("stereo screenfx " + v)); });
     live_settings::add(Number("comfort.cut_fade_ms", "Fade on camera cuts (ms)", kComfort + 30, "comfort", "cut_fade_ms", 0.0f, 1000.0f, 50.0f, 0,
                               [] { return float(comfort::CutFadeMs()); },
                               [](float v) { return OkOrError(comfort::Command(std::format("cutfade {:.0f}", v))); }));
