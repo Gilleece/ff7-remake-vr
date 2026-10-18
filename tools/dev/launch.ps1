@@ -144,7 +144,12 @@ try {
         $envVars[$kv.Substring(0, $i)] = $kv.Substring($i + 1)
     }
 
-    if (-not (Start-SteamIfNeeded)) { throw 'Steam did not start' }
+    # The Steam copy needs the Steam client; another store's copy is started directly all the same.
+    if ((Get-GameStore) -eq 'steam') {
+        if (-not (Start-SteamIfNeeded)) { throw 'Steam did not start' }
+    } elseif ($Via -eq 'steam') {
+        throw "-Via steam needs the Steam copy of the game; this one is from $(Get-StoreName (Get-GameStore))"
+    }
     if (-not $NoIdleWait) { [void](Wait-AfterGameExit) }
     $gameArgs = Get-GameArguments -width $Width -height $Height -fullscreen:$Fullscreen -extra $ExtraArgs
     $t0 = Get-Date

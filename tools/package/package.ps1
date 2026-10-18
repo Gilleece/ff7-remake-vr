@@ -11,6 +11,7 @@
        restore.cmd          puts the game folder back to normal (double-click)
        collect-diagnostics.cmd  zips the last session's log, the settings and system facts
        ff7vr-launcher.ps1   what the .cmd files run
+       ff7vr-stores.ps1     how the launcher finds the game (Steam, Epic, Microsoft Store)
        README.md            the user guide
        GUIDE.md             the detailed player guide (from docs\guide.md)
        LICENSE              the mod's licence
@@ -112,6 +113,7 @@ $items = [ordered]@{
     'xinput1_3.dll'      = $dll
     'ff7vr.ini'          = (Join-Path $PSScriptRoot 'ff7vr.ini')
     'ff7vr-launcher.ps1' = (Join-Path $PSScriptRoot 'launcher\ff7vr-launcher.ps1')
+    'ff7vr-stores.ps1'   = (Join-Path $PSScriptRoot 'launcher\ff7vr-stores.ps1')
     'start-vr.cmd'       = (Join-Path $PSScriptRoot 'launcher\start-vr.cmd')
     'restore.cmd'        = (Join-Path $PSScriptRoot 'launcher\restore.cmd')
     'collect-diagnostics.cmd' = (Join-Path $PSScriptRoot 'launcher\collect-diagnostics.cmd')

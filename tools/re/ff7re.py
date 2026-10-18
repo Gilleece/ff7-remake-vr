@@ -28,12 +28,9 @@ STEAM_APP_ID = "1462040"
 EXE_REL = r"End\Binaries\Win64\ff7remake_.exe"
 
 
-def find_game_exe() -> str:
-    """Locate ff7remake_.exe: $FF7R_EXE, else the Steam library that holds app 1462040."""
+def _steam_game_exes() -> list:
+    """ff7remake_.exe in the Steam libraries that hold app 1462040."""
     import os
-    env = os.environ.get("FF7R_EXE")
-    if env:
-        return env
     steam = None
     try:
         import winreg
@@ -42,16 +39,15 @@ def find_game_exe() -> str:
     except OSError:
         pass
     if not steam:
-        raise SystemExit("Steam not found; set FF7R_EXE or pass the exe path")
+        return []
     vdf = os.path.join(steam, "steamapps", "libraryfolders.vdf")
     libs = [steam]
     if os.path.exists(vdf):
-        cur = None
         for line in open(vdf, encoding="utf-8", errors="replace"):
             m = re.match(r'\s*"path"\s*"(.*)"', line)
             if m:
-                cur = m.group(1).replace("\\\\", "\\")
-                libs.append(cur)
+                libs.append(m.group(1).replace("\\\\", "\\"))
+    out = []
     for lib in libs:
         acf = os.path.join(lib, "steamapps", f"appmanifest_{STEAM_APP_ID}.acf")
         if os.path.exists(acf):
@@ -63,8 +59,87 @@ def find_game_exe() -> str:
             if installdir:
                 p = os.path.join(lib, "steamapps", "common", installdir, EXE_REL)
                 if os.path.exists(p):
-                    return p
-    raise SystemExit("ff7remake_.exe not found in any Steam library; set FF7R_EXE or pass the exe path")
+                    out.append(p)
+    return out
+
+
+def _exe_below(base: str):
+    """ff7remake_.exe at the usual place below an install folder (or its Content folder)."""
+    import os
+    for b in (base, os.path.join(base, "Content")):
+        for rel in (EXE_REL, r"End\Binaries\WinGDK\ff7remake_.exe"):
+            p = os.path.join(b, rel)
+            if os.path.isfile(p):
+                return p
+    return None
+
+
+def _epic_game_exes() -> list:
+    """ff7remake_.exe from the Epic Games Launcher's install manifests."""
+    import json
+    import os
+    d = os.environ.get("FF7VR_EPIC_MANIFESTS") or os.path.join(
+        os.environ.get("ProgramData", r"C:\ProgramData"), "Epic", "EpicGamesLauncher", "Data", "Manifests")
+    out = []
+    if not os.path.isdir(d):
+        return out
+    for name in os.listdir(d):
+        if not name.lower().endswith(".item"):
+            continue
+        try:
+            m = json.load(open(os.path.join(d, name), encoding="utf-8", errors="replace"))
+        except (OSError, ValueError):
+            continue
+        title = str(m.get("DisplayName", ""))
+        launch = str(m.get("LaunchExecutable", ""))
+        if not (re.search(r"(?i)final\s*fantasy\s*(vii|7)\s*remake", title)
+                or re.search(r"(?i)(^|[\/])ff7remake_?\.exe$", launch)):
+            continue
+        p = _exe_below(str(m.get("InstallLocation", "")).replace("/", "\\"))
+        if p:
+            out.append(p)
+    return out
+
+
+def _xbox_game_exes() -> list:
+    r"""ff7remake_.exe in the Xbox app's <drive>:\XboxGames\<game>\Content folders."""
+    import os
+    import string
+    out = []
+    for letter in string.ascii_uppercase:
+        root = os.path.join(f"{letter}:\\", "XboxGames")
+        if not os.path.isdir(root):
+            continue
+        for g in os.listdir(root):
+            p = _exe_below(os.path.join(root, g))
+            if p:
+                out.append(p)
+    return out
+
+
+def find_game_exe() -> str:
+    """Locate ff7remake_.exe: $FF7R_EXE, else $FF7VR_GAME_DIR, else the first copy found on
+    Steam, the Epic Games Store and the Xbox app's folders ($FF7VR_STORE = steam | epic | xbox
+    picks one store). Microsoft Store packages outside an XboxGames folder: set FF7R_EXE."""
+    import os
+    env = os.environ.get("FF7R_EXE")
+    if env:
+        return env
+    gd = os.environ.get("FF7VR_GAME_DIR")
+    if gd:
+        p = _exe_below(gd)
+        if p:
+            return p
+        raise SystemExit(f"no ff7remake_.exe below FF7VR_GAME_DIR ({gd}); set FF7R_EXE or pass the exe path")
+    finders = {"steam": _steam_game_exes, "epic": _epic_game_exes, "xbox": _xbox_game_exes}
+    store = (os.environ.get("FF7VR_STORE") or "").strip().lower()
+    order = [store] if store in finders else list(finders)
+    for s in order:
+        hits = finders[s]()
+        if hits:
+            return hits[0]
+    raise SystemExit("ff7remake_.exe not found on Steam, the Epic Games Store or in an XboxGames folder; "
+                     "set FF7R_EXE or pass the exe path")
 
 
 DEFAULT_EXE = None  # resolved lazily by find_game_exe()

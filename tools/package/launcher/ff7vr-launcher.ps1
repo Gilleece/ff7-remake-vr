@@ -5,22 +5,30 @@
 
 .DESCRIPTION
   start (default)
-    1. Finds the game through Steam.
+    1. Finds the game: on Steam, the Epic Games Store or the Microsoft Store /
+       Xbox app (see "Finding the game" below), and warns when its exe is not
+       the build the mod knows (Steam, file version 1.0.0.7).
     2. If the game (or its crash reporter or root launcher) from an earlier
        session is still running or closing, or another launcher window is still
        finishing, waits for it (up to 90 s), then refuses. Two game processes
        never run at the same time.
     3. Puts things back first if an earlier session did not finish (launcher
        window closed, crash, restart).
-    4. Checks that Steam runs (starts it if not) and warns if no VR runtime's
-       server or streamer seems to run (the game then simply runs flat).
+    4. Steam copy: checks that Steam runs (starts it if not). Warns if no VR
+       runtime's server or streamer seems to run (the game then simply runs flat).
        Waits, when the previous session ended less than 90 s ago, until 90 s
        have passed (see -NoIdleWait).
-    5. Sets ReShade/Luma's dxgi.dll aside as dxgi.dll.vr-disabled, copies the
-       mod (xinput1_3.dll) and ff7vr.ini into End\Binaries\Win64, and records
-       every change in End\Binaries\Win64\ff7vr.session.json.
-    6. Starts the game (-d3d11) and waits until the game and its helper
-       processes have completely exited, however the game ended.
+    5. Checks that files can be written into End\Binaries\Win64 (a Microsoft
+       Store / Xbox app folder usually refuses it; then it stops before changing
+       anything and says how to unlock the folder). Sets ReShade/Luma's dxgi.dll
+       aside as dxgi.dll.vr-disabled, copies the mod (xinput1_3.dll) and
+       ff7vr.ini into End\Binaries\Win64, and records every change in
+       End\Binaries\Win64\ff7vr.session.json.
+    6. Starts the game executable (-d3d11) and waits until the game and its
+       helper processes have completely exited, however the game ended. Epic and
+       Microsoft Store / Xbox copies: when the executable cannot be started or
+       closes again within a few seconds, the game is started through its store
+       instead (the Epic Games Launcher, or the Store app's entry).
     7. Keeps the session's ff7vr.log in logs\<time>\ next to this script,
        removes the mod's files and puts dxgi.dll back.
     8. Closes its window by itself after a 10-second countdown when all went
@@ -31,6 +39,8 @@
     Puts the game folder back to normal: removes the mod's files and puts
     dxgi.dll back. Harmless when nothing needs doing. Waits like start for a
     game or launcher that is still finishing, then refuses while the game runs.
+    Without -GameDir or FF7VR_GAME_DIR it looks at every install it finds (all
+    stores), so it also tidies up a copy that FF7VR_STORE no longer names.
 
   status
     Shows what is in place, changes nothing.
@@ -44,9 +54,20 @@
     %USERNAME% and %USERPROFILE% in every text file of the zip. Crash dumps
     (*.dmp) are left out unless -IncludeDumps is given. Changes nothing else.
 
+  Finding the game
+    1. -GameDir, or the environment variable FF7VR_GAME_DIR: that folder.
+    2. Steam: Steam's library folders (libraryfolders.vdf) and app 1462040.
+    3. Epic Games Store: the Epic Games Launcher's install manifests
+       (%ProgramData%\Epic\EpicGamesLauncher\Data\Manifests\*.item).
+    4. Microsoft Store / Xbox app: the user's installed packages (Get-AppxPackage)
+       and the Xbox app's XboxGames folders (<drive>\XboxGames\<game>\Content).
+    When the game is installed from several stores, Steam is used unless
+    -Store or the environment variable FF7VR_STORE (steam, epic or xbox) names
+    another. The mod has only been tested with the Steam copy.
+
 .PARAMETER KeepInstalled
   Leave the mod (and the Luma rename, unless -KeepLuma) in place after the game
-  exits, so the game can be started from Steam with the mod. Undo with restore.
+  exits, so the game can be started from its store with the mod. Undo with restore.
 
 .PARAMETER KeepLuma
   Do not set Luma's dxgi.dll aside. With ReShade/Luma loaded the mod
@@ -54,8 +75,18 @@
   the game runs flat); for testing only.
 
 .PARAMETER GameDir
-  The game's install folder (the one containing End\). Found through Steam when
-  not given; the environment variable FF7VR_GAME_DIR also works.
+  The game's install folder (the one containing End\). Found by itself when not
+  given (see "Finding the game"); the environment variable FF7VR_GAME_DIR also works.
+
+.PARAMETER Store
+  steam, epic or xbox: which store's copy to use when several are installed (or
+  which store a -GameDir folder belongs to). The environment variable
+  FF7VR_STORE also works.
+
+.PARAMETER ViaStore
+  Epic and Microsoft Store / Xbox copies: start the game through its store at
+  once instead of trying the executable first. -ExtraArgs then does not reach
+  the game.
 
 .PARAMETER IncludeDumps
   diagnostics only: also put the mod's crash dumps (*.dmp) into the zip. A dump
@@ -84,6 +115,8 @@ param(
     [switch]$KeepInstalled,
     [switch]$KeepLuma,
     [string]$GameDir = '',
+    [string]$Store = '',
+    [switch]$ViaStore,
     [string]$ExtraArgs = '',
     [switch]$NoPause,
     [switch]$NoIdleWait,
@@ -164,51 +197,48 @@ function Finish([int]$code) {
 
 # ------------------------------------------------------------------ finding things
 
-function Get-SteamRoot {
-    try {
-        $p = (Get-ItemProperty -Path 'HKCU:\Software\Valve\Steam' -Name SteamPath -ErrorAction Stop).SteamPath
-        if ($p) { return $p.Replace('/', '\') }
-    } catch { }
-    return $null
+# The store lookup (Steam, Epic Games Store, Microsoft Store / Xbox app) is shared with the
+# developer tools; it sits next to this script.
+$StoresScript = Join-Path $PSScriptRoot 'ff7vr-stores.ps1'
+if (-not (Test-Path -LiteralPath $StoresScript)) {
+    Fail "ff7vr-stores.ps1 is missing next to this script ($Here). Unzip the whole package again."
+    Finish 1
 }
+. $StoresScript
 
 function Get-SteamExe {
     try {
         $p = (Get-ItemProperty -Path 'HKCU:\Software\Valve\Steam' -Name SteamExe -ErrorAction Stop).SteamExe
         if ($p) { return $p.Replace('/', '\') }
     } catch { }
-    $root = Get-SteamRoot
+    $root = Get-SteamRootPath
     if ($root -and (Test-Path -LiteralPath (Join-Path $root 'steam.exe'))) { return (Join-Path $root 'steam.exe') }
     return $null
 }
 
-function Find-GameRoot {
-    if ($GameDir) { $cands = @($GameDir) }
-    elseif ($env:FF7VR_GAME_DIR) { $cands = @($env:FF7VR_GAME_DIR) }
-    else {
-        $cands = @()
-        $steam = Get-SteamRoot
-        if ($steam) {
-            $libs = @($steam)
-            $vdf = Join-Path $steam 'steamapps\libraryfolders.vdf'
-            if (Test-Path -LiteralPath $vdf) {
-                foreach ($line in Get-Content -LiteralPath $vdf) {
-                    if ($line -match '^\s*"path"\s*"(.+)"\s*$') { $libs += $Matches[1].Replace('\\', '\') }
-                }
-            }
-            foreach ($lib in @($libs | Select-Object -Unique)) {
-                $acf = Join-Path $lib "steamapps\appmanifest_$AppId.acf"
-                if (-not (Test-Path -LiteralPath $acf)) { continue }
-                foreach ($line in Get-Content -LiteralPath $acf) {
-                    if ($line -match '^\s*"installdir"\s*"(.+)"\s*$') { $cands += (Join-Path $lib ('steamapps\common\' + $Matches[1])) }
-                }
-            }
-        }
+# One line per install, for messages: "Steam: D:\...\FINAL FANTASY VII REMAKE".
+function Format-Install($inst) { return "$($inst.StoreName): $($inst.Root)" }
+
+# The game exe's build against the one the mod knows. Returns a line for status, and warns
+# (once, with what to expect) when the build is another one.
+function Test-GameBuild($inst, [switch]$Quiet) {
+    $b = Get-ExeBuildInfo $inst.Exe
+    if ($b.Error) {
+        $line = "Game exe:      not readable ($($b.Error))"
+    } elseif ($b.Known) {
+        $line = "Game exe:      file version $($b.FileVersion), the build the mod knows"
+    } else {
+        $line = ("Game exe:      file version {0} (image size 0x{1:X}, time stamp 0x{2:X8}): NOT the build the mod knows" -f $b.FileVersion, $b.SizeOfImage, $b.TimeDateStamp)
     }
-    foreach ($c in $cands) {
-        if ($c -and (Test-Path -LiteralPath (Join-Path $c 'End\Binaries\Win64\ff7remake_.exe'))) { return $c }
+    if (-not $Quiet -and -not $b.Known -and -not $b.Error) {
+        Warn ("This copy of the game ({0}, file version {1}) is not the build the mod knows (the Steam build, file" -f $inst.StoreName, $b.FileVersion)
+        Say  '           version 1.0.0.7). The mod will not render it in 3D: the game starts and runs flat (on the'
+        Say  '           monitor, at best on the flat virtual screen in the headset), and the log says'
+        Say  '           "engine: stereo disabled: unknown game build".'
+        Say  '           Adding allow_unknown_build = 1 under [stereo] in ff7vr.ini makes the mod try anyway; it then'
+        Say  '           renders 3D only if every one of its checks passes. That has never been tried with this build.'
     }
-    return $null
+    return $line
 }
 
 # The game and its helpers: ff7remake_.exe, the small launcher ff7remake.exe in the
@@ -364,6 +394,92 @@ function Wait-AfterGameExit([string]$bin) {
     Say  '           a game started again soon after quitting can stay slow (about 10 frames per second) for minutes.'
     Start-Sleep -Milliseconds ([int]($wait * 1000))
     Info 'Done waiting.'
+}
+
+# ------------------------------------------------------------------ starting the game
+
+# An Epic or Store copy that has to be started through its store closes again soon after a
+# direct start, perhaps after a message box the player has to close first.
+$QuickExitSeconds        = 60    # a close within this long after a direct start: start it through the store
+$RestartGraceSeconds     = 10    # after such a close, how long to wait for the game starting itself again
+$EpicRestartGraceSeconds = 60    # the same when the close started the Epic Games Launcher
+$StoreStartSeconds       = 180   # how long a start through the store may take until the game process appears
+
+# Starts ff7remake_.exe and returns its process id. No handle to the game is kept (see Get-GameProcs).
+function Start-GameExe([string]$gameArgs) {
+    $proc = Start-Process -FilePath $inst.Exe -ArgumentList $gameArgs -WorkingDirectory $inst.Bin -PassThru
+    $id = $proc.Id
+    $proc.Dispose()
+    return $id
+}
+
+# The process id of a running ff7remake_.exe, or $null.
+function Get-GamePid {
+    $p = @(Get-GameProcs | Where-Object { $_.Name -eq $GameProcess })
+    if ($p.Count -gt 0) { return $p[0].Id }
+    return $null
+}
+
+function Wait-GamePid([int]$seconds) {
+    $deadline = (Get-Date).AddSeconds($seconds)
+    while ($true) {
+        $id = Get-GamePid
+        if ($id) { return $id }
+        if ((Get-Date) -ge $deadline) { return $null }
+        Start-Sleep -Milliseconds 500
+    }
+}
+
+# Epic and Microsoft Store / Xbox copies. First the executable itself (the mod adds
+# -d3d11 by itself either way); if it cannot be started or closes again at once, the
+# store is asked to start the game. Returns the game's process id or $null.
+function Start-StoreGame($inst, [string]$gameArgs) {
+    $storeName = $inst.StoreName
+    if (-not $ViaStore) {
+        $epicBefore = @(Get-Process -Name 'EpicGamesLauncher' -ErrorAction SilentlyContinue).Count -gt 0
+        Info "Starting the game ($gameArgs)"
+        $id = $null
+        try { $id = Start-GameExe $gameArgs } catch { Info "The game's executable could not be started directly ($($_.Exception.Message))." }
+        if ($id) {
+            Info "If a message asks you to start the game through the $storeName, close it: this window then does that."
+            $deadline = (Get-Date).AddSeconds($QuickExitSeconds)
+            while ((Get-Date) -lt $deadline -and (Get-GamePid)) { Start-Sleep -Milliseconds 500 }
+            $now = Get-GamePid
+            if ($now) { return $now }
+            Info "The game closed again soon after starting; it probably has to be started through the $storeName."
+            # It may be starting itself again through its store: give that time before asking the store.
+            $grace = $RestartGraceSeconds
+            if ($inst.Store -eq 'epic' -and -not $epicBefore -and @(Get-Process -Name 'EpicGamesLauncher' -ErrorAction SilentlyContinue).Count -gt 0) { $grace = $EpicRestartGraceSeconds }
+            $again = Wait-GamePid $grace
+            if ($again) { Info "The game was started again through its store (pid $again)."; return $again }
+        }
+    }
+    $left = @(Get-GameProcs)
+    if ($left.Count -gt 0) {
+        Fail "Not starting the game through the $storeName while $(Format-Procs $left) is still running."
+        return $null
+    }
+    if ($ExtraArgs) { Warn '-ExtraArgs does not reach the game when the store starts it.' }
+    $target = $null
+    if ($inst.Store -eq 'epic') { $target = Get-EpicLaunchUri $inst } else { $target = Get-XboxLaunchTarget $inst }
+    if ($target) {
+        Info "Starting the game through the $storeName ($target)"
+        try {
+            if ($inst.Store -eq 'epic') { Start-Process -FilePath $target | Out-Null }
+            else { Start-Process -FilePath 'explorer.exe' -ArgumentList $target | Out-Null }
+        } catch {
+            Warn "The $storeName could not be asked to start the game: $($_.Exception.Message)"
+            $target = $null
+        }
+    }
+    if (-not $target) {
+        Say "           Start the game yourself now from the $storeName; this window waits $StoreStartSeconds s for it."
+    } elseif ($inst.Store -eq 'epic') {
+        Say '           If the Epic Games Launcher asks you to log in, do so; the game then starts.'
+    }
+    $id = Wait-GamePid $StoreStartSeconds
+    if (-not $id) { Fail "The game did not start within $StoreStartSeconds s." }
+    return $id
 }
 
 # ------------------------------------------------------------------ session record
@@ -533,9 +649,13 @@ function Invoke-Restore([string]$bin, [string]$why) {
     return $ok
 }
 
-function Get-StatusLines([string]$root, [string]$bin) {
+function Get-StatusLines($inst) {
+    $root = $inst.Root
+    $bin = $inst.Bin
     $out = @()
     $out += "Game folder:   $root"
+    $out += "Store:         $($inst.StoreName) (found through $($inst.Source))"
+    $out += Test-GameBuild $inst -Quiet
     $out += ("Game running:  {0}" -f $(if (@(Get-GameProcs).Count -gt 0) { 'yes' } else { 'no' }))
     $session = Read-Session $bin
     if ($session) { $out += "Mod:           installed (state '$($session.state)', since $($session.started))" }
@@ -545,17 +665,20 @@ function Get-StatusLines([string]$root, [string]$bin) {
     if (Test-Path -LiteralPath (Join-Path $bin $LumaOn)) { $luma = 'in place (dxgi.dll)' }
     if (Test-Path -LiteralPath (Join-Path $bin $LumaOff)) { $luma = 'set aside (dxgi.dll.vr-disabled)' }
     $out += "ReShade/Luma:  $luma"
-    $out += ("Steam:         {0}" -f $(if (Test-SteamRunning) { 'running' } else { 'not running' }))
+    if ($inst.Store -eq 'steam') { $out += ("Steam:         {0}" -f $(if (Test-SteamRunning) { 'running' } else { 'not running' })) }
     $vr = Get-RunningVrRuntimes
     $out += ("VR runtimes:   {0}" -f $(if ($vr.Count) { ($vr -join ', ') + ' running' } else { 'none seen running' }))
     return $out
 }
 
-function Show-Status([string]$root, [string]$bin) { foreach ($l in (Get-StatusLines $root $bin)) { Say $l } }
+function Show-Status($inst, $others) {
+    foreach ($l in (Get-StatusLines $inst)) { Say $l }
+    foreach ($o in @($others)) { Say "Also installed: $(Format-Install $o) (FF7VR_STORE=$($o.Store) uses it)" }
+}
 
 # ------------------------------------------------------------------ diagnostics
 
-function Get-SystemLines([string]$root, [string]$bin, [string]$logFile) {
+function Get-SystemLines($inst, [string]$logFile) {
     $out = @()
     $out += "Collected: $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss zzz'))"
     try {
@@ -580,15 +703,10 @@ function Get-SystemLines([string]$root, [string]$bin, [string]$logFile) {
         foreach ($n in $av.GetValueNames()) { $out += ("  installed:   {0} ({1})" -f $n, $(if (Test-Path -LiteralPath $n) { 'file present' } else { 'file missing' })) }
     } catch { }
     $out += ''
-    if ($root) {
-        $exe = Join-Path $bin 'ff7remake_.exe'
-        if (Test-Path -LiteralPath $exe) {
-            $vi = (Get-Item -LiteralPath $exe).VersionInfo
-            $out += "Game exe version: $($vi.FileMajorPart).$($vi.FileMinorPart).$($vi.FileBuildPart).$($vi.FilePrivatePart)"
-        }
-        $out += Get-StatusLines $root $bin
+    if ($inst) {
+        $out += Get-StatusLines $inst
     } else {
-        $out += 'Game folder: not found through Steam'
+        $out += 'Game folder: not found (looked on Steam, the Epic Games Store and the Microsoft Store / Xbox app)'
     }
     if ($logFile -and (Test-Path -LiteralPath $logFile)) {
         $out += ''
@@ -629,7 +747,9 @@ function Protect-TextFile([string]$path) {
     return $true
 }
 
-function Invoke-Diagnostics([string]$root, [string]$bin) {
+function Invoke-Diagnostics($inst) {
+    $bin = $null
+    if ($inst) { $bin = $inst.Bin }
     $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss')
     $stage = Join-Path ([System.IO.Path]::GetTempPath()) "ff7vr-diagnostics-$stamp"
     New-Item -ItemType Directory -Force -Path $stage | Out-Null
@@ -660,7 +780,7 @@ function Invoke-Diagnostics([string]$root, [string]$bin) {
             $p = Join-Path $Here $n
             if (Test-Path -LiteralPath $p) { Copy-Item -LiteralPath $p -Destination $stage }
         }
-        [System.IO.File]::WriteAllLines((Join-Path $stage 'system.txt'), [string[]](Get-SystemLines $root $bin $logFile))
+        [System.IO.File]::WriteAllLines((Join-Path $stage 'system.txt'), [string[]](Get-SystemLines $inst $logFile))
 
         # Crash dumps stay out unless asked for; every other file must be text and has the user
         # name and profile path replaced. Anything else is left out.
@@ -702,21 +822,28 @@ function Invoke-Diagnostics([string]$root, [string]$bin) {
 
 # ------------------------------------------------------------------ main
 
-$root = Find-GameRoot
-if ($Action -eq 'diagnostics') {
-    $b = $null
-    if ($root) { $b = Join-Path $root 'End\Binaries\Win64' }
-    if (Invoke-Diagnostics $root $b) { Finish 0 }
-    Finish 1
-}
-if (-not $root) {
-    Fail 'FINAL FANTASY VII REMAKE INTERGRADE was not found through Steam.'
-    Say  'Start this script with -GameDir "<the game folder that contains End>" or set FF7VR_GAME_DIR.'
-    Finish 1
-}
-$bin = Join-Path $root 'End\Binaries\Win64'
+$found = Resolve-GameInstall $GameDir $Store
+$inst = $found.Install
+$root = $null
+$bin = $null
+if ($inst) { $root = $inst.Root; $bin = $inst.Bin }
+$others = @()
+if ($inst) { $others = @($found.All | Where-Object { $_.Exe -ne $inst.Exe }) }
 
-if ($Action -eq 'status') { Show-Status $root $bin; Finish 0 }
+if ($Action -eq 'diagnostics') {
+    if (Invoke-Diagnostics $inst) { Finish 0 }
+    Finish 1
+}
+if (-not $inst) {
+    Fail $found.Error
+    foreach ($e in @($script:StoreLookupErrors)) { Say "           Looking on $e" }
+    foreach ($o in @($found.All)) { Say "           Found: $(Format-Install $o)" }
+    Say  'Start this script with -GameDir "<the game folder that contains End>" or set FF7VR_GAME_DIR;'
+    Say  'FF7VR_STORE (steam, epic or xbox) says which store the copy is from.'
+    Finish 1
+}
+
+if ($Action -eq 'status') { Show-Status $inst $others; Finish 0 }
 
 # Never two game processes at once (a VR runtime serves one application at a time,
 # even while the previous one is still shutting down), and never two launchers
@@ -725,17 +852,26 @@ if ($Action -eq 'restore') { $what = 'run restore' } else { $what = 'start the V
 if (-not (Wait-ClearToStart $what)) { Finish 2 }
 
 if ($Action -eq 'restore') {
-    $session = Read-Session $bin
-    $lumaAside = (Test-Path -LiteralPath (Join-Path $bin $LumaOff))
-    if (-not $session -and -not $lumaAside) {
-        $leftover = @()
-        foreach ($pat in $RuntimeFiles) { $leftover += @(Get-ChildItem -LiteralPath $bin -Filter $pat -File -ErrorAction SilentlyContinue) }
-        if ($leftover.Count -eq 0) {
-            Info 'Nothing to restore: the game folder is in its normal state.'
-            Finish 0
+    # Every install found (all stores) that has something to undo; a folder given by hand alone.
+    $todo = @()
+    foreach ($t in @(@($inst) + $others)) {
+        $b = $t.Bin
+        $need = [bool](Read-Session $b) -or (Test-Path -LiteralPath (Join-Path $b $LumaOff))
+        if (-not $need) {
+            foreach ($pat in $RuntimeFiles) { if (@(Get-ChildItem -LiteralPath $b -Filter $pat -File -ErrorAction SilentlyContinue).Count -gt 0) { $need = $true } }
         }
+        if ($need) { $todo += $t }
     }
-    if (Invoke-Restore $bin 'restore') { Info 'The game folder is back to normal.'; Finish 0 }
+    if ($todo.Count -eq 0) {
+        Info 'Nothing to restore: the game folder is in its normal state.'
+        Finish 0
+    }
+    $ok = $true
+    foreach ($t in $todo) {
+        Info "Game folder: $(Format-Install $t)"
+        if (Invoke-Restore $t.Bin 'restore') { Info 'The game folder is back to normal.' } else { $ok = $false }
+    }
+    if ($ok) { Finish 0 }
     Fail 'Restore did not finish; see the messages above.'
     Finish 1
 }
@@ -743,6 +879,26 @@ if ($Action -eq 'restore') {
 # ---- start
 
 Info "Game folder: $root"
+Info "Store:       $($inst.StoreName) (found through $($inst.Source))"
+if ($others.Count -gt 0) {
+    foreach ($o in $others) { Info "Also installed: $(Format-Install $o) (FF7VR_STORE=$($o.Store) uses that one)" }
+}
+[void](Test-GameBuild $inst)
+
+# The mod's files go into the game's own folder; a Microsoft Store / Xbox app folder is
+# usually locked. Find out before changing anything.
+if (-not (Test-FolderWritable $bin)) {
+    Fail "Files cannot be written into the game folder: $bin"
+    if ($inst.Store -eq 'xbox') {
+        Say  '           Microsoft Store / Xbox app games are installed in a protected folder. To unlock it: open the'
+        Say  '           Xbox app, go to the game''s page, then Manage (the "..." button), Files, and choose "Enable'
+        Say  '           advanced management features". Then start the VR session again. Nothing was changed.'
+    } else {
+        Say  '           Check that the folder is not read-only and that your Windows account may change files in it,'
+        Say  '           then start the VR session again. Nothing was changed.'
+    }
+    Finish 1
+}
 
 # An earlier session that did not finish (window closed, crash, restart) is undone first.
 $prev = Read-Session $bin
@@ -774,8 +930,8 @@ foreach ($n in $ModFiles) {
     if (-not (Test-Path -LiteralPath (Join-Path $Here $n))) { Fail "$n is missing next to this script ($Here)."; Finish 1 }
 }
 
-# Steam has to run: the game asks the Steam client whether it may start.
-if (-not (Test-SteamRunning)) {
+# Steam copy: Steam has to run, the game asks the Steam client whether it may start.
+if ($inst.Store -eq 'steam' -and -not (Test-SteamRunning)) {
     Warn 'Steam is not running. The game needs it; starting Steam now.'
     $steam = Get-SteamExe
     if (-not $steam) { Fail 'steam.exe was not found. Start Steam yourself, then start the VR session again.'; Finish 1 }
@@ -833,17 +989,19 @@ try {
     if (Test-Path -LiteralPath $hsKept) { Copy-Item -LiteralPath $hsKept -Destination (Join-Path $bin $HeadsetFile) -Force }
     Info 'Installed the mod for this session (xinput1_3.dll, ff7vr.ini)'
 
-    # Start the game executable directly. SteamAppId/SteamGameId tell the Steam API
-    # which game this is, so it accepts a start that did not come from the Steam client.
     $gameArgs = '-d3d11'
     if ($ExtraArgs) { $gameArgs = "$gameArgs $ExtraArgs" }
-    $env:SteamAppId = "$AppId"
-    $env:SteamGameId = "$AppId"
-    Info "Starting the game ($gameArgs)"
-    # No handle to the game is kept (see Get-GameProcs).
-    $proc = Start-Process -FilePath (Join-Path $bin 'ff7remake_.exe') -ArgumentList $gameArgs -WorkingDirectory $bin -PassThru
-    $gamePid = $proc.Id
-    $proc.Dispose(); $proc = $null
+    if ($inst.Store -eq 'steam') {
+        # Start the game executable directly. SteamAppId/SteamGameId tell the Steam API
+        # which game this is, so it accepts a start that did not come from the Steam client.
+        $env:SteamAppId = "$AppId"
+        $env:SteamGameId = "$AppId"
+        Info "Starting the game ($gameArgs)"
+        $gamePid = Start-GameExe $gameArgs
+    } else {
+        $gamePid = Start-StoreGame $inst $gameArgs
+        if (-not $gamePid) { throw 'The game did not start; see the messages above.' }
+    }
     $gameStarted = $true
     $script:Warned = $false   # from here on, any warning keeps the window open at the end
     Info "Game running (pid $gamePid). Play, then quit the game as usual; this window tidies up and closes by itself."
@@ -887,7 +1045,7 @@ try {
         if ($logDir) { Info "Kept this session's log in $logDir"; $script:LastLogDir = $logDir }
         $session.state = 'installed'
         Write-Session $bin $session
-        Info 'The mod stays installed (-KeepInstalled). The game now starts with it from Steam too. Run restore.cmd to remove it.'
+        Info "The mod stays installed (-KeepInstalled). The game now starts with it from $($inst.StoreName) too. Run restore.cmd to remove it."
     } else {
         if (Invoke-Restore $bin 'end of session') {
             Info 'The game folder is back to normal.'

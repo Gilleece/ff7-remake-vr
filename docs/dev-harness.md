@@ -38,9 +38,13 @@ of each run is kept in `captures\runs\<time>\ff7vr.log`.
   and the "C++ CMake tools for Windows" component. The build uses the CMake
   and Ninja bundled with Visual Studio; nothing needs to be on `PATH`. Visual
   Studio is found with `vswhere`.
-- Steam with FINAL FANTASY VII REMAKE INTERGRADE (app 1462040) installed. The
-  install folder is found from the Steam registry key and
-  `steamapps\libraryfolders.vdf`.
+- FINAL FANTASY VII REMAKE INTERGRADE (Steam app 1462040) installed. The install
+  folder is found from the Steam registry key and `steamapps\libraryfolders.vdf`, or
+  else from the Epic Games Launcher's manifests or the Microsoft Store packages (see
+  "Packaging for players"). Only the lookup knows other stores: the harness starts the
+  exe directly either way, starts Steam only for the Steam copy, and its save backup
+  covers the save folder's `Steam\` and `Saved\Config\` only. Everything here was
+  developed and tested with the Steam copy.
 - Network access on the first configure (dependencies are fetched into
   `third_party/_fetched`, shared by all build directories).
 - At least one save game, for `-Until gameplay`.
@@ -53,7 +57,8 @@ these environment variables override the detection:
 | Variable | Meaning | Default |
 |---|---|---|
 | `FF7VR_DEV_NAME` | Your name for this checkout: default build directory `build\<name>` and the owner name written into the game lock | `dev` |
-| `FF7VR_GAME_DIR` | Game install folder (the one containing `End\` and `Engine\`) | from Steam |
+| `FF7VR_GAME_DIR` | Game install folder (the one containing `End\` and `Engine\`) | from Steam, the Epic Games Store or the Microsoft Store |
+| `FF7VR_STORE` | `steam`, `epic` or `xbox`: which copy to use when several are installed | Steam, then Epic, then Microsoft Store |
 | `FF7VR_SAVE_ROOT` | The game's user-data folder | `%USERPROFILE%\Documents\My Games\FINAL FANTASY VII REMAKE` |
 | `FF7VR_BACKUP_DIR` | Where save backups go | `%USERPROFILE%\ff7-remake-vr-backups` |
 | `FF7VR_VS_PATH` | Visual Studio installation folder | from `vswhere` |
@@ -551,6 +556,30 @@ only when it is identical to the package's copy.
 The launcher's session record is separate from `ff7vr.deploy-manifest.json`; each
 refuses to overwrite files the other put there. On a development machine take the
 game lock (`lock.ps1 -Acquire`) before running the launcher by hand.
+
+The game lookup is `tools\package\launcher\ff7vr-stores.ps1`, shared by the launcher
+and `tools\dev\common.ps1`: `-GameDir`/`FF7VR_GAME_DIR`, then the store named by
+`FF7VR_STORE`, then the first copy found on Steam (library folders, app 1462040), the
+Epic Games Store (the Epic Games Launcher's `Data\Manifests\*.item`, JSON:
+`DisplayName`, `LaunchExecutable`, `InstallLocation`, `AppName`, `CatalogNamespace`,
+`CatalogItemId`; the folder from `HKLM\SOFTWARE\WOW6432Node\Epic Games\EpicGamesLauncher`
+`AppDataPath`) and the Microsoft Store / Xbox app (`Get-AppxPackage`, Square Enix's or
+named like the game, and `<drive>\XboxGames\<game>\Content`; the application id comes
+from the package's `AppxManifest.xml`). The exe is looked for at
+`End\Binaries\Win64` and `End\Binaries\WinGDK`, below `Content\` as well, then by a
+search a few folders deep. Starting: Steam as before (`SteamAppId`, Steam running);
+Epic and Store copies the exe first, and when it cannot start or closes within 60 s
+(and does not start again by itself) `com.epicgames.launcher://apps/<namespace>%3A<item>%3A<app>?action=launch&silent=true`
+or `explorer.exe shell:AppsFolder\<family name>!<application id>`, then the game process
+is awaited by name. Before any change the launcher checks that `End\Binaries\Win64` can
+be written to. The launcher also compares the exe's SizeOfImage and PE time stamp with
+the known build (what the mod checks) and warns before the start when they differ.
+
+`tools\package\test-stores.ps1 [-EndToEnd]` tests all of this against fake Epic
+manifests, fake Store packages (it replaces `Get-AppxPackage`), a fake XboxGames folder,
+and the real Steam install if there is one; the start through a store runs with faked
+processes, and `-EndToEnd` also runs the launcher script (`status`, and `restore` and
+`start` on fake folders with a lock name of its own). It starts no game.
 
 ```
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\package\package.ps1 [-Clean] [-NoZip]
