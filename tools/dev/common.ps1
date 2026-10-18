@@ -4,6 +4,8 @@
 # Nothing machine-specific is hardcoded. Paths are detected, and each can be
 # overridden with an environment variable:
 #   FF7VR_GAME_DIR    game install root (folder containing End\ and Engine\)
+#   FF7VR_STORE       steam | epic | xbox: which store's copy to use when several
+#                     are installed (default: Steam, then Epic, then Microsoft Store)
 #   FF7VR_SAVE_ROOT   "Documents\My Games\FINAL FANTASY VII REMAKE"
 #   FF7VR_BACKUP_DIR  where save backups go (default %USERPROFILE%\ff7-remake-vr-backups)
 #   FF7VR_VS_PATH     Visual Studio installation folder
@@ -25,7 +27,11 @@ $script:CapturesDir     = Join-Path $script:RepoRoot 'captures'  # gitignored
 $script:LogName         = 'ff7vr.log'
 $script:ProxyDllName    = 'xinput1_3.dll'
 $script:ManifestName    = 'ff7vr.deploy-manifest.json'           # lives in the game's Win64 folder
-$script:CachedGameRoot  = $null
+$script:CachedGameInstall = $null
+
+# The game lookup (Steam, Epic Games Store, Microsoft Store / Xbox app), shared with the
+# player's launcher.
+. (Join-Path $script:RepoRoot 'tools\package\launcher\ff7vr-stores.ps1')
 
 function Write-Step([string]$msg) {
     $t = (Get-Date).ToString('HH:mm:ss')
@@ -103,33 +109,22 @@ function Get-SteamExe {
     return $null
 }
 
-function Get-GameRoot {
-    if ($script:CachedGameRoot) { return $script:CachedGameRoot }
-    $root = $null
-    if ($env:FF7VR_GAME_DIR) {
-        $root = $env:FF7VR_GAME_DIR
-    } else {
-        foreach ($lib in Get-SteamLibraries) {
-            $acf = Join-Path $lib ("steamapps\appmanifest_{0}.acf" -f $script:SteamAppId)
-            if (-not (Test-Path -LiteralPath $acf)) { continue }
-            $installdir = $null
-            foreach ($line in Get-Content -LiteralPath $acf) {
-                if ($line -match '^\s*"installdir"\s*"(.+)"\s*$') { $installdir = $Matches[1] }
-            }
-            if ($installdir) {
-                $cand = Join-Path $lib ("steamapps\common\" + $installdir)
-                if (Test-Path -LiteralPath $cand) { $root = $cand; break }
-            }
-        }
+# The install the tools work on: FF7VR_GAME_DIR, else the store named by FF7VR_STORE,
+# else the first found on Steam, the Epic Games Store, the Microsoft Store / Xbox app
+# (tools\package\launcher\ff7vr-stores.ps1).
+function Get-GameInstall {
+    if ($script:CachedGameInstall) { return $script:CachedGameInstall }
+    $r = Resolve-GameInstall '' ''
+    if (-not $r.Install) {
+        throw "Game install not found: $($r.Error) Set FF7VR_GAME_DIR to the folder containing End\ and Engine\ (and FF7VR_STORE to its store)."
     }
-    if (-not $root -or -not (Test-Path -LiteralPath (Join-Path $root 'End\Binaries\Win64\ff7remake_.exe'))) {
-        throw "Game install not found (Steam app $script:SteamAppId). Set FF7VR_GAME_DIR to the folder containing End\ and Engine\."
-    }
-    $script:CachedGameRoot = $root
-    return $root
+    $script:CachedGameInstall = $r.Install
+    return $r.Install
 }
 
-function Get-GameBinDir { return (Join-Path (Get-GameRoot) 'End\Binaries\Win64') }
+function Get-GameRoot  { return (Get-GameInstall).Root }
+function Get-GameStore { return (Get-GameInstall).Store }   # steam | epic | xbox
+function Get-GameBinDir { return (Get-GameInstall).Bin }
 function Get-GameExe    { return (Join-Path (Get-GameBinDir) 'ff7remake_.exe') }
 function Get-LumaDll    { return (Join-Path (Get-GameBinDir) 'dxgi.dll') }
 function Get-LumaDisabledDll { return (Join-Path (Get-GameBinDir) 'dxgi.dll.vr-disabled') }
