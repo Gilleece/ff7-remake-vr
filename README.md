@@ -2,7 +2,7 @@
 
 VR mod for FF7 Remake that adds first person, DLSS and DFR. The main goal here was performance as I found other mods, amazing as they are, to be much more demanding than I would have expected. This is still early days, I made this for myself and am just sharing. This was primarily vibe coded, just for transparency. 
 
-To install take a look at the "Playing" section of this readme. 
+To install take a look at the "Installing and playing" section of this readme. 
 
 First person mode can be toggled with home on keyboard or L3 and R3 together on controller. The mod automatically switches to 3rd person for combat. There's a bunch of options to tweak in the ff7vr.ini file with descriptions in that file. For me personally I get massively better performance out of this mod than others. I have only played through a few sections so almost certainly some areas will have issues etc, as I play through the game I will try to fix them.
 
@@ -20,7 +20,7 @@ Known problems right now (details in `GUIDE.md`):
 - Pre-rendered movies can drop to a slideshow. It looks like a GPU upload slowdown rather than the movie itself and is still being looked at; waiting a minute and a half between restarts of the game helps.
 - Heat haze over fire broke the right eye; fixed, not yet confirmed in a headset.
 - PlayStation pads (DualShock 4, DualSense): the combinations now also work when the game reads the pad itself, with the touch pad click in place of View/Back, not yet tried with a real pad. The recommended setup is Steam Input on for the game (Steam then hands the game an Xbox pad and the combinations work as for one). Other DirectInput pads are still read by the game alone (use the keys).
-- Wait a minute and a half between quitting the game and starting it again, or it can run at 10 fps for minutes (the launcher waits by itself; a start from Steam does not).
+- Wait a minute and a half between quitting the game and starting it again, or it can run at 10 fps for minutes (the launcher waits by itself; a start from your store does not).
 
 ## Requirements
 
@@ -44,34 +44,43 @@ The release notes list the SHA-256 of each zip; check yours with
 hooks the game, so antivirus heuristics can flag it, as they do other mods of this kind;
 a matching hash shows you have the published file. More in `docs/releasing.md`.
 
-## Playing
+## Installing and playing
 
-Start your headset's PC app (for example the Virtual Desktop Streamer or SteamVR) and
-connect the headset (this can also be done later), then double-click `start-vr.cmd` in the package folder. The launcher finds
-the game on Steam, the Epic Games Store or the Microsoft Store / Xbox app, sets
-ReShade/Luma aside (if you have them setup), copies the mod into the game folder, starts the game and waits;
-when the game exits it puts everything back and keeps the session's log in `logs\`. the intention here was to allow people to keep their 2D setup intact.
-Leave its window open while you play.
+1. Download `ff7vr-<version>.zip` (or the `-dlss` zip, see below) from the latest
+   release and unzip it anywhere outside the game folder.
+2. Start your headset's PC app (Virtual Desktop Streamer, SteamVR, Meta Quest Link, ...)
+   and connect the headset. This can also be done later.
+3. Double-click `start-vr.cmd` in the unzipped folder. The launcher finds the game on
+   Steam, the Epic Games Store or the Microsoft Store / Xbox app, sets ReShade/Luma aside
+   if you use them, copies the mod into the game folder, starts the game and waits. When
+   the game exits it puts everything back (so your 2D setup stays intact) and keeps the
+   session's log in `logs\`. Leave its window open while you play.
+
+Per store:
+
+- **Steam**: nothing extra. Steam must be running; the launcher starts it if needed.
+- **Epic Games Store**: nothing extra. The game is started directly; if it closes again
+  at once, the launcher starts it through the Epic Games Launcher instead.
+- **Microsoft Store / Xbox app**: unlock the game folder once. In the Xbox app open the
+  game's page, then Manage, Files, "Enable advanced management features". The launcher
+  checks this before changing anything and tells you if it is still locked.
+- Installed from more than one store: the Steam copy is used. Set the environment
+  variable `FF7VR_STORE` to `epic`, `xbox` or `steam` to choose. If the launcher cannot
+  find the game at all, set `FF7VR_GAME_DIR` to the game folder (the one that contains
+  `End`).
+
+The mod has only been tested with the Steam copy so far. If the Epic or Microsoft Store
+exe is another build than the one the mod knows, the launcher says so before the start
+and the game runs without VR; please send the diagnostics (see below) so it can be added.
 
 If a session was interrupted or anything looks wrong in the game folder, double-click
 `restore.cmd` (harmless when nothing needs doing). Save games are not touched.
 
-- Installed from more than one store: the Steam copy is used. Set the environment
-  variable `FF7VR_STORE` to `epic` or `xbox` (or `steam`) to choose. `FF7VR_GAME_DIR`
-  names the game folder (the one that contains `End`) when the launcher cannot find it.
-- Microsoft Store / Xbox app: the game's folder is locked until you unlock it once. In
-  the Xbox app open the game's page, then Manage, Files, and choose "Enable advanced
-  management features". The launcher checks this before changing anything and says so.
-- Epic and Microsoft Store copies are started directly first; if the game closes again
-  soon after, the launcher starts it through the Epic Games Launcher or the Xbox app.
-
-Without the launcher (or to start the game from your store yourself):
-
-Unzip the `-dropin.zip` into the game's `End\Binaries\Win64`
-folder (beside `ff7remake_.exe`) and start the game from your store, or with
-`ff7vr-start.cmd` there. The log is `ff7vr.log` in that folder; to remove the mod,
-delete the files the zip added. Details (ReShade/Luma, DLSS): `GUIDE.md`,
-"Installing without the launcher".
+**Without the launcher** (or to start the game from your store yourself): unzip the
+`-dropin.zip` into the game's `End\Binaries\Win64` folder (beside `ff7remake_.exe`) and
+start the game from your store, or with `ff7vr-start.cmd` there. The log is `ff7vr.log`
+in that folder; to remove the mod, delete the files the zip added. Details (ReShade/Luma,
+DLSS): `GUIDE.md`, "Installing without the launcher".
 
 ## DLSS package
 
