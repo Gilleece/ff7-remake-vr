@@ -13,13 +13,7 @@
 //   shader dump <hex pointer> <prefix> writes <prefix>.dxbc and <prefix>.asm (disassembly) of
 //                                     the shader object at that address (as `gpu trace` logs it)
 //   shader check                      recomputes the checksum of every kept shader
-//   shader list <file>                every distinct shader created: 3DMigoto hash, checksum,
-//                                     size, dither lookups found, patched or not
-//
-// Dithered materials ([stereo] hair_dither): Square Enix's materials threshold hair coverage
-// and dithered fades against a noise texture looked up at a new depth every frame (see
-// find_dither in shaders.cpp). The hook creates those shaders from a copy whose lookup mask
-// leaves the frame counter out, so the pattern is a fixed tile.
+//   shader fnv <hex>                  the kept shaders with that 3DMigoto hash
 
 #include <d3d11.h>
 
@@ -34,13 +28,6 @@ using Hash = std::array<std::uint32_t, 4>;  // the DXBC checksum
 
 // Start-up (any thread, before the game creates its device).
 bool install(bool keep_all);
-
-// Dithered materials, before the game creates its shaders: tile 2, 4, 8, 16 or 32 = a static tile of
-// that size, 64 = the whole noise tile (static), 0 = as the game. `screen`: the full-screen passes with the same lookup too.
-void set_dither(int tile, bool screen);
-int dither_size();
-// Comparison mode (before install): `shader dither off|game|2|4|8|16|32|64|slow2..slow5` switches live.
-void set_dither_ab(bool on);
 
 // Keep the bytecode of shaders with this checksum from now on.
 void want(const Hash& hash);

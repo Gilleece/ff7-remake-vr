@@ -1241,10 +1241,6 @@ void RegisterSettings(const Config& cfg) {
         [&xc] { return xc.Picture().blackLevel; }, [&xc](float v) { return OkOrError(xc.PictureCommand(std::format("black_level {:.3f}", v))); }));
     live_settings::add(Number("sharpen", "Sharpen", kPicture + 20, "picture", "sharpen", 0.0f, 1.0f, 0.1f, 1, [] { return comfort::Sharpen(); },
                               [](float v) { return OkOrError(Dispatch(std::format("sharpen {:.2f}", v))); }));
-    // Shaders are created once, so both take effect at the next start.
-    Held(Choice("stereo.hair_dither", "Hair and fade dither", kPicture + 30, "stereo", "hair_dither", {"Mod default (shimmer fix)", "Game default (may shimmer)"},
-                {"static", "game"}));
-    Held(Choice("stereo.hair_dither_size", "Steady dither tile", kPicture + 31, "stereo", "hair_dither_size", {"32x32", "16x16", "8x8", "4x4", "2x2"}, {"32", "16", "8", "4", "2"}));
     Optional(Number("cvar.depth_of_field", "Depth of field (r.DepthOfFieldQuality)", kPicture + 80, "stereo_cvars", "r.DepthOfFieldQuality", 0, 4, 1, 0));
 
     // ---- Comfort ----

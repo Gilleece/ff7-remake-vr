@@ -48,8 +48,6 @@ constexpr Default kDefaults[] = {
     {"stereo", "ssr_fix", "3"},
     {"stereo", "distortion_fix", "1"},
     {"stereo", "game_vignette", "0"},
-    {"stereo", "hair_dither", "static"},
-    {"stereo", "hair_dither_size", "32"},
     {"stereo", "tonemap_shift", "auto"},
     {"stereo", "render_scale", "1.0"},
     {"stereo", "dynamic_resolution", "0"},

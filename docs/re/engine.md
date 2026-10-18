@@ -1805,8 +1805,8 @@ Verified headless 2026-10-10 (Null backend, 2 x 3072x3264, first room of the lat
 
 ## 16. Dithered materials: the noise lookup (LIVE, shader bytecode)
 
-Found from the pixel shaders the game creates (the `CreatePixelShader` hook, `shaders.cpp`
-`find_dither`), cross-checked against the disassemblies of a published flat-screen fix for
+Found from the pixel shaders the game creates (read through the `CreatePixelShader` hook,
+`shaders.cpp`), cross-checked against the disassemblies of a published flat-screen fix for
 this game (helixmod's FF7R DX11 fix, whose `ShaderFixes` are named by the 3DMigoto hash).
 
 - Material form (base pass, depth and shadow passes of masked materials):
@@ -1828,12 +1828,21 @@ this game (helixmod's FF7R DX11 fix, whose `ShaderFixes` are named by the 3DMigo
 - Full-screen form (shadow projection, ambient occlusion, reflections, other passes): the
   same `and`/`ld` with `ishl rB.z, cbN[139].z, l(3)` written straight into the address
   (no per-object offset). Variants with `ishl ..., cbN[139].w, l(1)` and a different
-  register order also exist (3 of the fix's shaders); `find_dither` does not match those.
-- The patch: the `and` immediate becomes `(t-1, t-1, min(t,8)-1, 0)` for a tile `t` of 2, 4,
-  8, 16 or 32 (the pack's choice is 2; the mod's default 32), or `(63, 63, 7, 0)` for the
-  whole 64x64 tile. Any z mask
-  below 8 removes the counter term, a multiple of 8. One dword per lookup; the copy is
-  re-signed (`sign()`); instruction count unchanged.
+  register order also exist (3 of the fix's shaders).
+- The frame counter is a running frame number, not an index modulo 8: with the counter
+  term shifted right instead of left (`ushr rA, cbN[139].z, l(k)`, opcode 85 in place of
+  41), the slice still changed between captures 175 frames apart at k = 5. Without it
+  (any z mask below 8 drops the term, a multiple of 8) the pattern is a static tile.
+- Counts (Null backend, the dev harness save, a corridor with a wall of see-through
+  grates, 2026-10-17): 109 distinct pixel shaders created there, 36 with the material form,
+  11 with the full-screen form. Of the 55 shaders the helixmod fix edits for the dither, 31
+  were created there; its 22 with the material form are among the 36.
+- Not changed by the mod. A copy of each material shader with the `and` immediate set to
+  `(t-1, t-1, min(t,8)-1, 0)` (the helixmod fix's technique, tile 2 there; one dword per
+  lookup, re-signed) was tried on 2026-10-17 with tiles of 2 to 32 pixels: the hair was
+  steady in captures, but in a headset the static tile looked wrong (stripes on body hair
+  at 2, judged bad at 32 as well), so the patch was removed again. Players who want the static
+  tile can use that 3DMigoto fix.
 
 ## Tools
 
