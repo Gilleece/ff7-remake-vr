@@ -18,6 +18,7 @@ desktop. It contains:
 | `ff7vr.ini` | the settings (open it in Notepad) |
 | `xinput1_3.dll` | the mod itself |
 | `ff7vr-launcher.ps1` | the script the `.cmd` files run |
+| `ff7vr-stores.ps1` | the part of it that finds the game on Steam, the Epic Games Store or the Microsoft Store / Xbox app |
 | `README.md`, `GUIDE.md` | the short guide; this detailed guide |
 | `VERSION.txt` | which version of the mod this is |
 | `LICENSE`, `THIRD-PARTY-NOTICES.md` | the mod's licence; the components built into it and their licences |
@@ -27,14 +28,18 @@ desktop. It contains:
 
 After you double-click `start-vr.cmd`, the launcher:
 
-1. finds the game through Steam. If the game of a previous session is still running
+1. finds the game (see "Which copy of the game the launcher uses" below) and warns
+   when its exe is not the build the mod knows. If the game of a previous session is still running
    or still closing, or another launcher window is still tidying up, it waits for it
    (up to 90 seconds, with a message saying what it waits for) instead of starting a
    second copy, and gives up with a message only if it does not go away. Virtual
    Desktop serves one game at a time, so two copies at once leave the headset
    without a picture;
-2. puts things back first if an earlier session was interrupted;
-3. checks that Steam runs (it starts Steam if not) and warns if no VR runtime's PC
+2. checks that it may write into the game's `End\Binaries\Win64` folder (a Microsoft
+   Store / Xbox app folder is locked until unlocked once, see below) and stops before
+   changing anything if not; puts things back first if an earlier session was
+   interrupted;
+3. for the Steam copy, checks that Steam runs (it starts Steam if not); warns if no VR runtime's PC
    app seems to run (it looks for the Virtual Desktop Streamer, SteamVR, Meta Quest
    Link, PICO Connect and Windows Mixed Reality, and names them in the warning). That
    is only a warning: the game then runs flat on the monitor, and the mod keeps trying
@@ -44,7 +49,10 @@ After you double-click `start-vr.cmd`, the launcher:
    the mod does not reach the headset);
 5. copies `xinput1_3.dll` and `ff7vr.ini` into that folder and records every change
    in `ff7vr.session.json` there;
-6. starts the game (with `-d3d11`) and waits;
+6. starts the game (with `-d3d11`) and waits. An Epic or Microsoft Store copy that
+   cannot be started directly, or closes again within a minute (perhaps after a
+   message asking to start it through its store: close that message), is then
+   started through the Epic Games Launcher or the Xbox app;
 7. when the game is gone, however it ended (quit, Alt+F4, ended in Task Manager,
    crashed), and its helper programs have closed too (the game's crash report
    window, if one opened, has to be closed first): keeps the session's log in
@@ -73,20 +81,71 @@ Options, from a command prompt in the package folder:
 ```
 start-vr.cmd -KeepInstalled     leave the mod installed after the game exits (Luma stays set aside).
                                 restore.cmd removes it again. The game can then also be
-                                started from Steam (see "Installing without the launcher")
+                                started from its store (see "Installing without the launcher")
 start-vr.cmd -KeepLuma          do not set ReShade/Luma aside: the game runs in 3D with it (the mod
                                 corrects Luma's tonemapping for the right eye and turns Luma's own
                                 DLSS off for the headset image; checked without a headset so far)
 start-vr.cmd -ExtraArgs "..."   extra arguments for the game
 start-vr.cmd -NoPause           close the window at once at the end, also after an error
+start-vr.cmd -Store epic        use the Epic (or xbox, steam) copy when several are installed
+start-vr.cmd -GameDir "D:\..."  the game folder (the one that contains End), when it is not found
+start-vr.cmd -ViaStore          Epic and Microsoft Store copies: start through the store at once
+                                (-ExtraArgs then does not reach the game)
 powershell -NoProfile -ExecutionPolicy Bypass -File ff7vr-launcher.ps1 status
-                                show what is installed, change nothing
+                                show which copy is used and what is installed, change nothing
 ```
 
 The launcher starts the game executable directly instead of through Steam, so the
 launch options in the game's Steam properties are not applied; `-d3d11` is always
 passed. Your save games are not touched by the mod or the launcher (the game
 autosaves as usual).
+
+### Which copy of the game the launcher uses
+
+In this order:
+
+1. the folder given with `-GameDir`, or in the environment variable `FF7VR_GAME_DIR`
+   (the game's install folder, the one that contains `End`);
+2. Steam: Steam's library folders (app 1462040);
+3. the Epic Games Store: the Epic Games Launcher's list of installed games (its
+   `Manifests` folder under `%ProgramData%\Epic\EpicGamesLauncher\Data`);
+4. the Microsoft Store / Xbox app: your installed Store packages, and the Xbox app's
+   `XboxGames\<game>\Content` folders on every drive.
+
+When the game is installed from more than one store, the Steam copy is used, unless
+`-Store` or the environment variable `FF7VR_STORE` says `epic`, `xbox` or `steam`. The
+launcher's window and `status` say which copy it uses and how it found it, and name the
+others. `restore.cmd` looks at every copy it finds, so it also tidies up a session of a
+copy that is no longer the chosen one. To set a variable for good: Windows Settings,
+System, About, Advanced system settings, Environment Variables, New (user variable);
+open a new window afterwards.
+
+**Which build.** The mod knows one build of the game: the Steam build, file version
+1.0.0.7. It has only ever been tested with the Steam copy. Whether the Epic and
+Microsoft Store copies are the same build has not been checked. When the exe is another
+build, the launcher warns before the start; the mod then does not render the game in 3D
+(the game runs flat, on the monitor and at best on the flat virtual screen in the
+headset), and the log says `engine: stereo disabled: unknown game build`. Adding
+`allow_unknown_build = 1` under `[stereo]` in `ff7vr.ini` makes the mod try anyway: it
+renders 3D only when every one of its checks passes, which has not been tried with
+another build. A log from such an attempt (`collect-diagnostics.cmd`) is welcome.
+
+**Epic Games Store.** The launcher starts the game's exe directly first. If the game
+needs the Epic Games Launcher it closes again, perhaps after a message saying so: close
+the message, and the launcher asks the Epic Games Launcher to start the game
+(`com.epicgames.launcher://apps/...`; log in if it asks). Started that way, `-ExtraArgs`
+does not reach the game; `-d3d11` is added by the mod itself either way.
+
+**Microsoft Store / Xbox app.** The game's files sit in a folder Windows protects, and
+the mod has to be put beside the game's exe. Unlock the folder once: in the Xbox app,
+open the game's page, then Manage (the "..." button), Files, and choose "Enable advanced
+management features". Until then the launcher stops with that instruction before
+changing anything. It starts the exe directly, and when that does not work through the
+Store app's own entry (`shell:AppsFolder\...`); if it cannot find that entry it asks you
+to start the game from the Xbox app while its window waits. A Store build of the game
+may also keep its exe somewhere else than `End\Binaries\Win64` (the launcher also looks
+in `End\Binaries\WinGDK` and a few folders deep) or not load `xinput1_3.dll` at all;
+none of this has been tried with a real Store copy.
 
 ## What the launcher changes on the PC
 
@@ -95,7 +154,9 @@ Only the game's `End\Binaries\Win64` folder, and only for the session:
 `ff7vr.session.json` are added (the mod writes `ff7vr.log` there while it runs).
 Afterwards those are removed and `dxgi.dll` gets its name back. No game file is
 modified, nothing is installed, the PC's OpenXR settings are not changed, and the
-Steam launch options are not touched. The mod's name `xinput1_3.dll` is how the game
+store's launch options are not touched. To check that the folder can be written to,
+the launcher creates and deletes an empty file `ff7vr-write-test-*.tmp` there before the
+session. The mod's name `xinput1_3.dll` is how the game
 loads it: the game loads a file of that name from its own folder before the one in
 Windows.
 
@@ -147,12 +208,17 @@ package build comes with `ff7vr-<date>-<commit>-dropin.zip` for this.
 
 **Install:** unzip the drop-in zip into the folder where `ff7remake_.exe` is: the
 game's folder, then `End\Binaries\Win64` (in Steam: right-click the game, Manage,
-Browse local files). It adds `xinput1_3.dll` (the mod), `ff7vr.ini` (the settings),
+Browse local files; in the Epic Games Launcher: the game's "..." menu, Manage, the
+folder icon next to Installation; in the Xbox app: the game's page, Manage, Files,
+Browse, after "Enable advanced management features", see "Which copy of the game the
+launcher uses"). It adds `xinput1_3.dll` (the mod), `ff7vr.ini` (the settings),
 `ff7vr-start.cmd` and a folder `ff7vr-docs` with this guide. If an `xinput1_3.dll`
 is there already, another mod uses that name: do not overwrite it.
 
-**Play:** start the game from Steam as usual, or double-click `ff7vr-start.cmd` in
-that folder (Steam must be running). Either way the mod loads by itself.
+**Play:** start the game from your store as usual, or double-click `ff7vr-start.cmd` in
+that folder (for the Steam copy, Steam must be running; an Epic or Microsoft Store copy
+may refuse a start that does not come from its store). Either way the mod loads by
+itself. The note on builds above applies here too.
 
 - Direct3D 11: the mod needs it, and the game uses Direct3D 12 unless told otherwise.
   Nothing to set: when the command line has no graphics option, the mod adds
@@ -364,6 +430,10 @@ session it is `ff7vr.log` in the game's `End\Binaries\Win64` folder).
 
 ## What has not been tested
 
+- **The Epic Games Store and Microsoft Store / Xbox app copies.** The launcher finds and
+  starts them, but this was tested only with made-up install data, never with a real
+  copy; the mod itself has only run with the Steam copy (see "Which copy of the game
+  the launcher uses").
 - **Other headsets and PCs.** The mod has been played only on a Meta Quest 3 through
   Virtual Desktop, on one PC, in the first areas of one save game (Sector 7 slums,
   indoors and the street). Other headsets, Virtual Desktop settings and graphics

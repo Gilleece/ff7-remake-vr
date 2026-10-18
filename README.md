@@ -24,9 +24,12 @@ Known problems right now (details in `GUIDE.md`):
 
 ## Requirements
 
-- FINAL FANTASY VII REMAKE INTERGRADE on Steam, file version 1.0.0.7 (the current
-  Steam build). Another build is refused by the mod: the game then runs without VR.
-- Steam running.
+- FINAL FANTASY VII REMAKE INTERGRADE on Steam, the Epic Games Store or the Microsoft
+  Store / Xbox app. File version 1.0.0.7 is the build the mod knows (the current Steam
+  build); another build runs without VR. The mod has only been tested with the Steam
+  copy: whether the Epic and Microsoft Store copies are the same build has not been
+  checked, and the launcher warns before the start when the exe is another one.
+- Steam running, for the Steam copy (the launcher starts it if needed).
 - A PC VR headset with an OpenXR runtime (Virtual Desktop, SteamVR, Meta Quest Link,
   ...). The mod picks the runtime that has a headset connected by itself; to pin one,
   set `[xr] runtime` in `ff7vr.ini`. The PC's default OpenXR runtime is not changed.
@@ -43,10 +46,9 @@ a matching hash shows you have the published file. More in `docs/releasing.md`.
 
 ## Playing
 
-Steam only: 
-
 Start your headset's PC app (for example the Virtual Desktop Streamer or SteamVR) and
-connect the headset (this can also be done later), then double-click `start-vr.cmd` in the package folder. The launcher sets
+connect the headset (this can also be done later), then double-click `start-vr.cmd` in the package folder. The launcher finds
+the game on Steam, the Epic Games Store or the Microsoft Store / Xbox app, sets
 ReShade/Luma aside (if you have them setup), copies the mod into the game folder, starts the game and waits;
 when the game exits it puts everything back and keeps the session's log in `logs\`. the intention here was to allow people to keep their 2D setup intact.
 Leave its window open while you play.
@@ -54,10 +56,19 @@ Leave its window open while you play.
 If a session was interrupted or anything looks wrong in the game folder, double-click
 `restore.cmd` (harmless when nothing needs doing). Save games are not touched.
 
-Non-steam (or if you want to launch through steam itself):
+- Installed from more than one store: the Steam copy is used. Set the environment
+  variable `FF7VR_STORE` to `epic` or `xbox` (or `steam`) to choose. `FF7VR_GAME_DIR`
+  names the game folder (the one that contains `End`) when the launcher cannot find it.
+- Microsoft Store / Xbox app: the game's folder is locked until you unlock it once. In
+  the Xbox app open the game's page, then Manage, Files, and choose "Enable advanced
+  management features". The launcher checks this before changing anything and says so.
+- Epic and Microsoft Store copies are started directly first; if the game closes again
+  soon after, the launcher starts it through the Epic Games Launcher or the Xbox app.
 
-Without the launcher: unzip the `-dropin.zip` into the game's `End\Binaries\Win64`
-folder (beside `ff7remake_.exe`) and start the game from Steam, or with
+Without the launcher (or to start the game from your store yourself):
+
+Unzip the `-dropin.zip` into the game's `End\Binaries\Win64`
+folder (beside `ff7remake_.exe`) and start the game from your store, or with
 `ff7vr-start.cmd` there. The log is `ff7vr.log` in that folder; to remove the mod,
 delete the files the zip added. Details (ReShade/Luma, DLSS): `GUIDE.md`,
 "Installing without the launcher".
