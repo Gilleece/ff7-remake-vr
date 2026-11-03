@@ -106,6 +106,7 @@ std::atomic<int> g_mode_request{-1};
 std::atomic<bool> g_fp_selected{true};  // g.first_person for other threads
 std::atomic<bool> g_fp_shown{false};    // first person is what the eyes show (first_person_shown)
 std::atomic<int> g_combat_override{-1};
+std::atomic<bool> g_battle_wanted{false};  // set_battle_signal_wanted
 std::atomic<std::uint64_t> g_pad_toggles{0};
 
 // Game thread state.
@@ -1071,8 +1072,10 @@ void tick(bool stereo, float delta_seconds) {
 
     // Battle: third person for its duration, the default mode afterwards.
     // The battle signal is read whatever first person does: the camera modes use it too
-    // ([camera] combat).
-    g.in_battle = (s.fp_available.load() && s.auto_combat.load()) || s.combat_level.load() ? combat_now() : false;
+    // ([camera] combat), and [stereo] scripted_pitch (set_battle_signal_wanted).
+    const bool signal_wanted = (s.fp_available.load() && s.auto_combat.load()) || s.combat_level.load() ||
+                               g_battle_wanted.load(std::memory_order_relaxed);
+    g.in_battle = signal_wanted ? combat_now() : false;
     const bool combat = s.fp_available.load() && s.auto_combat.load() && g.in_battle;
 #if FF7VR_ENGINE_WITH_RENDER
     render::SetBattleActive(g.in_battle);  // HUD panel size in battles ([ui] battle_size): the battle itself, whatever first person does
@@ -1307,6 +1310,8 @@ bool adjust_camera(FRotator& rotation, FVector& location, bool decoupled, bool& 
 }
 
 bool scripted_camera() { return g.cam_kind == 0 && g.cam_t >= 1.0f; }
+void set_battle_signal_wanted(bool wanted) { g_battle_wanted.store(wanted, std::memory_order_relaxed); }
+bool in_battle() { return g.in_battle; }
 
 void request_toggle() { ++g_toggle_requests; }
 

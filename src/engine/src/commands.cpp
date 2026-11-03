@@ -11,6 +11,7 @@
 //   stereo head <yaw> [pitch]     fixed head rotation in degrees, left / up positive (built-in fixed host)
 //   stereo scale <f>              world scale
 //   stereo pitch <0|1>            decoupled pitch
+//   stereo scripted <0|1>         scripted shots keep the camera's pitch (with decoupled pitch, outside battles)
 //   stereo positional <0|1>
 //   stereo lightfix <0|1>         light sort-key fix (patch applied while stereo renders)
 //   stereo log <n>                log the eye cameras of the next n stereo frames
@@ -203,6 +204,10 @@ std::string stereo_command(const std::vector<std::string>& a) {
         s.decouple_pitch = a[2] == "1";
         return std::format("ok decoupled_pitch {}", s.decouple_pitch.load() ? 1 : 0);
     }
+    if (c == "scripted" && a.size() == 3) {
+        s.scripted_pitch = a[2] == "1";
+        return std::format("ok scripted_pitch {}", s.scripted_pitch.load() ? 1 : 0);
+    }
     if (c == "positional" && a.size() == 3) {
         s.positional = a[2] == "1";
         return std::format("ok positional {}", s.positional.load() ? 1 : 0);
@@ -291,7 +296,7 @@ std::string stereo_command(const std::vector<std::string>& a) {
         s.swap_rects = a[2] == "1";
         return std::format("ok swap_rects {}", s.swap_rects.load() ? 1 : 0);
     }
-    return "err unknown stereo command (status|views|on|off|mirror|eye|fov|ipd|motion|scale|pitch|positional|lightfix|log)";
+    return "err unknown stereo command (status|views|on|off|mirror|eye|fov|ipd|motion|scale|pitch|scripted|positional|lightfix|log)";
 }
 
 std::string cvar_command(const std::vector<std::string>& a) {

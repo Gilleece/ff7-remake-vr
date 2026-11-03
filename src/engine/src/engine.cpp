@@ -331,6 +331,7 @@ bool start(const StartupContext& ctx) {
         device::Settings& s = device::settings();
         s.world_scale = static_cast<float>(cfg.get_float("stereo", "world_scale", 1.0));
         s.decouple_pitch = cfg.get_bool("stereo", "decoupled_pitch", true);
+        s.scripted_pitch = cfg.get_bool("stereo", "scripted_pitch", true);
         s.positional = cfg.get_bool("stereo", "positional", true);
         mirror::Mode mode{};
         if (mirror::parse_mode(cfg.get_string("stereo", "mirror", "crop"), mode)) s.mirror = static_cast<int>(mode);

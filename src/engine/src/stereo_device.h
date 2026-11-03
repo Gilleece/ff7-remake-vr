@@ -24,6 +24,10 @@ namespace ff7vr::engine::device {
 struct Settings {
     std::atomic<float> world_scale{1.0f};      // multiplies the world's WorldToMeters (head motion, IPD)
     std::atomic<bool> decouple_pitch{true};    // drop the game camera's pitch and roll
+    // [stereo] scripted_pitch (with decoupled pitch): a scripted shot of the game's own camera
+    // outside a battle keeps the camera's pitch, so it points where the game frames it; the
+    // roll is still dropped.
+    std::atomic<bool> scripted_pitch{true};
     std::atomic<bool> positional{true};        // apply head position (false: rotation and IPD only)
     std::atomic<int> mirror{static_cast<int>(mirror::Mode::Crop)};
     std::atomic<int> log_frames{0};            // log the eye cameras of the next N stereo frames

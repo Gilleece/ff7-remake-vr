@@ -121,6 +121,8 @@ struct GameState {
     double longest_hold_s = 0;
     std::uint64_t held_frames = 0;
     std::uint64_t unusable_views = 0;  // frames whose views from the host were not usable (kept the last good ones)
+    bool scripted_tilt = false;        // this frame a scripted shot keeps the camera's pitch ([stereo] scripted_pitch)
+    std::uint64_t scripted_tilts = 0;  // such shots so far
     int logged_order = 0;
     // eye cameras built this Tick (CalculateStereoViewOffset), for the late update
     math::EyeCameraInput cam_in[2]{};
@@ -432,12 +434,35 @@ void CalculateStereoViewOffset(void*, EStereoscopicPass pass, FRotator* rotation
     FRotator base_rot = game_rot;
     FVector base_loc = game_loc;
     bool force_decouple = false;
-    player::adjust_camera(base_rot, base_loc, s.decouple_pitch.load(), force_decouple);
+    const bool decoupled = s.decouple_pitch.load();
+    player::adjust_camera(base_rot, base_loc, decoupled, force_decouple);
+    // [stereo] scripted_pitch: a scripted shot of the game's own camera (a conversation, a
+    // scripted move, a cutscene shown in 3D) is framed by its pitch; with the pitch dropped
+    // the player looks past the action and has to search for it. Such a shot keeps the
+    // camera's pitch. Its roll is dropped as before (roll never changes where the camera
+    // points), and the follow camera and the camera modes stay level. Not in a battle: there
+    // the game's camera frames the enemies, misses the character often and pitches all the
+    // time, and it would tilt the player's head several times per fight.
+    const bool scripted_pitch = s.scripted_pitch.load();
+    player::set_battle_signal_wanted(scripted_pitch);
+    const bool scripted_tilt = scripted_pitch && decoupled && !force_decouple && player::scripted_camera() && !player::in_battle();
+    if (scripted_tilt) base_rot.Roll = 0.0f;
+    if (e == 0 && scripted_tilt != g.scripted_tilt) {
+        g.scripted_tilt = scripted_tilt;
+        if (scripted_tilt) ++g.scripted_tilts;
+        try {
+            if (scripted_tilt)
+                log::info("stereo: scripted shot {}: the camera's pitch ({:.1f} deg) is applied to the eyes", g.scripted_tilts, base_rot.Pitch);
+            else
+                log::info("stereo: scripted shot {} ended: the view is level again", g.scripted_tilts);
+        } catch (...) {
+        }
+    }
     math::EyeCameraInput in;
     in.camera_rotation = base_rot;
     in.camera_location = base_loc;
     in.units_per_metre = static_cast<double>(world_to_meters > 0 ? world_to_meters : 100.0f) * s.world_scale.load();
-    in.decouple_pitch = s.decouple_pitch.load() || force_decouple;
+    in.decouple_pitch = (decoupled && !scripted_tilt) || force_decouple;
     in.positional = s.positional.load();
     in.eye = g.views[e].pose;
     in.head = g.frame.head;
@@ -1250,7 +1275,7 @@ std::string status() {
     const std::uint64_t v = g_rt_size.load();
     std::string host_desc = g_host.load() == g_fixed && g_fixed ? g_fixed->describe() : std::string("host: render module");
     return std::format(
-        "wanted={} active={} eye={}x{} want={}x{} rt_texture={}x{} fmt={} mirror={} scale={:.2f} decouple_pitch={} positional={} "
+        "wanted={} active={} eye={}x{} want={}x{} rt_texture={}x{} fmt={} mirror={} scale={:.2f} decouple_pitch={} scripted_pitch={} scripted_tilt={} scripted_tilts={} positional={} "
         "ticks={} stereo_draws={} transitions={} view_offset_calls={} proj_calls={} rect_calls={} render_texture_calls={} "
         "rt_size_calls={} reallocs={} frame_end_queued={} frame_end_run={} frame_end_failed={} fifo_dropped={} held_frames={} unusable_views={} "
         "holds={} holds_expired={} longest_hold={:.1f}s hold_target_seconds={} screen_keeps_target={} screen={} screen_phases={} screen_frames={} screen_fov={:.1f} "
@@ -1258,7 +1283,8 @@ std::string status() {
         g_wanted.load() ? 1 : 0, g_active.load() ? 1 : 0, unpack_w(v), unpack_h(v), g.want_w, g.want_h, g_count.rt_tex_w.load(),
         g_count.rt_tex_h.load(),
         g_count.rt_tex_format.load(), mirror::to_string(static_cast<mirror::Mode>(g_settings.mirror.load())),
-        g_settings.world_scale.load(), g_settings.decouple_pitch.load() ? 1 : 0, g_settings.positional.load() ? 1 : 0, g.ticks,
+        g_settings.world_scale.load(), g_settings.decouple_pitch.load() ? 1 : 0, g_settings.scripted_pitch.load() ? 1 : 0,
+        g.scripted_tilt ? 1 : 0, g.scripted_tilts, g_settings.positional.load() ? 1 : 0, g.ticks,
         g.stereo_draws, g.transitions, g_count.view_offset.load(), g_count.projection.load(), g_count.adjust_rect.load(),
         g_count.render_texture.load(), g_count.calc_rt_size.load(), g_count.realloc_yes.load(), g_count.frame_end_queued.load(),
         g_count.frame_end_run.load(), g_count.frame_end_failed.load(), g_fifo_dropped.load(), g.held_frames, g.unusable_views,

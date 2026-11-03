@@ -192,6 +192,15 @@ Choices for a seated player in a third-person game:
   tilts the whole world against the player's inner ear. With decoupled pitch only the game
   camera's yaw turns the player; looking up and down is done with the head, and the
   horizon stays level whatever the game camera does. Its position is still the game's.
+- **Scripted shots keep the camera's pitch (`scripted_pitch`, default on).** A shot of the
+  game's own camera that does not follow the character (a conversation, a scripted move, a
+  cutscene shown in 3D) is framed by its pitch: with the pitch dropped the player looks past
+  the action and has to search for it. Such a shot keeps the camera's pitch; its roll is
+  still dropped (roll does not change where the camera points), and the follow camera and
+  the camera modes stay level. Never in a battle: there the game's camera frames the enemies,
+  misses the character several times per fight and pitches all the time. The pitch comes and
+  goes with the shot (`player::scripted_camera`; a camera mode's move counts as not scripted)
+  as a snap, like the camera modes' cuts; `stereo: scripted shot N ...` logs each one.
 - **Head position is applied (default on)**, scaled by the world's `WorldToMeters` (100)
   and `world_scale`, so leaning in moves the view the way a seated player expects.
   `positional = 0` keeps head rotation and the IPD only.
@@ -332,7 +341,7 @@ location by the mode's eye base:
 | third person, level boom (`[camera] boom = level`, default) | where the game camera would be at zero pitch around a pivot `pivot_height` above the pawn's location: the camera's offset from the pivot taken in the camera's frame and put back with its yaw only (`math::level_boom`) | decoupled pitch on, follow camera |
 | third person, game boom (`boom = game`) | the game camera's location (the behaviour before the level boom) | always |
 | first person | the point between the character's eye bones (or its head bone) plus `head_offset` (forward, right, up in cm, turned by the game camera's yaw); if they cannot be read, the pawn's location plus `eye_offset`. The view is level and faces the game camera's yaw | first person wanted, stereo on, follow camera, no battle |
-| game camera | the game camera unchanged (decoupled pitch still levels the view) | anything else |
+| game camera | the game camera unchanged (decoupled pitch still levels the view; outside a battle `scripted_pitch` keeps the camera's pitch) | anything else |
 
 **Follow camera** means: the view target is the controlled pawn or the game's own camera
 actor (the actor named `EndCameraActor`, of the engine's class `CameraActor` exactly, the view
@@ -1058,6 +1067,7 @@ movement (not rotated by design), how it feels.
 | `host` | `render` | `render` or `fixed` (see above) |
 | `world_scale` | `1.0` | multiplies WorldToMeters for the head offset and IPD |
 | `decoupled_pitch` | `1` | drop the game camera's pitch and roll |
+| `scripted_pitch` | `1` | with decoupled pitch: a scripted shot of the game's camera outside a battle keeps the camera's pitch (roll still dropped) |
 | `positional` | `1` | apply head position |
 | `mirror` | `crop` | desktop window in stereo: `crop` (left eye, centre crop at the window's aspect), `left`, `right`, `both` (side by side, letterboxed), `off` |
 | `light_fix` | `1` | light sort-key patch while stereo renders: white blocks on skin indoors (see "Skin lighting fix"; `docs/re/engine.md` section 6) |
@@ -1142,7 +1152,7 @@ Through the dev pipe (`[dev] pipe = 1`, `tools\dev\send-input.ps1 -Pipe "<comman
 | `stereo mirror <crop\|left\|right\|both\|off>` | desktop mirror |
 | `stereo eye <w> <h>`, `stereo fov <l> <r> <u> <d>`, `stereo ipd <mm>`, `stereo motion <...>` | fixed host values |
 | `stereo head <yaw> [pitch]` | fixed host: a fixed head rotation in degrees (left and up positive), added to the motion script |
-| `stereo scale <f>`, `stereo pitch <0\|1>`, `stereo positional <0\|1>` | camera settings |
+| `stereo scale <f>`, `stereo pitch <0\|1>`, `stereo scripted <0\|1>`, `stereo positional <0\|1>` | camera settings |
 | `stereo lightfix <0\|1>` | skin lighting fix on/off (the light sort-key patch, in place while stereo renders); replies whether the patch is in place now |
 | `stereo log <n>` | log the eye cameras of the next n stereo frames |
 | `stereo bloomfix [0\|1]` | right-eye bloom fix on/off, with its counters (reduce passes seen, commands queued, draws fixed, misses) |

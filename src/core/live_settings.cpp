@@ -37,6 +37,7 @@ constexpr Default kDefaults[] = {
     {"stereo", "start_in_stereo", "1"},
     {"stereo", "world_scale", "1.0"},
     {"stereo", "decoupled_pitch", "1"},
+    {"stereo", "scripted_pitch", "1"},
     {"stereo", "positional", "1"},
     {"stereo", "mirror", "crop"},
     {"stereo", "movie_screen", "1"},

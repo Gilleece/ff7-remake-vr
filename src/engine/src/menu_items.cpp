@@ -199,6 +199,7 @@ void register_all(const Config& cfg) {
         live_settings::add(std::move(s));
     }
     live_settings::add(on_off("decoupled_pitch", "Level horizon (decoupled pitch)", kComfort + 41, "stereo", "decoupled_pitch", d.decouple_pitch));
+    live_settings::add(on_off("stereo.scripted_pitch", "Scripted shots keep the camera's tilt", kComfort + 43, "stereo", "scripted_pitch", d.scripted_pitch));
     live_settings::add(on_off("stereo.positional", "Head position moves the view", kComfort + 42, "stereo", "positional", d.positional));
     live_settings::add(on_off("head_bob", "Head bob (first person)", kComfort + 50, "first_person", "head_bob", p.head_bob));
     live_settings::add(number("first_person.steady_seconds", "Head steadiness (s)", kComfort + 51, "first_person", "steady_seconds", 0.05f, 2.0f, 0.05f, 2,
