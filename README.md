@@ -14,6 +14,11 @@ known problems and untested areas, troubleshooting, performance) are in
 
 Tested on Quest 3 and Pico 4 ultra so far, any openXR headset should work but if there's specific headsets not working let me know and I will try to address that. 
 
+New in v1.6: scripted camera shots (conversations, scripted moves) keep the game camera's
+tilt, so you look where the shot points instead of searching for it; the horizon is level
+again afterwards, and never tilts in a battle (`[stereo] scripted_pitch`, Comfort tab).
+Thanks to nana on the Flat2VR Discord for suggesting it.
+
 Known problems right now (details in `GUIDE.md`):
 
 - Screen-space reflections (puddles, wet floors, metal) are now drawn in both eyes, each eye its own (`[stereo] ssr_fix = 3`, new); checked without a headset only. `ssr_fix = 2` switches them off in both eyes if they look wrong.
@@ -69,9 +74,12 @@ Per store:
   find the game at all, set `FF7VR_GAME_DIR` to the game folder (the one that contains
   `End`).
 
-The mod has only been tested with the Steam copy so far. If the Epic or Microsoft Store
+The mod has only been tested with the Steam copy here. If the Epic or Microsoft Store
 exe is another build than the one the mod knows, the launcher says so before the start
 and the game runs without VR; please send the diagnostics (see below) so it can be added.
+One player reports the Epic Games Store copy working fine after setting
+`allow_unknown_build = 1` under `[stereo]` in `ff7vr.ini`, which lets the mod run on a
+build it does not know.
 
 If a session was interrupted or anything looks wrong in the game folder, double-click
 `restore.cmd` (harmless when nothing needs doing). Save games are not touched.
